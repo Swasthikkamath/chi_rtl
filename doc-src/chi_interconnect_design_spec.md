@@ -2,7 +2,28 @@
 title: "Configurable AMBA 5 CHI Interconnect"
 subtitle: "Design Specification"
 author: "CHI RTL project"
+date: "Baseline: Arm IHI 0050H, Issue H"
+toc-title: "Contents"
 ---
+
+```{=openxml}
+<w:p><w:pPr><w:pStyle w:val="TOCHeading"/></w:pPr>
+  <w:r><w:t xml:space="preserve">List of Tables</w:t></w:r></w:p>
+<w:p><w:r>
+  <w:fldChar w:fldCharType="begin" w:dirty="true"/>
+  <w:instrText xml:space="preserve">TOC \h \z \t "Table Caption,1"</w:instrText>
+  <w:fldChar w:fldCharType="separate"/>
+  <w:fldChar w:fldCharType="end"/>
+</w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="TOCHeading"/></w:pPr>
+  <w:r><w:t xml:space="preserve">List of Figures</w:t></w:r></w:p>
+<w:p><w:r>
+  <w:fldChar w:fldCharType="begin" w:dirty="true"/>
+  <w:instrText xml:space="preserve">TOC \h \z \t "Image Caption,1"</w:instrText>
+  <w:fldChar w:fldCharType="separate"/>
+  <w:fldChar w:fldCharType="end"/>
+</w:r></w:p>
+```
 
 # Document status
 
@@ -56,7 +77,7 @@ packed flit field by itself is carriage, not implementation.
 ## 1.3 Feature matrix
 
 | Feature | Issue H reference | Status | Actual RTL boundary |
-|---|---|---|---|
+|------------------------|------------|--------------|--------------------------------------------------|
 | REQ/RSP/SNP/DAT records and pack/unpack | B13.9, B13.10 | Implemented | Configurable packed records match the Issue H field lists and slot widths, including every documented field overlay. Opcode-dependent field legality is not policed. |
 | Fixed flit slot widths and overlays | B13.9.1--B13.9.4 | Implemented | `TxnID` 12, `ReturnTxnID`/`StashLPID` 12, `NumReq`/`Size` 6, `GroupID` 8, RSP `DBID` 12, DAT `DBID` 16, `DataSource` 8, `CCID` 2, `DataID` 2, `CacheLineID` 6, `PAS` 3 are slot widths independent of the node-side field widths. |
 | `PAS[2:0]` replacing `NS`/`NSE` | B2.9, B13.10 | Implemented | REQ and SNP carry the three-bit Physical Address Space selector and the SAM decodes its non-secure sense. |
@@ -104,11 +125,13 @@ packed flit field by itself is carriage, not implementation.
 | CHI MMIO configuration | Project-defined | Partial | The HN-I recognizes a 4 KiB window and simple read and write offsets. Security, validation and quiescent commit are incomplete. |
 | SVA | Sections above | Partial | Bound local safety, stability and protocol-field properties with functional covers. There is no full protocol checker and no proof closure. |
 
-# 2 Architecture and hierarchy
+: Table 1.1 Feature status against Arm IHI 0050H
 
-## 2.1 Architecture
+# 2 Architecture
 
-![Top-level architecture. The vertical axis is the request path.](figures/chi_architecture.png){width=100%}
+## 2.1 Architecture at a glance
+
+![Fig 2.1 Top-level architecture. The vertical axis is the request path.](figures/chi_architecture.png){width=100%}
 
 Read the figure top to bottom as the life of a request. A Requester drives a
 REQ flit onto its `chi_if`. The `chi_link_port` for that port converts the
@@ -143,9 +166,210 @@ address, which is what B3.1 describes when it says Requesters must have a
 System Address Map. A single `chi_cfg_slave` broadcasts region updates to all
 of them so they stay consistent.
 
-### Home Node internal architecture
+The rest of this chapter takes those pieces in the order a request meets
+them: the node population and how it is numbered (Section 2.2), the four
+channels a node port presents (Section 2.3), the four layers the design is
+built from (Section 2.4), the interior of the coherent Home because that is
+where nearly all protocol state lives (Section 2.5), the configuration and
+status plane that sits beside all of it (Section 2.6), and then the RTL
+hierarchy and the handshake rules the whole design obeys (Sections 2.7 and
+2.8).
 
-![chi_hnf_top internal structure. One request is in flight at a time.](figures/chi_hnf.png){width=100%}
+## 2.2 Node classes and the node ordinal space
+
+Eight node classes exist. Five of them are external: they appear as a
+`chi_if` port array on `chi_interconnect_top` and are driven by logic outside
+this repository. Three are internal: they are protocol endpoints built inside
+the fabric, reached over the internal networks, and have no pins.
+
+| Node class | Count field | External port | Ordinals | Role in this design |
+|--------------|--------------|-------------|----------|-------------------------------------|
+| RN-F | `numRnf` | `rnf[]` | 0--3 | Fully coherent Requester. Issues the coherent read, write and CMO families, receives snoops, and is the only class the snoop filter tracks. |
+| RN-D | `numRnd` | `rnd[]` | none | Requester that is DVM capable but has no coherent cache. Receives `SnpDVMOp` from the MN, and no other snoop. |
+| RN-I | `numRni` | `rni[]` | 4 | I/O coherent Requester. Issues the `ReadOnce` and `WriteUnique` families, and is never snooped. |
+| SN-F | `numSnf` | `snf[]` | 5--6 | Subordinate for coherent memory. Terminates the downstream reads and writes a Home issues, and is the target of `PrefetchTgt`. |
+| SN-I | `numSni` | `sni[]` | 7 | Subordinate for peripheral space. Same channel set as SN-F; the distinction is which SAM region kind selects it. |
+| HN-F | `numHnf` | internal | 8--11 | Coherent Home. Serialization point, snoop filter, POS, retry credits and the offload engines. Section 2.5 and Section 9. |
+| HN-I | `numHni` | internal | 12 | Non-coherent Home. Relays to SN-I through its own SAM and hosts the CHI MMIO configuration window. |
+| MN | `numMn` | internal | 13 | Misc Node. Sequences DVM operations to the DVM-capable Requesters. |
+
+: Table 2.1 Node classes, their count fields, and their ordinals in the default configuration
+
+All eight classes share one flat ordinal space. The ordinal of a node is its
+index into the concatenation RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I, MN, in
+that order, which is what `OFF_RNF` through `OFF_MN` compute in
+`chi_interconnect_top`. That single numbering is used for three different
+things, and they are worth separating:
+
+- It indexes the internal networks. Every channel array inside the fabric is
+  `[NUM_NODES-1:0]`, so an ordinal is also a transport port number.
+- It indexes `NODE_IDS`, the parameter that gives each node its CHI `NodeID`.
+  Nothing in the protocol requires the two numbering schemes to agree, and
+  B3.2 makes NodeID assignment implementation defined, so the ordinal is a
+  fabric-internal name and the NodeID is the protocol-visible one.
+- It indexes `linkUp`, `linkParityError` and `linkCreditError`. Since the
+  three internal classes have no link, the top six bits of those vectors in
+  the default configuration are constantly zero, and the smoke run in
+  Section 12.7 asserts exactly that.
+
+The default configuration is 4 RN-F, 1 RN-I, 2 SN-F, 1 SN-I, 4 HN-F, 1 HN-I
+and 1 MN: fourteen nodes, of which eight have external links.
+
+## 2.3 The four channels
+
+CHI defines four channels, and this design keeps them physically separate
+from the node pins all the way to the protocol endpoints: separate valid,
+separate ready, separate flit storage, separate arbitration and separate
+credit accounting. Nothing is time-multiplexed onto a shared bus anywhere in
+the fabric.
+
+| Channel | At a Requester port | At a Subordinate port | What it carries | Default flit width |
+|-------|-----------|-----------|--------------------------------|------|
+| REQ | node to interconnect | interconnect to node | Requests: opcode, address, `Size`, `TxnID`, `SrcID`, `TgtID`, `PAS`, QoS, and the stash, DVM and atomic qualifiers. | 153 |
+| RSP | both directions | both directions | Responses without data: completions, `DBIDResp`, `RetryAck`, `PCrdGrant`, `ReadReceipt`, snoop responses. | 79 |
+| SNP | interconnect to node only | not present | Snoops, including the forwarding and stash forms and `SnpDVMOp`. A Subordinate is never snooped. | 106 |
+| DAT | both directions | both directions | Data, with `BE`, `DataID`, `CCID`, and the optional `DataCheck`, `Poison` and `RSVDC` fields. | 437 |
+
+: Table 2.2 The four channels, their direction at each port type and their default flit widths
+
+The widths are the derived values for the default configuration and come from
+the width functions in `chi_pkg`; Section 3.2.1 gives the formula and the cost
+of each parameter that feeds it.
+
+The separation is not cosmetic. A response must be able to make progress
+while a request is blocked, or the protocol deadlocks: a Home that cannot
+issue `Comp` because the REQ network ahead of it is full, on a REQ network
+that cannot drain because the Requester is waiting for that `Comp`, is a
+cycle with no escape. Four independent networks break that cycle
+structurally, which is why the transport layer in Section 2.4.3 replicates
+its whole datapath four times rather than sharing one wider one. The same
+reasoning applies one level down at the link layer, where each channel has
+its own L-Credit pool of `lcrdDepth` entries and its own activation FSM, so
+one starved channel cannot stall another.
+
+SNP asymmetry is the one place where the port types differ in channel count.
+A Requester port has six channel instances, a Subordinate port five.
+Section 4.1 explains why both still use the same `chi_if` type.
+
+## 2.4 The four layers
+
+Every block in the design belongs to one of four layers. The layer boundaries
+are also the points at which the representation of a transaction changes,
+which is the useful way to read the hierarchy.
+
+| Layer | Modules | Instances | State it owns |
+|----------|-----------------------------|------------------|---------------------------|
+| Link | `chi_link_port`, `chi_link_rx`, `chi_link_tx`, `chi_lcrd_mgr`, `chi_link_fsm` | 8 ports | L-Credit pools, receive buffers, activation state, parity |
+| Address decode | `chi_sam`, `chi_hn_hash`, `chi_prefetch_map` | 5 Requester-side, 1 in the HN-I | Region table, hash configuration |
+| Transport | `chi_noc_top`, and `chi_xbar`, `chi_ring` or `chi_mesh` | 1, four networks wide | Per-hop flit registers, arbiter age and round-robin state |
+| Protocol | `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm` | 4, 1, 1 | POS, snoop filter, retry records, exclusive monitors, transaction FSM state |
+
+: Table 2.3 The four layers, their modules, their instance counts in the default configuration, and the state each owns
+
+### 2.4.1 Link layer
+
+The link layer is the only part of the design that touches CHI pins, and its
+job is to convert between two handshakes that do not resemble each other.
+
+On the CHI side a transmitter may send a flit only if it holds an L-Credit
+that the receiver previously granted on `*LCRDV`, and there is no ready
+signal to push back with. On the fabric side everything is ready/valid. So
+each `chi_link_port` contains, per channel and per direction, one activation
+FSM (`chi_link_fsm`, with STOP, ACTIVATE, RUN and DEACTIVATE states) plus
+either a receiver or a transmitter:
+
+- `chi_link_rx` buffers an incoming flit, checks its parity, and returns an
+  L-Credit on `*LCRDV` when the buffer slot frees. The credit it returns is
+  the node's permission to send the next flit, so the depth of that buffer
+  and the credit pool are the same number, `lcrdDepth`.
+- `chi_link_tx` holds the credit pool for its direction in `chi_lcrd_mgr`,
+  generates per-byte flit parity, and will not assert `*FLITV` unless the
+  link is in RUN and a credit is available. It also detects pool overflow and
+  underflow, which is what raises `linkCreditError`.
+
+Two consequences of this structure show up elsewhere in the document. First,
+because the credit pool is per channel per direction, `lcrdDepth` multiplies
+by roughly the number of channels times the number of ports when you size
+it; Section 3.2.3 does that arithmetic. Second, because activation is per
+channel, a link is "up" only when every channel in both directions has
+reached RUN, which is the condition `linkUp` reports and the condition the
+smoke run in Section 12.7 waits for.
+
+### 2.4.2 Address decode
+
+A REQ flit arrives carrying an address and no target. Something has to turn
+that address into a `TgtID` before the transport layer can route it, and
+B3.1 puts that duty on the Requester side: every Requester must have a
+System Address Map. This design follows that literally, so each of the five
+Requester ports has its own `chi_sam` instance rather than sharing a central
+decoder.
+
+`chi_sam` walks an ordered region table, takes the first matching region,
+and applies the region's security rule against the incoming `PAS`. What
+happens next depends on the region kind:
+
+- A plain region names one target directly.
+- An interleaved coherent region hands the address to `chi_hn_hash`, which
+  folds address bits above `hnHashShift` with XOR and selects one of the
+  HN-F instances, so that consecutive `interleaveGranule` blocks land on
+  different Homes.
+- A `PrefetchTgt` request goes to `chi_prefetch_map` instead, which maps the
+  address straight to an SN-F. The Home is bypassed entirely, because a
+  prefetch hint must not be allowed to consume a Home resource that a real
+  transaction needs.
+
+The HN-I carries a sixth `chi_sam` instance, used for the second decode from
+the Home to an SN-I. Section 6 covers the region table and a worked hash
+example.
+
+### 2.4.3 Transport
+
+`chi_noc_top` is the transport layer and presents the same interface
+regardless of which topology was elaborated: `NUM_NODES` ingress ports and
+`NUM_NODES` egress ports, on each of four independent networks, all
+ready/valid. One of three topologies is built:
+
+- `chi_xbar` gives every ingress a path to every egress, with per-output
+  per-channel arbitration that considers QoS first, then age, then
+  round-robin. Latency is one cycle and there is no head-of-line blocking
+  between outputs, but the crosspoint count grows with the square of the
+  node count.
+- `chi_ring` places the nodes on a bidirectional ring, routes each flit the
+  shorter way with a clockwise tie-break, and alternates between local
+  injection and transit traffic so an injecting node cannot starve traffic
+  passing through it.
+- `chi_mesh` builds a `meshX` by `meshY` grid of crosspoints, each holding
+  one `chi_router` per channel, with `numDevPortsPerXp` device ports per
+  crosspoint. Routing is deterministic XY: all X hops first, then all Y hops,
+  which is what makes it deadlock free without needing virtual channels for
+  routing.
+
+What the topologies have in common matters as much as how they differ. All
+three are ready/valid with registered outputs, and none of them carries CHI
+L-Credits internally: credits terminate at the node ports. Inside the fabric
+backpressure is a ready signal, which is why Section 2.8's handshake rules
+are stated as a design constraint rather than a coding preference.
+
+### 2.4.4 Protocol endpoints
+
+The protocol layer is where a transaction stops being a flit in transit and
+becomes state. There are three endpoint types:
+
+- `chi_hnf_top`, the coherent Home, is the serialization point for a line.
+  It owns the snoop filter, the POS, the retry records and every engine that
+  acts on a coherent transaction. Section 2.5 shows its interior.
+- `chi_hni_top`, the non-coherent Home, has no coherence state at all. It
+  decodes the address a second time through its own `chi_sam`, relays the
+  transaction to an SN-I, and recognises the CHI MMIO configuration window
+  described in Section 7.2. It also accepts and discards `PrefetchTgt`
+  without responding, for the same reason the HN-F does.
+- `chi_mn_dvm`, the Misc Node, is the DVM sequencer. It unicasts `SnpDVMOp`
+  to each DVM-capable Requester in turn and collects the responses before
+  completing the operation.
+
+## 2.5 Home Node internal architecture
+
+![Fig 2.2 `chi_hnf_top` internal structure. One request is in flight at a time.](figures/chi_hnf.png){width=100%}
 
 The coherent Home is where nearly all protocol state lives, so it is shown
 separately. A request is either admitted into `chi_pos` or handed to
@@ -158,23 +382,51 @@ DWT and stash controllers when the transaction can be offloaded so that data
 bypasses the Home, and the atomic, cache-maintenance and exclusive-monitor
 blocks for operations the Home performs itself.
 
+The three offload engines are worth separating from the rest, because they
+exist to keep data out of the Home rather than to add behaviour to it.
+`chi_dmt_ctrl` names the Requester in `ReturnNID` and `ReturnTxnID` on the
+downstream read so the Subordinate sends `CompData` straight back to the
+Requester. `chi_dwt_ctrl` sets `DoDWT` on the downstream write so the
+Subordinate returns `DBIDResp` directly to the Requester. `chi_dct_ctrl`
+turns a snoop into a forwarding snoop so a peer cache supplies the data. In
+all three cases the Home still issues the response it alone owes, and the
+data never crosses it. Sections 8.1 to 8.3 trace one example of each.
+
 The single-FSM structure is the dominant simplification in this design. The
 POS holds `posEntries` entries and detects hazards across all of them, but
 only one transaction advances at a time, so POS depth currently buys hazard
 visibility rather than throughput. Section 9.1 covers the consequences.
 
-Figures are generated from Graphviz sources in `doc-src/figures/`; `make doc`
-rebuilds them.
+## 2.6 Configuration and status plane
 
-## 2.2 RTL hierarchy
+Beside the datapath there is a narrow plane that configures it and reports on
+it, and it is deliberately kept out of the transaction path.
+
+Configuration enters through one `chi_cfg_slave`, selected by
+`cfgAccess == CFG_APB`, which presents the APB4 register map in Section 7.1.
+It stages an edited region into shadow registers and commits it to every
+`chi_sam` at once when the fabric is quiescent, so no Requester can decode
+half of an old map and half of a new one. When `cfgAccess` is
+`CFG_PARAM_ONLY` the block is not built and the region table is whatever the
+`REGION_*` parameters set at elaboration; the APB pins are then tied off and
+a transfer attempted on them raises `PSLVERR`.
+
+Status leaves through the three per-ordinal vectors already described:
+`linkUp`, `linkParityError` and `linkCreditError`. They are the only
+observability the design exports, and they are all link-layer facts. There is
+no transaction counter, no error-cause register and no interrupt.
+
+## 2.7 RTL hierarchy
 
 ```
 chi_interconnect_top
 ├── chi_cfg_check                            (elaboration assertions)
 ├── rnf_ports[*] / rnd_ports[*] / rni_ports[*] : chi_link_port
 │   ├── chi_link_rx  x3   (REQ, RSP, DAT from the node)
-│   ├── chi_link_tx  x3   (RSP, SNP, DAT to the node)
-│   └── chi_link_fsm x6   (one per channel per direction)
+│   │   └── chi_link_fsm      (receive direction activation)
+│   └── chi_link_tx  x3   (RSP, SNP, DAT to the node)
+│       ├── chi_lcrd_mgr      (credit pool, lcrdDepth deep)
+│       └── chi_link_fsm      (transmit direction activation)
 ├── snf_ports[*] / sni_ports[*] : chi_link_port
 │   ├── chi_link_rx  x2   (RSP, DAT from the node)
 │   └── chi_link_tx  x3   (REQ, RSP, DAT to the node)
@@ -208,10 +460,11 @@ chi_interconnect_top
                 └── chi_vc_arb[*]
 ```
 
-`chi_lcrd_mgr` is used by `chi_link_tx`. Every link block is now inside the
-product hierarchy; none of them is harness-only.
+Every link block is inside the product hierarchy; none of them is
+harness-only. The figures above are generated from Graphviz sources in
+`doc-src/figures/`, which `make doc` rebuilds.
 
-## 2.3 Handshake discipline
+## 2.8 Handshake discipline
 
 Every ready/valid channel in the design obeys two rules, and the RTL is
 structured so that a linter can see both:
@@ -238,7 +491,7 @@ still apply. This table states what each field does; Section 3.2 states why
 it is a parameter at all and what choosing it wrong costs.
 
 | Field | Default | Accepted by `chi_cfg_check` | Effect |
-|---|---:|---|---|
+|----------------|---------|----------------------|-----------------------------------------------------|
 | `numRnf` | 4 | 0 or greater | External RN-F interfaces and Home sharer-vector width. |
 | `numRnd` | 0 | 0 or greater | External RN-D interfaces. |
 | `numRni` | 1 | 0 or greater | External RN-I interfaces. |
@@ -287,6 +540,8 @@ it is a parameter at all and what choosing it wrong costs.
 | `exclEn` | 1 | if 1, a Home and monitors must exist | Enables exclusive monitors. |
 | `cfgAccess` | `CFG_PARAM_ONLY` | enum; CHI MMIO also requires HN-I | Selects no runtime writes, APB, or CHI MMIO. |
 
+: Table 3.1 `chi_cfg_t` fields, defaults and elaboration bounds
+
 Because MECID and StreamID share one REQ field of width `Max(E,R)`, only one
 of MEC and RME-CDA can be carried on a given interface. Elaboration rejects
 both being enabled.
@@ -327,7 +582,7 @@ every flit on that channel, and the symptom appears as corrupted addresses or
 impossible opcodes far from the cause.
 
 | `chi_cfg_t` field | Declared CHI property | What a mismatch between the two ends produces |
-|---|---|---|
+|--------------------|----------------------|----------------------------------------------------------|
 | `dataW` | B16.1.13 `Data_Width` | Every DAT flit is the wrong length; data, byte enables and check bits all shift. |
 | `addrW` | B16.1.11 `Req_Addr_Width` | REQ and SNP lengths differ; addresses decode to the wrong region and the SAM targets the wrong node. |
 | `nodeIdW` | B16.1.12 `NodeID_Width` | `TgtID` and `SrcID` misalign on all four channels; responses return to the wrong Requester. |
@@ -348,6 +603,8 @@ impossible opcodes far from the cause.
 | `multiReqEn` | B16.1.39 `MultiReq_Support` | A multi-request transaction is treated as a single request. |
 | `retryRecords` | B16.1.38 `Retry_Support`, with B16.1.34 `Num_RP_REQ` and B16.1.35 `Shared_Credits_REQ` | The P-Credit pool the Requester believes exists does not match what the Home can track. |
 
+: Table 3.2 Configuration fields fixed by a declared CHI interface property
+
 `dwtEn` has no row, and the reason is instructive. There is no declared
 property for Direct Write Transfer. It is requested per transaction through
 the `DoDWT` field of the REQ flit (B13.10.24), so a Home that does not
@@ -360,7 +617,7 @@ The following are exact deltas against the default configuration, whose
 packed widths are REQ 153, RSP 79, SNP 106 and DAT 437 bits:
 
 | Change from the default | REQ | RSP | SNP | DAT | Total |
-|---|---:|---:|---:|---:|---:|
+|---------------------------------------------|-----------|-----------|-----------|-----------|-----------|
 | `nodeIdW` 11 to 16 | +15 | +10 | +10 | +15 | +50 |
 | `nodeIdW` 11 to 7 | -12 | -8 | -8 | -12 | -40 |
 | `addrW` 48 to 52 | +4 | 0 | +4 | 0 | +8 |
@@ -374,6 +631,8 @@ packed widths are REQ 153, RSP 79, SNP 106 and DAT 437 bits:
 | `pbhaEn` | +4 | 0 | 0 | 0 | +4 |
 | `dataCheckEn` off | 0 | 0 | 0 | -32 | -32 |
 | `poisonEn` off | 0 | 0 | 0 | -4 | -4 |
+
+: Table 3.3 Flit width cost of moving each parameter off its default
 
 Those totals are per flit, and every flit width is replicated across every
 port, every crosspoint and every receive buffer, so the cost multiplies by
@@ -399,7 +658,7 @@ Everything below is configurable because the specification left the choice
 open, not because interoperability demands it.
 
 | Field | Why it is a parameter | What you trade |
-|---|---|---|
+|----------------|----------------------------------------|--------------------------------------------|
 | `numRnf`, `numRnd`, `numRni`, `numSnf`, `numSni` | The system population is not a protocol property. | Port count, and for `numRnf` the Home sharer-vector width and snoop walk length. |
 | `numHnf`, `numHni`, `numMn` | Home count sets coherent throughput and interleaving. | More Homes means more parallelism and more directory area. |
 | `topology` | CHI specifies no transport. Any network that delivers flits is legal. | See Section 5: crossbar for latency, ring for area, mesh for scale. |
@@ -416,6 +675,8 @@ open, not because interoperability demands it.
 | `NUM_REGIONS` | SAM depth follows the system memory map. | Region table area against map flexibility. |
 | `AGE_LIMIT` | Arbitration policy is unspecified. | Starvation bound against fairness overhead. |
 | `NODE_IDS`, `PLACEMENTS` | B3.2 assigns this to the implementation. | Physical placement against route length. Must be collision-free. |
+
+: Table 3.4 Configuration fields the specification leaves implementation defined
 
 ### 3.2.3 Choosing the resource depths
 
@@ -471,7 +732,7 @@ early, but no RTL consumes them as behaviour. They are configuration surface
 reserved for later work, not features.
 
 | Field | Current status |
-|---|---|
+|--------------------|--------------------------------------------------------------------------------|
 | `numIfPerNode` | Must be exactly 1. Multiple interfaces per node are rejected, consistent with the single-`chi_if` decision in Section 4.1. |
 | `replChannels` | Must be exactly 1. Channel replication is rejected. |
 | `multiReqEn` | Checked only. `MultiReq` and `CacheLineID` are carried in the flit but no multi-request behaviour exists. |
@@ -479,10 +740,12 @@ reserved for later work, not features.
 | `pbhaEn` | Adds the field to REQ. The attributes are carried, never acted on. |
 | `mpamEn`, `mpamW` | The MPAM bus is carried end to end but no partition is enforced. |
 
+: Table 3.5 Configuration fields accepted but not yet honoured
+
 ## 3.3 Top parameters and illegal combinations
 
 | Parameter | Default and legal rule | Effect |
-|---|---|---|
+|--------------------|--------------------------------------|------------------------------------------|
 | `AGE_LIMIT` | 16; positive | QoS arbiter starvation promotion threshold. |
 | `NUM_REGIONS` | 4; positive | SAM table depth and select width. |
 | `NUM_NODES` | sum of all node counts; must equal that sum | Fabric endpoint count and the index space for the link status outputs. |
@@ -492,6 +755,8 @@ reserved for later work, not features.
 | `CFG_MMIO_BASE` | top 4 KiB of the address space | Must be 4 KiB aligned in CHI-MMIO mode. |
 | `USE_DEFAULT_REGIONS` | 1 | Selects the default map in Section 6. |
 | `REGION_*` | arrays of `NUM_REGIONS` | Custom base, inclusive limit, target and attributes. |
+
+: Table 3.6 Top-level parameters and the combinations refused at elaboration
 
 For the mesh, `meshX*meshY*numDevPortsPerXp >= NUM_NODES`,
 `deviceIdWidth(CFG) > 0`, placement coordinates and ports must fit, NodeIDs
@@ -503,13 +768,15 @@ subordinate checks are essential.
 ## 3.4 Top-level ports beyond the interfaces
 
 | Port | Direction | Width | Purpose |
-|---|---|---:|---|
+|------------------|-----------|----------------|-------------------------------------------------------|
 | `clk`, `resetn` | in | 1 | Single clock and synchronous active-low reset. |
 | `PADDR`, `PSEL`, `PENABLE`, `PWRITE`, `PWDATA`, `PSTRB`, `PPROT` | in | 12, 1, 1, 1, 32, 4, 3 | APB4 configuration request. |
 | `PRDATA`, `PREADY`, `PSLVERR` | out | 32, 1, 1 | APB4 configuration response. |
 | `linkUp` | out | `NUM_NODES` | Set while any receive channel of that node's link is in RUN. |
 | `linkParityError` | out | `NUM_NODES` | Flit parity mismatch observed on that node's link. |
 | `linkCreditError` | out | `NUM_NODES` | Receive-buffer overflow or L-Credit overflow or underflow on that node's link. |
+
+: Table 3.7 Top-level ports outside the node interfaces
 
 Bits of the three status vectors that correspond to the internal HN-F, HN-I
 and MN ordinals read zero, because those endpoints have no external link.
@@ -535,7 +802,7 @@ Let `RW=reqFlitWidth(CFG)`, `SW=rspFlitWidth(CFG)`, `NW=snpFlitWidth(CFG)`,
 `DW=datFlitWidth(CFG)` and `PW(W)=ceil(W/8)`.
 
 | Signal group | Width | Driver | Consumer | Applicability |
-|---|---:|---|---|---|
+|----------------------|----------------|--------------|--------------|----------------------------------|
 | `CLK`, `RESETn` | 1 each | IC | Node | All classes; mirrors `clk` and the synchronous active-low `resetn`. |
 | `TXLINKACTIVEREQ` | 1 | Node | IC | All classes; drives the node-to-IC link FSM out of STOP. |
 | `TXLINKACTIVEACK` | 1 | IC | Node | All classes; asserted once the IC receivers have credits to advertise. |
@@ -565,6 +832,8 @@ Let `RW=reqFlitWidth(CFG)`, `SW=rspFlitWidth(CFG)`, `NW=snpFlitWidth(CFG)`,
 | `TXSNPFLITCHK`, `RXSNPFLITCHK` | `PW(NW)` | Same side as the flit | Opposite side | Live per-byte flit parity when `parityEn` is set. |
 | `TXDATFLITCHK`, `RXDATFLITCHK` | `PW(DW)` | Same side as the flit | Opposite side | Live per-byte flit parity when `parityEn` is set. |
 | scalar `*CHK` beside control, valid and credit signals | 1 each | Same side as the checked base signal | Opposite side | Declared for all classes. Node-driven checks are ignored and IC-driven checks are zero. |
+
+: Table 4.1 `chi_if` signal groups, widths, drivers and applicability
 
 Unused node outputs must be tied to zero. Unused IC outputs are already
 driven inactive. Integrators must not infer legal channel capability from the
@@ -686,11 +955,13 @@ does not fall through to an overlapping lower-priority region.
 With `NUM_REGIONS=4` and `USE_DEFAULT_REGIONS=1`:
 
 | Index | Base | Inclusive limit | Kind and target | Valid |
-|---:|---|---|---|---:|
+|--------|--------------------|--------------------|--------------------------------------------|--------|
 | 0 | `0` | `2^(addrW-1)-1` | HN-F hash | 1 |
 | 1 | `2^(addrW-1)` | `CFG_MMIO_BASE-1` | HNI0 when present | 1 |
 | 2 | `CFG_MMIO_BASE` | `2^addrW-1` | MMIO, HNI0 when present | 1 |
 | 3 | `0` | `0` | zero target | 0 |
+
+: Table 6.1 Default region table loaded at reset
 
 The default `CFG_MMIO_BASE` is `2^addrW - 4096`.
 
@@ -748,7 +1019,7 @@ misaligned accesses, out-of-range SELECT writes and non-quiescent COMMIT
 writes return `PSLVERR`.
 
 | Offset | Name | Access | Reset or read value | Write effect |
-|---:|---|---|---|---|
+|--------|----------------|----------|----------------------|--------------------------------------------|
 | `0x000` | SELECT | RW | 0 | Select a region; reject a value at or above `NUM_REGIONS`. |
 | `0x004` | BASE_LO | RW | `REGION_BASE[n][31:0]` | Stage the low address bytes. |
 | `0x008` | BASE_HI | RW | upper configured address bits | Stage bits `addrW-1:32`. |
@@ -757,6 +1028,8 @@ writes return `PSLVERR`.
 | `0x014` | TARGET | RW | `REGION_TARGET[n]` | Stage the target NodeID. |
 | `0x018` | ATTRIBUTES | RW | `REGION_ATTRIBUTES[n]` | Stage the low four bits. |
 | `0x01c` | COMMIT | W, reads zero | 0 | If byte strobe 0 is set and traffic is quiescent, pulse one region update. |
+
+: Table 7.1 APB4 register map of `chi_cfg_slave`
 
 The required software order is SELECT, stage all changed fields, stop
 initiators, observe system-specific quiescence, then COMMIT. A COMMIT with
@@ -767,13 +1040,15 @@ initiators, observe system-specific quiescence, then COMMIT. A COMMIT with
 The HN-I recognizes any address in the 4 KiB window at `CFG_MMIO_BASE`.
 
 | Low-byte offset | Read and write object |
-|---:|---|
+|----------------|------------------------------------------------------------------------------------|
 | `0x00` | selected region |
 | `0x08` | full staged base |
 | `0x10` | full staged inclusive limit |
 | `0x18` | staged target |
 | `0x20` | staged attributes |
 | `0x28` | a write commits; a read falls through to the selected-region value |
+
+: Table 7.2 CHI MMIO offsets recognised by the HN-I
 
 A read returns one `CompData`; a write consumes the next DAT flit and returns
 `Comp`. The path does not check the DAT opcode, byte enables, security or
@@ -791,12 +1066,14 @@ table states what the RTL does.
 ## 8.1 ReadShared with DCT
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | Requesting RN-F | HN-F | `ReadShared` |
 | 2 | HN-F | Owning RN-F | `SnpSharedFwd` |
 | 3 | Owning RN-F | Requesting RN-F | `CompData` with the forwarded line |
 | 4 | Owning RN-F | HN-F | `SnpRespFwded` |
 | 5 | HN-F | Requesting RN-F | completion as required |
+
+: Table 8.1 ReadShared served by direct cache transfer
 
 RTL status: Partial. Eligibility, the forwarding snoop and `SnpRespFwded`
 collection exist. The fallback when the forwarding peer cannot supply data is
@@ -805,12 +1082,14 @@ not implemented.
 ## 8.2 ReadUnique with DMT
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | RN-F | HN-F | `ReadUnique` |
 | 2 | HN-F | RN-F sharers | snoops as required by the directory |
 | 3 | HN-F | SN-F | `ReadNoSnp` with `ReturnNID` and `ReturnTxnID` naming the Requester |
 | 4 | SN-F | RN-F | `CompData` direct to the Requester |
 | 5 | HN-F | RN-F | the response the Home still owes, when one is required |
+
+: Table 8.2 ReadUnique served by direct memory transfer
 
 RTL status: Implemented. `chi_dmt_ctrl` decides eligibility, the downstream
 request carries the Requester's identity and a Home-unique TxnID, and the
@@ -820,13 +1099,15 @@ same path.
 ## 8.3 WriteBackFull with DWT
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | RN-F | HN-F | `WriteBackFull` |
 | 2 | HN-F | SN-F | forwarded write with `DoDWT` set |
 | 3 | SN-F | RN-F | `DBIDResp` direct to the Requester |
 | 4 | RN-F | SN-F | `CopyBackWrData` via the Home |
 | 5 | SN-F | HN-F | `Comp` |
 | 6 | HN-F | RN-F | forwarded completion |
+
+: Table 8.3 WriteBackFull served by direct write transfer
 
 RTL status: Implemented for the direct-write path. Without DWT the Home
 combines `Comp` into `CompDBIDResp` itself. Partial-write byte-enable rules
@@ -835,7 +1116,7 @@ and write cancellation remain incomplete.
 ## 8.4 CleanUnique with snoops
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | RN-F | HN-F | `CleanUnique` |
 | 2 | HN-F | Sharer A | selected snoop |
 | 3 | Sharer A | HN-F | `SnpResp` |
@@ -844,13 +1125,15 @@ and write cancellation remain incomplete.
 | 6 | HN-F | SN-F | downstream request when required |
 | 7 | HN-F | RN-F | completion |
 
+: Table 8.4 CleanUnique with sequential snoops
+
 RTL status: Partial and sequential. The opcode is recognized, but snoop
 selection and directory transitions are simplified.
 
 ## 8.5 AtomicLoad
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | Requester | HN-F | `AtomicLoad` with the operation in the opcode |
 | 2 | HN-F | Requester | `DBIDResp` |
 | 3 | Requester | HN-F | `NonCopyBackWrData` carrying the operand |
@@ -859,6 +1142,8 @@ selection and directory transitions are simplified.
 | 6 | SN-F | HN-F | `CompData` with the initial value |
 | 7 | HN-F | SN-F | `WriteNoSnpFull` with the computed value |
 | 8 | HN-F | Requester | `CompData` with the original value, or `Comp` for a store |
+
+: Table 8.5 AtomicLoad executed at the Home
 
 RTL status: Implemented. `chi_atomic_alu` computes `AtomicStore`,
 `AtomicLoad`, `AtomicSwap` and `AtomicCompare` with both operand
@@ -872,12 +1157,14 @@ performed at the Home; there is no far-atomic negotiation.
 ## 8.6 Request Retry
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | Requester | HN-F | request with `AllowRetry=1` |
 | 2 | HN-F | Requester | `RetryAck` carrying the Home's chosen `PCrdType` |
 | 3 | HN-F | Requester | `PCrdGrant` with the same `PCrdType` once a resource exists |
 | 4 | Requester | HN-F | the request re-sent with `AllowRetry=0` and the granted `PCrdType` |
 | 5 | Requester | HN-F | `PCrdReturn` instead of step 4 if the credit is no longer needed |
+
+: Table 8.6 Request Retry followed by a P-Credit grant
 
 RTL status: Implemented. The Home records the `SrcID`, QoS and credit class
 behind each `RetryAck` in a `retryRecords`-deep table, and the record is taken
@@ -891,7 +1178,7 @@ the credit accounting exact.
 ## 8.7 WriteUniqueFullStash with Data Pull
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | RN-I | HN-F | `WriteUniqueFullStash` with `StashNID` and optional `StashLPID` |
 | 2 | HN-F | RN-I | `DBIDResp` |
 | 3 | RN-I | HN-F | `NonCopyBackWrData` |
@@ -901,6 +1188,8 @@ the credit accounting exact.
 | 7 | SN-F | HN-F | `CompData` |
 | 8 | HN-F | Stash target RN-F | `CompData` completing the implied read |
 | 9 | HN-F | RN-I | `Comp` |
+
+: Table 8.7 WriteUniqueFullStash with a Data Pull
 
 RTL status: Implemented. `chi_stash_ctrl` chooses the snoop from the stash
 opcode and whether the line is fully written, resolves the target from
@@ -913,13 +1202,15 @@ and `StashOnceSep` forms return the combined `CompStashDone`.
 ## 8.8 DVM Sync
 
 | Step | From | To | Message |
-|---:|---|---|---|
+|------|------------|------------|----------------------------------------------------------------------|
 | 1 | Initiating Requester | MN | `DVMOp` |
 | 2 | MN | Requester A | `SnpDVMOp` |
 | 3 | Requester A | MN | `SnpResp` |
 | 4 | MN | Requester B | `SnpDVMOp` |
 | 5 | Requester B | MN | `SnpResp` |
 | 6 | MN | Initiating Requester | `Comp` |
+
+: Table 8.8 DVM Sync distributed by the MN
 
 RTL status: Partial. Sequential broadcast and response collection exist. The
 two-part DVM payload is not decoded, so no operation-specific ordering is
@@ -989,7 +1280,7 @@ repository.
 ## 10.1 Request-driven target states
 
 | RN starting state | Operation | Intended successful target | Required external effects |
-|---|---|---|---|
+|--------------|----------------|----------------------|------------------------------------------------|
 | I | `ReadShared` or `ReadClean` | SC, or a permitted dirty shared state from the response | Install the returned line and honour the response state. |
 | I or SC | `ReadUnique` or `MakeUnique` | UC or UD according to the returned dirtiness | Other sharers must be invalidated before exclusive ownership. |
 | SC | `CleanUnique` | UC | Complete snoops and cleaning before uniqueness. |
@@ -999,10 +1290,12 @@ repository.
 | Any | atomic | the state dictated by the atomic response | Serialize the operand, the data update and the returned value. |
 | Any | stash snoop target | the state the stash snoop requires | Optionally request a Data Pull and complete the implied read. |
 
+: Table 10.1 Required RN-F target state for each request
+
 ## 10.2 Snoop-driven transitions
 
 | Starting state | Snoop class | Intended result | Data obligation |
-|---|---|---|---|
+|--------------|------------------|----------------------------|----------------------------------------|
 | I | any | I | Respond no copy; no data. |
 | SC | shared or clean | SC | Usually no dirty data. |
 | SC | unique or make-invalid | I | Invalidate and respond. |
@@ -1012,6 +1305,8 @@ repository.
 | UD, SD or UDP | unique or make-invalid | I | Supply dirty or partial data as required, then invalidate. |
 | Valid owner | forwarding snoop | the result dictated by the forward response | Send data to the forward target and the response to the Home. |
 | Any | stash snoop | the state the stash opcode requires | Optionally set `DataPull` in the response to request the line. |
+
+: Table 10.2 Required RN-F transition for each snoop class
 
 Partial and empty line handling, UDP rules, MTE allocation tags, poison and
 DataCheck propagation, and the complete set of legal response-state
@@ -1053,13 +1348,15 @@ or performance guarantees are supplied.
 ## 12.1 Bound SVA inventory
 
 | File | Assertions | Covers |
-|---|---|---|
+|------------------------------------------------------------|--------------------|--------------------|
 | `chi_link_sva.sv` | `NO_SEND_WITHOUT_RUN_OR_CREDIT`, `NO_CREDIT_OVERFLOW`, `NO_CREDIT_UNDERFLOW`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_CREDITS_DRAINED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_WITHOUT_RUN`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_proto_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `DAT_INPUT_STABLE_UNDER_BACKPRESSURE`, `REQ_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `DAT_STABLE_UNDER_BACKPRESSURE`, `ACTIVE_RESPONSE_ID_CONSISTENT`, `RETRY_RESPONSE_ID_CONSISTENT`, `ONE_COMPLETION_PATH`, `PCRD_GRANT_FIELDS_UNUSED`, `RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE` | `RETRY_ACK_THEN_PCRD_GRANT_CLASS`, `PCRD_GRANT_SENT`, `DCT_SNOOP_FORWARD_PATH`, `DIRECTORY_BACK_INVALIDATION`, `EXCLUSIVE_SUCCESS`, `BASIC_READ_FLOW`, `BASIC_WRITE_FLOW` |
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
 | `chi_ordering_sva.sv` | pairwise `NO_DUPLICATE_ACTIVE_LINE`, per-entry `ALLOCATION_LINE_NOT_ACTIVE` | none |
 | `chi_hnf_ordering_sva.sv` | `ORDERED_REQUEST_STARTS_QUIESCENT`, `ACTIVE_ORDERED_REQUEST_SERIALIZES` | none |
+
+: Table 12.1 Bound SVA files with assertion and cover counts
 
 These are local assertions. They do not check complete opcode legality,
 credit conservation across the whole port, cache-state correctness, every
@@ -1290,7 +1587,7 @@ First, some structure exists to satisfy Verilator rather than the language.
 `always_comb` that writes both directions of a handshake is flagged even when
 no dependency actually closes. That is why `chi_mesh` splits into four blocks
 and why the Home and HN-I ready outputs sit in blocks of their own. The
-underlying rule those splits express, in Section 2.3, is sound and worth
+underlying rule those splits express, in Section 2.8, is sound and worth
 keeping; the block count is an artifact. `chi_link_port` mirrors interface
 members into local nets before using them as instance pins, `chi_pos` exports
 a packed rather than unpacked array because binding an unpacked array port
@@ -1367,7 +1664,7 @@ the cross-references in the prose stay correct in every output format.
 ## 13.2 Implementation-defined decision log
 
 | Decision | Current choice | Consequence |
-|---|---|---|
+|------------------------|--------------------------------|--------------------------------------------|
 | Node-facing interfaces | One superset `chi_if` | Applicability is documented and tied off; direction is not modport-enforced. |
 | Zero logical node count | A one-element sentinel array | The integrator ties the inactive sentinel outputs low. |
 | Internal flow control | Ready/valid with registered crosspoint outputs | No claim of per-hop CHI L-Credits. |
@@ -1388,3 +1685,5 @@ the cross-references in the prose stay correct in every output format.
 | Reset | Synchronous active low | No asynchronous reset behaviour and no CDC support. |
 | Bound assertion array ports | Packed two-dimensional, never unpacked | `bind` elaborates portably across simulators. |
 | Loop bounds in helper functions | Computed once into a local, never a call in the loop condition | The bound is not recomputed per iteration, and the design simulates. |
+
+: Table 13.1 Implementation-defined decisions and their consequences
