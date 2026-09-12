@@ -1050,7 +1050,61 @@ as literals, so the testbench follows a reconfigured node list without edits.
 top, because the compile harness deliberately leaves the node-driven
 interface inputs undriven for lint.
 
-## 12.8 Regenerating this document
+The run is repeated with randomised initialisation:
+
+```sh
+make simrand
+```
+
+Verilator initialises state to zero, so anything that depends on a register
+or an input having been driven passes by accident. A four-state simulator
+propagates X instead and fails. `make simrand` approximates that by replaying
+the same run under several initialisation seeds, and it is the only part of
+this flow that can catch a missing driver. It found one: a node class
+configured to zero still has a one-element sentinel interface, because an
+interface array cannot be declared empty, and the port loop originally built
+a complete link layer for that sentinel. Nothing drove its node-side inputs.
+The loop now runs to the configured count, so no link is built for a class
+that does not exist.
+
+## 12.8 Tool dependence of this code
+
+The flow above uses Verilator, which is not equivalent to a commercial
+simulator. Three consequences are visible in the source and should be
+understood before this RTL is taken into a Questa, Xcelium or VCS flow.
+
+First, some structure exists to satisfy Verilator rather than the language.
+`UNOPTFLAT` is reported per procedural block, not per signal, so a single
+`always_comb` that writes both directions of a handshake is flagged even when
+no dependency actually closes. That is why `chi_mesh` splits into four blocks
+and why the Home and HN-I ready outputs sit in blocks of their own. The
+underlying rule those splits express, in Section 2.3, is sound and worth
+keeping; the block count is an artifact. `chi_link_port` mirrors interface
+members into local nets before using them as instance pins, `chi_pos` exports
+a packed rather than unpacked array because binding an unpacked array port
+fails, and the NodeID helpers hoist loop bounds into locals because a
+function call in a loop condition is miscompiled. None of these change
+behaviour, and all remain valid SystemVerilog, but none would have been
+written this way against a commercial tool.
+
+Second, the bound assertions are limited by what Verilator accepts. They use
+only implication, `$past` and `$stable`. Sequence repetition, `throughout`,
+`within` and local variables in sequences are unavailable, and those are
+exactly what an end-to-end property needs. A property such as "every accepted
+request eventually receives a completion carrying the matching `TxnID`"
+cannot be expressed here, which is the concrete reason Section 12.1 describes
+the assertion set as local.
+
+Third, Verilator is two-state. It cannot report an X, so uninitialised state,
+missing resets and undriven inputs do not fail; `make simrand` is a partial
+substitute, not a replacement. Neither is there timing, SDF, glitch or
+multi-clock behaviour, so Section 11 is unverified by this flow. Re-running
+the elaboration checks and the smoke test under a four-state simulator with
+X-initialisation is the first thing to do in a commercial flow, and it should
+be expected to find defects this flow cannot see.
+
+## 12.9 Regenerating this document
+
 
 The Word file in `docs/` is generated from `doc-src/`:
 

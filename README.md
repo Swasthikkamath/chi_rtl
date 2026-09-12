@@ -98,9 +98,17 @@ node placements are unique, that every NodeID's routing fields decode back to
 its placement, that all four flit widths are inside the Issue H ranges, and
 that link activation and credit accounting work on all eight ports.
 
+`make simrand` replays the same run under several initialisation seeds.
+Verilator initialises state to zero, so anything depending on a register or
+input having been driven passes by accident; a four-state simulator would
+propagate X and fail. This is the only part of the flow that can catch a
+missing driver, and it found one — see Section 12.7 of the specification.
+
 This is a smoke test, not a protocol testbench. There is no traffic
 generator, scoreboard or coverage model; Section 12 of the design
-specification outlines what a complete environment would need.
+specification outlines what a complete environment would need, and
+Section 12.8 records where Verilator shaped this code and what a commercial
+simulator would check that this flow cannot.
 
 ## Directory map
 
@@ -120,4 +128,4 @@ specification outlines what a complete environment would need.
 | `doc-src/` | Design specification source |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |
-| `Makefile` | `make lint`, `make sim` and `make doc` |
+| `Makefile` | `make lint`, `make sim`, `make simrand` and `make doc` |

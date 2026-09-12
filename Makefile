@@ -23,9 +23,15 @@ SIM_BIN = obj_dir/chi_smoke
 DOC_SRC = doc-src/chi_interconnect_design_spec.md
 DOC_OUT = docs/chi_interconnect_design_spec.docx
 
-.PHONY: all lint sim doc clean
+# Verilator initialises state to zero, which hides anything that depends on a
+# register or an input having been driven. Re-running with randomised
+# initialisation approximates the X-propagation a four-state simulator gives
+# for free, and is the only way this flow catches a missing driver.
+SIM_SEEDS = 1 2 7 42 1234
 
-all: lint sim doc
+.PHONY: all lint sim simrand doc clean
+
+all: lint sim simrand doc
 
 lint:
 	@for top in $(LINT_TOPS); do \
@@ -42,6 +48,12 @@ lint:
 # mistakes that a lint-only pass cannot see.
 sim: $(SIM_BIN)
 	$(SIM_BIN)
+
+simrand: $(SIM_BIN)
+	@for seed in $(SIM_SEEDS); do \
+	  echo "== randomised init, seed $$seed =="; \
+	  $(SIM_BIN) +verilator+rand+reset+2 +verilator+seed+$$seed || exit 1; \
+	done
 
 $(SIM_BIN): $(SIM_SRC) filelist.f
 	$(VERILATOR) $(SIM_FLAGS) $(SIM_SRC) --top-module chi_smoke_tb -o chi_smoke

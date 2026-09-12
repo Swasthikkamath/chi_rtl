@@ -549,8 +549,13 @@ module chi_interconnect_top #(
   // buffering, flit parity, and the link activation handshake. A direction a
   // port never uses is drained so that a misrouted flit cannot stall the
   // fabric.
+// The interface array cannot be declared with zero elements, so a node class
+// that is configured out still has a one-element sentinel port. The loop runs
+// to COUNT rather than to the array size so that no link layer is built for
+// it: an unused link would cost real buffers and credit counters, and its
+// node-side inputs would have no driver.
 `define CHI_CONNECT_PORT(PORT, COUNT, OFFSET, IS_REQUESTER) \
-  for (genvar i = 0; i < (COUNT > 0 ? COUNT : 1); i++) begin : PORT``_ports \
+  for (genvar i = 0; i < COUNT; i++) begin : PORT``_ports \
     logic portReqRxValid, portReqRxReady; \
     logic [reqFlitWidth(CFG)-1:0] portReqRxFlit; \
     logic portRspRxValid, portRspRxReady; \
