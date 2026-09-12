@@ -340,6 +340,16 @@ package chi_pkg;
     return nodeId;
   endfunction
 
+  function automatic logic [CHI_MAX_NODEID_W-1:0] defaultNodeId(
+    input chi_cfg_t cfg,
+    input int unsigned ordinal
+  );
+    chi_mesh_placement_t placement;
+    placement = defaultMeshPlacement(ordinal);
+    return encodeNodeId(cfg, int'(placement.meshX), int'(placement.meshY),
+                        int'(placement.devicePort), ordinal);
+  endfunction
+
   function automatic int unsigned nodeIdDeviceId(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
     int unsigned value;
     value = 0;

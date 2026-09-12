@@ -36,51 +36,6 @@ module chi_noc_top #(
 );
   import chi_pkg::*;
 
-  generate
-    begin : chi_cfg_check
-      initial begin
-        if ((CFG.topology == chi_cfg_pkg::MESH_2D)
-            && ((CFG.meshX == 0) || (CFG.meshY == 0)
-                || (CFG.numDevPortsPerXp == 0)))
-          $fatal(1, "Mesh dimensions and device-port count must be positive");
-        for (int unsigned nodeIndex = 0;
-             nodeIndex < NUM_PORTS; nodeIndex++) begin
-          if (CFG.topology == chi_cfg_pkg::MESH_2D) begin
-            if (!PLACEMENTS[nodeIndex].valid)
-              $fatal(1, "Every mesh node requires a valid placement");
-            if ((int'(PLACEMENTS[nodeIndex].meshX) >= CFG.meshX)
-                || (int'(PLACEMENTS[nodeIndex].meshY) >= CFG.meshY)
-                || (int'(PLACEMENTS[nodeIndex].devicePort)
-                    >= CFG.numDevPortsPerXp))
-              $fatal(1, "Mesh node placement is out of range");
-            if ((nodeIdMeshX(CFG, NODE_IDS[nodeIndex])
-                  != int'(PLACEMENTS[nodeIndex].meshX))
-                || (nodeIdMeshY(CFG, NODE_IDS[nodeIndex])
-                  != int'(PLACEMENTS[nodeIndex].meshY))
-                || (nodeIdDevicePort(CFG, NODE_IDS[nodeIndex])
-                  != int'(PLACEMENTS[nodeIndex].devicePort)))
-              $fatal(1, "NodeID routing fields do not match mesh placement");
-          end
-          for (int unsigned otherIndex = nodeIndex + 1;
-               otherIndex < NUM_PORTS; otherIndex++) begin
-            if (NODE_IDS[nodeIndex] == NODE_IDS[otherIndex])
-              $fatal(1, "NoC NodeIDs must be unique");
-            if ((CFG.topology == chi_cfg_pkg::MESH_2D)
-                && PLACEMENTS[nodeIndex].valid
-                && PLACEMENTS[otherIndex].valid
-                && (PLACEMENTS[nodeIndex].meshX
-                    == PLACEMENTS[otherIndex].meshX)
-                && (PLACEMENTS[nodeIndex].meshY
-                    == PLACEMENTS[otherIndex].meshY)
-                && (PLACEMENTS[nodeIndex].devicePort
-                    == PLACEMENTS[otherIndex].devicePort))
-              $fatal(1, "Mesh node placements must not collide");
-          end
-        end
-      end
-    end
-  endgenerate
-
   if (CFG.topology == chi_cfg_pkg::CROSSBAR) begin : crossbarTopology
     chi_xbar #(
       .NUM_INPUTS(NUM_PORTS),

@@ -29,7 +29,8 @@ module chi_hnf_top #(
   output chi_pkg::chi_noc_flit_t snpOutFlit,
   output logic datOutValid,
   input  logic datOutReady,
-  output chi_pkg::chi_noc_flit_t datOutFlit
+  output chi_pkg::chi_noc_flit_t datOutFlit,
+  output logic idle
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -189,6 +190,7 @@ module chi_hnf_top #(
                      && (state != HNF_WAIT_RESPONSE));
     requestHandshake = reqInValid && reqInReady && resourcesAvailable;
     retryHandshake = reqInValid && reqInReady && !resourcesAvailable;
+    idle = (state == HNF_IDLE) && !sfBackInvValid;
 
     downstreamReq = activeReq;
     downstreamReq.tgtId = SN_NODE_ID[CFG.nodeIdW-1:0];

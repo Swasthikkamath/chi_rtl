@@ -17,6 +17,8 @@ noc/chi_noc_top.sv
 sam/chi_hn_hash.sv
 sam/chi_sam.sv
 hni/chi_cfg_slave.sv
+hni/chi_hni_top.sv
+mn/chi_mn_dvm.sv
 hnf/chi_pos.sv
 hnf/chi_hazard.sv
 hnf/chi_snoop_filter.sv
@@ -26,10 +28,4 @@ hnf/chi_dct_ctrl.sv
 hnf/chi_cmo.sv
 hnf/chi_excl_mon.sv
 hnf/chi_hnf_top.sv
-top/chi_stage1_compile.sv
-top/chi_link_compile.sv
-top/chi_xbar_compile.sv
-top/chi_ring_compile.sv
-top/chi_mesh_compile.sv
-top/chi_sam_compile.sv
-top/chi_hnf_compile.sv
+top/chi_interconnect_top.sv

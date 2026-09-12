@@ -150,4 +150,58 @@ package chi_cfg_pkg;
     endcase
     return placement;
   endfunction
+
+  typedef chi_mesh_placement_t chi_default_placement_array_t [13:0];
+
+  function automatic chi_default_placement_array_t defaultMeshPlacements();
+    chi_default_placement_array_t placements;
+    for (int unsigned ordinal = 0; ordinal < 14; ordinal++)
+      placements[ordinal] = defaultMeshPlacement(ordinal);
+    return placements;
+  endfunction
+
+  function automatic chi_node_class_e nodeClassForOrdinal(
+    input chi_cfg_t cfg,
+    input int unsigned ordinal
+  );
+    int unsigned boundary;
+    boundary = cfg.numRnf;
+    if (ordinal < boundary) return NODE_RNF;
+    boundary += cfg.numRnd;
+    if (ordinal < boundary) return NODE_RND;
+    boundary += cfg.numRni;
+    if (ordinal < boundary) return NODE_RNI;
+    boundary += cfg.numSnf;
+    if (ordinal < boundary) return NODE_SNF;
+    boundary += cfg.numSni;
+    if (ordinal < boundary) return NODE_SNI;
+    boundary += cfg.numHnf;
+    if (ordinal < boundary) return NODE_HNF;
+    boundary += cfg.numHni;
+    if (ordinal < boundary) return NODE_HNI;
+    return NODE_MN;
+  endfunction
+
+  function automatic int unsigned nodeIndexForOrdinal(
+    input chi_cfg_t cfg,
+    input int unsigned ordinal
+  );
+    int unsigned base;
+    base = 0;
+    if (ordinal < cfg.numRnf) return ordinal;
+    base += cfg.numRnf;
+    if (ordinal < (base + cfg.numRnd)) return ordinal - base;
+    base += cfg.numRnd;
+    if (ordinal < (base + cfg.numRni)) return ordinal - base;
+    base += cfg.numRni;
+    if (ordinal < (base + cfg.numSnf)) return ordinal - base;
+    base += cfg.numSnf;
+    if (ordinal < (base + cfg.numSni)) return ordinal - base;
+    base += cfg.numSni;
+    if (ordinal < (base + cfg.numHnf)) return ordinal - base;
+    base += cfg.numHnf;
+    if (ordinal < (base + cfg.numHni)) return ordinal - base;
+    base += cfg.numHni;
+    return ordinal - base;
+  endfunction
 endpackage
