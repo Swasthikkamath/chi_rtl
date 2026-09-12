@@ -14,8 +14,12 @@ noc/chi_router.sv
 noc/chi_mesh_xp.sv
 noc/chi_mesh.sv
 noc/chi_noc_top.sv
+sam/chi_hn_hash.sv
+sam/chi_sam.sv
+hni/chi_cfg_slave.sv
 top/chi_stage1_compile.sv
 top/chi_link_compile.sv
 top/chi_xbar_compile.sv
 top/chi_ring_compile.sv
 top/chi_mesh_compile.sv
+top/chi_sam_compile.sv
