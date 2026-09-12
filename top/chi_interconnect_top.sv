@@ -514,6 +514,19 @@ module chi_interconnect_top #(
       // own mapper (IHI 0050H B3.3.1).
       if ((requesterReq[i].opcode == REQ_PREFETCH_TGT) && (CFG.numSnf > 0))
         requesterRouteTarget[i] = requesterPrefetchTarget[i];
+      // B3.3.1 takes two cases away from the address mapper, and both must
+      // override the two overrides above. A PCrdReturn has to reach the Home
+      // that granted the credit, which the Requester names in TgtID; that
+      // Home does not follow from the address, and the address field is not
+      // even in use for the opcode. A request replayed on a pre-allocated
+      // credit, which B2.10.2.1 identifies by AllowRetry being 0, has to keep
+      // the target the RetryAck came from, so that editing the region table
+      // between the RetryAck and the replay cannot deliver it to a Home
+      // holding no record of the credit. PrefetchTgt is unaffected because
+      // B2.10.2.1 requires AllowRetry to be 1 for it.
+      if ((requesterReq[i].opcode == REQ_PCRD_RETURN)
+          || !requesterReq[i].allowRetry)
+        requesterRouteTarget[i] = requesterReq[i].tgtId;
     end
 
     chi_prefetch_map #(
