@@ -36,11 +36,15 @@ module chi_hnf_top #(
   import chi_pkg::*;
 
   localparam int unsigned POS_DEPTH = (CFG.posEntries > 0) ? CFG.posEntries : 1;
+  localparam int unsigned DAT_BYTES = CFG.dataW / 8;
+  localparam int unsigned DAT_OFF_W = clog2Min1(DAT_BYTES);
 
-  typedef enum logic [2:0] {
+  typedef enum logic [3:0] {
     HNF_IDLE, HNF_SNOOP_START, HNF_SNOOP_WAIT, HNF_REQ_SEND,
     HNF_WAIT_RESPONSE, HNF_WAIT_COMP_ACK, HNF_BACKINV_START,
-    HNF_BACKINV_WAIT
+    HNF_BACKINV_WAIT, HNF_ATOMIC_DBID, HNF_ATOMIC_OPERAND,
+    HNF_ATOMIC_READ, HNF_ATOMIC_INITIAL, HNF_ATOMIC_WRITE,
+    HNF_ATOMIC_WDATA, HNF_ATOMIC_WCOMP, HNF_ATOMIC_RETURN
   } hnf_state_e;
   hnf_state_e state;
 
@@ -134,12 +138,92 @@ module chi_hnf_top #(
   logic activeGotComp;
   logic activeGotPersist;
 
+  logic atomicRequest;
+  logic activeAtomic;
+  logic atomicOpcodeValid;
+  logic atomicReturnsData;
+  logic atomicUpdateEnable;
+  logic [2:0] atomicOperandSize;
+  logic [DAT_OFF_W-1:0] atomicByteOffset;
+  logic [63:0] atomicTransactionData;
+  logic [63:0] atomicCompareData;
+  logic [63:0] atomicInitialWord;
+  logic [63:0] atomicUpdateWord;
+  logic [63:0] atomicOriginalWord;
+  logic [CFG.dataW-1:0] atomicOperandBuffer;
+  logic [CFG.dataW-1:0] atomicInitialBuffer;
+  logic atomicInitialFromSnoop;
+  logic atomicDbidSeen;
+  logic atomicCompSeen;
+  logic atomicDataSent;
+  chi_req_flit_t atomicDownstreamReq;
+  chi_dat_flit_t atomicDownstreamDat;
+  chi_dat_flit_t atomicReturnDat;
+  chi_rsp_flit_t atomicResponse;
+  logic atomicStateActive;
+
+  function automatic logic [63:0] extractWord(
+    input logic [CFG.dataW-1:0] bus,
+    input logic [DAT_OFF_W-1:0] byteOffset
+  );
+    logic [63:0] result;
+    int unsigned index;
+    result = '0;
+    for (int unsigned b = 0; b < 8; b++) begin
+      index = int'(byteOffset) + b;
+      if (index < DAT_BYTES)
+        result[b*8 +: 8] = bus[index*8 +: 8];
+    end
+    return result;
+  endfunction
+
+  function automatic logic [CFG.dataW-1:0] insertWord(
+    input logic [CFG.dataW-1:0] bus,
+    input logic [DAT_OFF_W-1:0] byteOffset,
+    input logic [63:0] value,
+    input logic [2:0] operandSize
+  );
+    logic [CFG.dataW-1:0] result;
+    int unsigned index;
+    int unsigned validBytes;
+    result = bus;
+    validBytes = 1 << operandSize;
+    for (int unsigned b = 0; b < 8; b++) begin
+      index = int'(byteOffset) + b;
+      if ((b < validBytes) && (index < DAT_BYTES))
+        result[index*8 +: 8] = value[b*8 +: 8];
+    end
+    return result;
+  endfunction
+
+  function automatic logic [CFG.dataW/8-1:0] operandByteEnables(
+    input logic [DAT_OFF_W-1:0] byteOffset,
+    input logic [2:0] operandSize
+  );
+    logic [CFG.dataW/8-1:0] result;
+    int unsigned index;
+    int unsigned validBytes;
+    result = '0;
+    validBytes = 1 << operandSize;
+    for (int unsigned b = 0; b < 8; b++) begin
+      index = int'(byteOffset) + b;
+      if ((b < validBytes) && (index < DAT_BYTES))
+        result[index] = 1'b1;
+    end
+    return result;
+  endfunction
+
   function automatic logic isCoherent(input chi_req_opcode_e op);
     return (op == REQ_READ_SHARED) || (op == REQ_READ_CLEAN)
            || (op == REQ_READ_UNIQUE) || (op == REQ_READ_NOT_SHARED_DIRTY)
            || (op == REQ_READ_PREFER_UNIQUE) || (op == REQ_CLEAN_SHARED)
            || (op == REQ_CLEAN_INVALID) || (op == REQ_MAKE_INVALID)
            || (op == REQ_CLEAN_UNIQUE) || (op == REQ_MAKE_UNIQUE);
+  endfunction
+
+  function automatic logic isAtomicOpcode(input chi_req_opcode_e op);
+    return ((op >= REQ_ATOMIC_STORE_ADD) && (op <= REQ_ATOMIC_LOAD_UMIN))
+           || (op == REQ_ATOMIC_SWAP) || (op == REQ_ATOMIC_COMPARE);
   endfunction
 
   function automatic logic isWrite(input chi_req_opcode_e op);
@@ -178,6 +262,7 @@ module chi_hnf_top #(
     incomingDat = unpackDatFlit(CFG, datInFlit.payload[CHI_MAX_DAT_FLIT_W-1:0]);
     incomingLine = incomingReq.addr[CFG.addrW-1:6];
     coherentRequest = isCoherent(incomingReq.opcode);
+    atomicRequest = CFG.atomicEn && isAtomicOpcode(incomingReq.opcode);
   end
 
   always_comb begin
@@ -243,6 +328,10 @@ module chi_hnf_top #(
     end
     if ((state == HNF_SNOOP_WAIT) || (state == HNF_BACKINV_WAIT))
       rspInReady = snpRspReady;
+    // A snoop that invalidates a dirty peer copy supplies the value the
+    // atomic operates on, which removes the downstream read.
+    if ((state == HNF_SNOOP_WAIT) && activeAtomic)
+      datInReady = 1'b1;
     if (state == HNF_WAIT_COMP_ACK)
       rspInReady = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
                    && (incomingRsp.srcId == activeReq.srcId);
@@ -258,6 +347,36 @@ module chi_hnf_top #(
       rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
         packRspFlit(CFG, responseFlit);
       rspOutValid = reqInValid && !resourcesAvailable;
+    end
+
+    if (atomicStateActive) begin
+      rspOutValid = (state == HNF_ATOMIC_DBID)
+                    || ((state == HNF_ATOMIC_RETURN) && !atomicReturnsData);
+      rspOutFlit.targetNodeId = activeReq.srcId;
+      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
+        packRspFlit(CFG, atomicResponse);
+
+      reqOutValid = atomicOpcodeValid
+                    && ((state == HNF_ATOMIC_READ)
+                        || ((state == HNF_ATOMIC_WRITE)
+                            && atomicUpdateEnable));
+      reqOutFlit.targetNodeId = SN_NODE_ID;
+      reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] =
+        packReqFlit(CFG, atomicDownstreamReq);
+
+      datOutValid = (state == HNF_ATOMIC_WDATA)
+                    || ((state == HNF_ATOMIC_RETURN) && atomicReturnsData);
+      if (state == HNF_ATOMIC_WDATA) begin
+        datOutFlit.targetNodeId = SN_NODE_ID;
+        datOutFlit.payload = packDatFlit(CFG, atomicDownstreamDat);
+      end else begin
+        datOutFlit.targetNodeId = activeReq.srcId;
+        datOutFlit.payload = packDatFlit(CFG, atomicReturnDat);
+      end
+
+      datInReady = (state == HNF_ATOMIC_OPERAND)
+                   || (state == HNF_ATOMIC_INITIAL);
+      rspInReady = (state == HNF_ATOMIC_WCOMP);
     end
   end
 
@@ -320,6 +439,103 @@ module chi_hnf_top #(
     .fwdNid(dctFwdNid), .fwdTxnId(dctFwdTxn), .retToSrc(dctRetToSrc)
   );
 
+  always_comb begin
+    atomicByteOffset = activeReq.addr[DAT_OFF_W-1:0];
+    // AtomicCompare carries the compare value and the swap value together, so
+    // its Size covers both and each operand is half of it (IHI 0050H B4.2.5).
+    atomicOperandSize = (activeReq.opcode == REQ_ATOMIC_COMPARE)
+                        ? (activeReq.size - 3'd1) : activeReq.size;
+    // The compare value occupies the lower-addressed half of the outbound
+    // data and the swap value the upper half. The specification names the two
+    // values but does not state this placement in the text available here.
+    if (activeReq.opcode == REQ_ATOMIC_COMPARE) begin
+      atomicCompareData = extractWord(atomicOperandBuffer, atomicByteOffset);
+      atomicTransactionData = extractWord(
+        atomicOperandBuffer,
+        atomicByteOffset + DAT_OFF_W'(1 << atomicOperandSize));
+    end else begin
+      atomicCompareData = '0;
+      atomicTransactionData =
+        extractWord(atomicOperandBuffer, atomicByteOffset);
+    end
+    atomicInitialWord = extractWord(atomicInitialBuffer, atomicByteOffset);
+    atomicStateActive = (state == HNF_ATOMIC_DBID)
+                        || (state == HNF_ATOMIC_OPERAND)
+                        || (state == HNF_ATOMIC_READ)
+                        || (state == HNF_ATOMIC_INITIAL)
+                        || (state == HNF_ATOMIC_WRITE)
+                        || (state == HNF_ATOMIC_WDATA)
+                        || (state == HNF_ATOMIC_WCOMP)
+                        || (state == HNF_ATOMIC_RETURN);
+  end
+
+  chi_atomic_alu atomic_alu (
+    .opcode(activeReq.opcode), .size(atomicOperandSize),
+    .bigEndian(activeReq.stashNidValidOrEndianOrDeep),
+    .initialData(atomicInitialWord),
+    .transactionData(atomicTransactionData),
+    .compareData(atomicCompareData), .isAtomic(atomicOpcodeValid),
+    .returnsData(atomicReturnsData), .updateEnable(atomicUpdateEnable),
+    .updateData(atomicUpdateWord), .originalData(atomicOriginalWord)
+  );
+
+  // The Home Node is the Point of Coherency for a far atomic, so it reads the
+  // line, applies the operation, and writes the result back downstream
+  // (IHI 0050H B4.2.5). Atomics may not use DMT or DWT.
+  always_comb begin
+    atomicDownstreamReq = '0;
+    atomicDownstreamReq.qos = activeReq.qos;
+    atomicDownstreamReq.tgtId = SN_NODE_ID;
+    atomicDownstreamReq.srcId = HN_NODE_ID;
+    atomicDownstreamReq.txnId = activeReq.txnId;
+    atomicDownstreamReq.addr = activeReq.addr;
+    atomicDownstreamReq.pas = activeReq.pas;
+    atomicDownstreamReq.memAttr = activeReq.memAttr;
+    atomicDownstreamReq.size = 3'd6;
+    atomicDownstreamReq.opcode = (state == HNF_ATOMIC_WRITE)
+                                 ? REQ_WRITE_NO_SNP_PTL : REQ_READ_NO_SNP;
+
+    atomicDownstreamDat = '0;
+    atomicDownstreamDat.qos = activeReq.qos;
+    atomicDownstreamDat.tgtId = SN_NODE_ID;
+    atomicDownstreamDat.srcId = HN_NODE_ID;
+    atomicDownstreamDat.txnId = activeReq.txnId;
+    atomicDownstreamDat.homeNidOrPbha = HN_NODE_ID;
+    atomicDownstreamDat.opcode = DAT_NON_COPY_BACK_WR_DATA;
+    atomicDownstreamDat.resp = RESP_I;
+    atomicDownstreamDat.data[CFG.dataW-1:0] =
+      insertWord(atomicInitialBuffer, atomicByteOffset, atomicUpdateWord,
+                 atomicOperandSize);
+    atomicDownstreamDat.be[DAT_BYTES-1:0] =
+      operandByteEnables(atomicByteOffset, atomicOperandSize);
+
+    atomicReturnDat = '0;
+    atomicReturnDat.qos = activeReq.qos;
+    atomicReturnDat.tgtId = activeReq.srcId;
+    atomicReturnDat.srcId = HN_NODE_ID;
+    atomicReturnDat.txnId = activeReq.txnId;
+    atomicReturnDat.homeNidOrPbha = HN_NODE_ID;
+    atomicReturnDat.opcode = DAT_COMP_DATA;
+    // Atomic return data must not be cached at the Requester.
+    atomicReturnDat.resp = RESP_I;
+    atomicReturnDat.dbId = CHI_DAT_DBID_SLOT_W'(activeReq.txnId);
+    atomicReturnDat.be[DAT_BYTES-1:0] =
+      operandByteEnables(atomicByteOffset, atomicOperandSize);
+    atomicReturnDat.data[CFG.dataW-1:0] =
+      insertWord('0, atomicByteOffset, atomicOriginalWord,
+                 atomicOperandSize);
+
+    atomicResponse = '0;
+    atomicResponse.qos = activeReq.qos;
+    atomicResponse.tgtId = activeReq.srcId;
+    atomicResponse.srcId = HN_NODE_ID;
+    atomicResponse.txnId = activeReq.txnId;
+    atomicResponse.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(activeReq.txnId);
+    atomicResponse.resp = RESP_I;
+    atomicResponse.opcode = (state == HNF_ATOMIC_DBID) ? RSP_DBID_RESP
+                                                       : RSP_COMP;
+  end
+
   chi_pos #(.CFG(CFG), .DEPTH(POS_DEPTH)) pos (
     .clk, .resetn,
     .allocValid(requestHandshake && (incomingReq.opcode != REQ_PCRD_RETURN)),
@@ -363,13 +579,16 @@ module chi_hnf_top #(
                       ? sfBackInvSharers : sfSharers;
     snpStartLine = (state == HNF_BACKINV_START)
                    ? sfBackInvLine : activeReq.addr[CFG.addrW-1:6];
+    // An atomic must leave every peer copy Invalid, and CleanInvalid also
+    // recovers a dirty copy for the read-modify-write.
     snpStartOpcode = (state == HNF_BACKINV_START) ? SNP_MAKE_INVALID :
-                     (dctEligible ? dctOpcode :
-                      (activeWrite ? SNP_UNIQUE : SNP_SHARED));
+                     (activeAtomic ? SNP_CLEAN_INVALID :
+                      (dctEligible ? dctOpcode :
+                       (activeWrite ? SNP_UNIQUE : SNP_SHARED)));
     snpStartTxn = (state == HNF_BACKINV_START) ? '0 : activeReq.txnId;
     snpFwdNid = dctEligible ? dctFwdNid : '0;
     snpFwdTxn = dctEligible ? dctFwdTxn : '0;
-    snpRetToSrc = dctEligible ? dctRetToSrc : 1'b1;
+    snpRetToSrc = (dctEligible && !activeAtomic) ? dctRetToSrc : 1'b1;
     sfBackInvReady = state == HNF_BACKINV_START && snpStartReady;
     sfBackInvDone = state == HNF_BACKINV_WAIT && snpDone;
   end
@@ -417,6 +636,13 @@ module chi_hnf_top #(
       activeNeedPersist <= 1'b0;
       activeGotComp <= 1'b0;
       activeGotPersist <= 1'b0;
+      activeAtomic <= 1'b0;
+      atomicOperandBuffer <= '0;
+      atomicInitialBuffer <= '0;
+      atomicInitialFromSnoop <= 1'b0;
+      atomicDbidSeen <= 1'b0;
+      atomicCompSeen <= 1'b0;
+      atomicDataSent <= 1'b0;
       posFree <= 1'b0;
       sfUpdate <= 1'b0;
       sfUpdateSharers <= '0;
@@ -433,6 +659,12 @@ module chi_hnf_top #(
             activeReq <= incomingReq;
             activePosIndex <= posAllocIndex;
             activeCoherent <= coherentRequest;
+            activeAtomic <= atomicRequest;
+            atomicInitialFromSnoop <= 1'b0;
+            atomicDbidSeen <= 1'b0;
+            atomicCompSeen <= 1'b0;
+            atomicDataSent <= 1'b0;
+            atomicInitialBuffer <= '0;
             activeWrite <= isWrite(incomingReq.opcode) || cmoWrite;
             activeNeedsSnoop <= (coherentRequest || activeCmo) && sfHit
                                 && (sfSharers != '0);
@@ -442,8 +674,11 @@ module chi_hnf_top #(
             activeNeedPersist <= cmoPersist;
             activeGotComp <= 1'b0;
             activeGotPersist <= !cmoPersist;
-            if ((coherentRequest || activeCmo) && sfHit && (sfSharers != '0))
+            if ((coherentRequest || activeCmo || atomicRequest) && sfHit
+                && (sfSharers != '0))
               state <= HNF_SNOOP_START;
+            else if (atomicRequest)
+              state <= HNF_ATOMIC_DBID;
             else
               state <= HNF_REQ_SEND;
           end
@@ -451,9 +686,68 @@ module chi_hnf_top #(
         HNF_SNOOP_START:
           if (snpStart && snpStartReady)
             state <= HNF_SNOOP_WAIT;
-        HNF_SNOOP_WAIT:
+        HNF_SNOOP_WAIT: begin
+          if (activeAtomic && datInValid
+              && ((incomingDat.opcode == DAT_SNP_RESP_DATA)
+                  || (incomingDat.opcode == DAT_SNP_RESP_DATA_PTL))) begin
+            atomicInitialBuffer <= incomingDat.data[CFG.dataW-1:0];
+            atomicInitialFromSnoop <= 1'b1;
+          end
           if (snpDone)
-            state <= HNF_REQ_SEND;
+            state <= activeAtomic ? HNF_ATOMIC_DBID : HNF_REQ_SEND;
+        end
+        HNF_ATOMIC_DBID:
+          if (rspOutValid && rspOutReady)
+            state <= HNF_ATOMIC_OPERAND;
+        HNF_ATOMIC_OPERAND:
+          if (datInValid && datInReady) begin
+            atomicOperandBuffer <= incomingDat.data[CFG.dataW-1:0];
+            state <= atomicInitialFromSnoop ? HNF_ATOMIC_WRITE
+                                            : HNF_ATOMIC_READ;
+          end
+        HNF_ATOMIC_READ:
+          if (reqOutValid && reqOutReady)
+            state <= HNF_ATOMIC_INITIAL;
+        HNF_ATOMIC_INITIAL:
+          if (datInValid && datInReady
+              && (incomingDat.opcode == DAT_COMP_DATA)) begin
+            atomicInitialBuffer <= incomingDat.data[CFG.dataW-1:0];
+            state <= HNF_ATOMIC_WRITE;
+          end
+        HNF_ATOMIC_WRITE: begin
+          if (!atomicUpdateEnable)
+            state <= HNF_ATOMIC_RETURN;
+          else if (reqOutValid && reqOutReady)
+            state <= HNF_ATOMIC_WCOMP;
+        end
+        HNF_ATOMIC_WCOMP: begin
+          if (rspInValid && rspInReady) begin
+            if ((incomingRsp.opcode == RSP_DBID_RESP)
+                || (incomingRsp.opcode == RSP_DBID_RESP_ORD)
+                || (incomingRsp.opcode == RSP_COMP_DBID_RESP))
+              atomicDbidSeen <= 1'b1;
+            if ((incomingRsp.opcode == RSP_COMP)
+                || (incomingRsp.opcode == RSP_COMP_DBID_RESP))
+              atomicCompSeen <= 1'b1;
+          end
+          if (!atomicDataSent && atomicDbidSeen)
+            state <= HNF_ATOMIC_WDATA;
+          else if (atomicDataSent && atomicCompSeen)
+            state <= HNF_ATOMIC_RETURN;
+        end
+        HNF_ATOMIC_WDATA:
+          if (datOutValid && datOutReady) begin
+            atomicDataSent <= 1'b1;
+            state <= HNF_ATOMIC_WCOMP;
+          end
+        HNF_ATOMIC_RETURN: begin
+          if ((atomicReturnsData && datOutValid && datOutReady)
+              || (!atomicReturnsData && rspOutValid && rspOutReady)) begin
+            posFree <= 1'b1;
+            activeAtomic <= 1'b0;
+            state <= activeReq.expCompAck ? HNF_WAIT_COMP_ACK : HNF_IDLE;
+          end
+        end
         HNF_REQ_SEND:
           if (reqOutValid && reqOutReady)
             state <= HNF_WAIT_RESPONSE;
