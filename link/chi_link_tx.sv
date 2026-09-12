@@ -40,7 +40,7 @@ module chi_link_tx #(
   logic deactivateSafe;
 
   always_comb begin
-    laneIndex = internalTxnId;
+    laneIndex = 32'(internalTxnId);
     if (REPL_CHANNELS <= 1) begin
       laneSelected = (LANE_ID == 0);
     end else begin
