@@ -76,20 +76,27 @@ the unpacked directory arrays; the syntax is accepted by synthesis tools.
 
 Lint elaborates the design but never runs it, so the elaboration checks in
 `chi_interconnect_top` and the bound assertions never execute during a lint
-pass. `make sim` builds [`tb/chi_smoke_tb.sv`](tb/chi_smoke_tb.sv) and runs
-it:
+pass. `make sim` closes that gap:
 
 ```sh
 make sim
 ```
 
-It holds reset, releases it, and runs the idle fabric. The run fails on any
-elaboration `$fatal`, any assertion that fires out of reset, any flit
-presented to a node while the fabric is idle, and any reported parity or
-L-Credit error. Passing it confirms at runtime that the default configuration
-is legal, that node placements are unique, that every NodeID's routing fields
-decode back to its placement, and that all four flit widths are inside the
-Issue H ranges.
+It checks three things: the elaboration checks pass, every external link
+reaches RUN in both directions and exchanges its full L-Credit allocation,
+and an idle fabric with live links stays silent.
+
+Link bring-up needs a peer, because the interconnect owns only its half of
+each link. [`tb/chi_node_link_bfm.sv`](tb/chi_node_link_bfm.sv) is that peer,
+mirroring `chi_link_port` from the node side, and
+[`tb/chi_sim_harness.sv`](tb/chi_sim_harness.sv) attaches one per external
+port. Without it the receive links never leave STOP, no credits are issued,
+and a silent fabric would prove nothing.
+
+Passing confirms at runtime that the default configuration is legal, that
+node placements are unique, that every NodeID's routing fields decode back to
+its placement, that all four flit widths are inside the Issue H ranges, and
+that link activation and credit accounting work on all eight ports.
 
 This is a smoke test, not a protocol testbench. There is no traffic
 generator, scoreboard or coverage model; Section 12 of the design
@@ -109,7 +116,7 @@ specification outlines what a complete environment would need.
 | `mn/` | Sequential DVM distribution |
 | `sva/` | Bound local safety, stability and protocol-field assertions with covers |
 | `top/` | Product top and the compile and elaboration harnesses |
-| `tb/` | Reset and idle smoke testbench (not synthesizable) |
+| `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |
 | `doc-src/` | Design specification source |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |

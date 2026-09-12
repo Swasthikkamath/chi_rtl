@@ -963,9 +963,10 @@ top/chi_sva_compile.sv
 `top/chi_mesh_compile.sv` are supplemental elaboration harnesses. They are
 not entries in `filelist.f` and are not product hierarchy.
 
-`tb/chi_smoke_tb.sv` is the simulation top described in Section 12.7. It is
-also outside `filelist.f`, and it is not synthesizable. `Makefile` drives
-lint, the smoke run and document generation.
+`tb/chi_node_link_bfm.sv`, `tb/chi_sim_harness.sv` and `tb/chi_smoke_tb.sv`
+are the simulation files described in Section 12.7. They are also outside
+`filelist.f`, and they are not synthesizable. `Makefile` drives lint, the
+smoke run and document generation.
 
 ## 12.6 Passing lint commands
 
@@ -1007,30 +1008,47 @@ The harnesses `chi_hnf_compile`, `chi_link_compile`, `chi_mesh_compile`,
 `chi_ring_compile`, `chi_xbar_compile`, `chi_sam_compile` and
 `chi_stage1_compile` all pass with the same options.
 
-## 12.7 Reset and idle smoke run
+## 12.7 Reset, link bring-up and idle smoke run
 
 Lint elaborates the design but never executes it, so neither the
 `chi_cfg_check` elaboration checks of Section 3.2 nor any bound assertion
-actually runs during a lint pass. `tb/chi_smoke_tb.sv` closes that gap. It is
-not a protocol testbench: it instantiates `chi_interconnect_compile`, holds
-synchronous reset for eight cycles, releases it, and runs the idle fabric for
-512 cycles.
+actually runs during a lint pass. `tb/chi_smoke_tb.sv` closes that gap:
 
 ```sh
 make sim
 ```
 
-The run fails if any elaboration check calls `$fatal`, if any bound assertion
-fires out of reset, if the idle fabric presents a snoop flit to an RN-F or a
-request flit to an SN-F, or if any port reports a flit parity or L-Credit
-error while no traffic is in flight. Because the elaboration checks execute,
-this run is what confirms at runtime that the default configuration is legal,
-that every node has a unique placement, that each NodeID's routing fields
-decode back to the placement that produced it, and that all four derived flit
-widths fall inside the Issue H ranges.
+This is not a protocol testbench. There is no traffic generator, scoreboard
+or coverage model. It checks three things.
 
-The node count is derived from `CHI_CFG_DEFAULT` rather than written as a
-literal, so the testbench follows a reconfigured node list without edits.
+First, the elaboration checks execute. This is what confirms at runtime that
+the default configuration is legal, that every node has a unique placement,
+that each NodeID's routing fields decode back to the placement that produced
+it, and that all four derived flit widths fall inside the Issue H ranges.
+
+Second, every link comes up. The interconnect owns only its half of each
+link: it initiates the direction it transmits on and acknowledges the
+direction it receives on. Without a peer on the node side, every receive link
+stays in STOP and no L-Credit is ever issued, so `chi_node_link_bfm` supplies
+that peer. It is the mirror image of `chi_link_port`: it initiates the node
+transmit direction, acknowledges the interconnect's, issues L-Credits on the
+channels the node receives, and counts and discards arriving flits.
+`chi_sim_harness` attaches one model per external port. The run requires all
+eight external links to reach RUN in both directions and to hand over their
+full `lcrdDepth` allocation on every applicable channel, and requires the
+HN-F, HN-I and MN ordinals to report no link, since those are internal.
+
+Third, the fabric is silent when idle. With the links up and credits
+available, the interconnect is free to transmit, so the run fails if any node
+receives a flit while no request has been made. It also fails on any
+elaboration `$fatal`, any bound assertion firing out of reset, any reported
+flit parity or L-Credit error, and any link dropping out of RUN.
+
+Node and channel counts are derived from `CHI_CFG_DEFAULT` rather than written
+as literals, so the testbench follows a reconfigured node list without edits.
+`chi_sim_harness` rather than `chi_interconnect_compile` is the simulation
+top, because the compile harness deliberately leaves the node-driven
+interface inputs undriven for lint.
 
 ## 12.8 Regenerating this document
 
