@@ -72,6 +72,29 @@ remaining warnings visible without treating them as errors. `BLKLOOPINIT` is
 suppressed for Verilator 5.020's restriction on nonblocking initialization of
 the unpacked directory arrays; the syntax is accepted by synthesis tools.
 
+## Smoke run
+
+Lint elaborates the design but never runs it, so the elaboration checks in
+`chi_interconnect_top` and the bound assertions never execute during a lint
+pass. `make sim` builds [`tb/chi_smoke_tb.sv`](tb/chi_smoke_tb.sv) and runs
+it:
+
+```sh
+make sim
+```
+
+It holds reset, releases it, and runs the idle fabric. The run fails on any
+elaboration `$fatal`, any assertion that fires out of reset, any flit
+presented to a node while the fabric is idle, and any reported parity or
+L-Credit error. Passing it confirms at runtime that the default configuration
+is legal, that node placements are unique, that every NodeID's routing fields
+decode back to its placement, and that all four flit widths are inside the
+Issue H ranges.
+
+This is a smoke test, not a protocol testbench. There is no traffic
+generator, scoreboard or coverage model; Section 12 of the design
+specification outlines what a complete environment would need.
+
 ## Directory map
 
 | Path | Contents |
@@ -86,7 +109,8 @@ the unpacked directory arrays; the syntax is accepted by synthesis tools.
 | `mn/` | Sequential DVM distribution |
 | `sva/` | Bound local safety, stability and protocol-field assertions with covers |
 | `top/` | Product top and the compile and elaboration harnesses |
+| `tb/` | Reset and idle smoke testbench (not synthesizable) |
 | `doc-src/` | Design specification source |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |
-| `Makefile` | `make lint` and `make doc` |
+| `Makefile` | `make lint`, `make sim` and `make doc` |

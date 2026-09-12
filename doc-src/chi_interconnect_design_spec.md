@@ -82,7 +82,7 @@ packed flit field by itself is carriage, not implementation.
 | DCT | B2.5.1.3, B4.8 | Partial | Eligibility, forwarding-snoop generation and `SnpRespFwded` collection exist. The fallback path when the forwarding peer cannot supply data is not implemented. |
 | DMT, including `ReadNoSnpSep` | B2.5.1.1--B2.5.1.2 | Implemented | `chi_dmt_ctrl` selects direct memory transfer, the downstream read names the Requester in `ReturnNID` and `ReturnTxnID`, the Subordinate sends `CompData` straight to the Requester, and the Home issues only the response it still owes. |
 | DWT | B2.3.2.1, B13.10.24 | Implemented | `chi_dwt_ctrl` sets `DoDWT` on the downstream write, the Subordinate returns `DBIDResp` directly to the Requester, and the Home forwards only the completion. |
-| Atomics | B2.3.3, B4.2.5, B5.4 | Implemented | `chi_atomic_alu` implements the `AtomicStore`, `AtomicLoad`, `AtomicSwap` and `AtomicCompare` operations. The Home serializes the operand, reads the initial value, applies the operation, writes it back and returns the original value. Little-endian and big-endian operands are both handled. |
+| Atomics | B2.3.3, B4.2.5, B5.4 | Implemented | `chi_atomic_alu` implements the `AtomicStore`, `AtomicLoad`, `AtomicSwap` and `AtomicCompare` operations. The Home serializes the operand, reads the initial value, applies the operation, writes it back and returns the original value. Little-endian and big-endian operands are both handled. The datapath is 64 bits, so operands wider than 8 bytes are not supported. |
 | Far atomics | B4.2.5 | Partial | Operations are executed at the Home. There is no negotiation that pushes the operation to the Subordinate. |
 | DVM and MN | B2.3.7, B8 | Partial | The MN serially unicasts `SnpDVMOp` to configured Requesters and collects responses. The two-part DVM message payload is not decoded, so operation-specific ordering is absent. |
 | Sequential coherent snoops | B4.3--B4.4, B4.8 | Partial | The Home walks a precise sharer vector one RN-F at a time and collects responses including forwarded and dirty-data cases. One snoop is outstanding at a time. |
@@ -650,9 +650,12 @@ selection and directory transitions are simplified.
 
 RTL status: Implemented. `chi_atomic_alu` computes `AtomicStore`,
 `AtomicLoad`, `AtomicSwap` and `AtomicCompare` with both operand
-endiannesses. A snoop that invalidates a dirty peer copy supplies the initial
-value and removes the downstream read. The operation is always performed at
-the Home; there is no far-atomic negotiation.
+endiannesses. Big-endian operands are byte-reversed within the operand size
+before the arithmetic and reversed again on the way out, because atomic data
+is byte invariant. A snoop that invalidates a dirty peer copy supplies the
+initial value and removes the downstream read. The datapath is 64 bits wide,
+so operands wider than 8 bytes are unsupported. The operation is always
+performed at the Home; there is no far-atomic negotiation.
 
 ## 8.6 Request Retry
 
@@ -850,6 +853,11 @@ These are local assertions. They do not check complete opcode legality,
 credit conservation across the whole port, cache-state correctness, every
 response dependency, or end-to-end forward progress.
 
+Binding an assertion module that takes an unpacked array port is not portable
+across simulators, so `chi_pos` exports its line-address array packed. This
+is the reason `chi_pos.lineAddr`, `chi_hazard.activeLineAddr` and
+`chi_ordering_sva.lineAddr` are packed two-dimensional rather than unpacked.
+
 ## 12.2 Functional coverage outline
 
 A complete environment should cross topology, channel, source and
@@ -955,6 +963,10 @@ top/chi_sva_compile.sv
 `top/chi_mesh_compile.sv` are supplemental elaboration harnesses. They are
 not entries in `filelist.f` and are not product hierarchy.
 
+`tb/chi_smoke_tb.sv` is the simulation top described in Section 12.7. It is
+also outside `filelist.f`, and it is not synthesizable. `Makefile` drives
+lint, the smoke run and document generation.
+
 ## 12.6 Passing lint commands
 
 `chi_interconnect_compile` is the lint and elaboration target for the product
@@ -995,7 +1007,32 @@ The harnesses `chi_hnf_compile`, `chi_link_compile`, `chi_mesh_compile`,
 `chi_ring_compile`, `chi_xbar_compile`, `chi_sam_compile` and
 `chi_stage1_compile` all pass with the same options.
 
-## 12.7 Regenerating this document
+## 12.7 Reset and idle smoke run
+
+Lint elaborates the design but never executes it, so neither the
+`chi_cfg_check` elaboration checks of Section 3.2 nor any bound assertion
+actually runs during a lint pass. `tb/chi_smoke_tb.sv` closes that gap. It is
+not a protocol testbench: it instantiates `chi_interconnect_compile`, holds
+synchronous reset for eight cycles, releases it, and runs the idle fabric for
+512 cycles.
+
+```sh
+make sim
+```
+
+The run fails if any elaboration check calls `$fatal`, if any bound assertion
+fires out of reset, if the idle fabric presents a snoop flit to an RN-F or a
+request flit to an SN-F, or if any port reports a flit parity or L-Credit
+error while no traffic is in flight. Because the elaboration checks execute,
+this run is what confirms at runtime that the default configuration is legal,
+that every node has a unique placement, that each NodeID's routing fields
+decode back to the placement that produced it, and that all four derived flit
+widths fall inside the Issue H ranges.
+
+The node count is derived from `CHI_CFG_DEFAULT` rather than written as a
+literal, so the testbench follows a reconfigured node list without edits.
+
+## 12.8 Regenerating this document
 
 The Word file in `docs/` is generated from `doc-src/`:
 
@@ -1029,7 +1066,9 @@ the cross-references in the prose stay correct in every output format.
 5. No RN cache controller is provided; Section 10 is the contract, not RTL.
 6. MultiReq and `CacheLineID`, PBHA, MTE tag semantics and MEC access control
    are carriage only. MPAM is carried but not enforced.
-7. Far atomics are always executed at the Home, and DCT has no fallback path.
+7. Atomics are always executed at the Home rather than negotiated to the
+   Subordinate, the atomic datapath is 64 bits so wider operands are
+   unsupported, and DCT has no fallback path.
 8. DVM decodes no payload, so no operation-specific ordering is applied.
 9. Runtime SAM writes lack complete validation, CHI-MMIO lacks security and
    quiescent commit, and APB quiescence does not inspect every internal
@@ -1063,3 +1102,5 @@ the cross-references in the prose stay correct in every output format.
 | APB security | Writes require `PPROT[1]==0` | Reads remain unrestricted. |
 | Reconfiguration | Staged fields plus an explicit commit | Software owns the ordering; CHI-MMIO is less protected than APB. |
 | Reset | Synchronous active low | No asynchronous reset behaviour and no CDC support. |
+| Bound assertion array ports | Packed two-dimensional, never unpacked | `bind` elaborates portably across simulators. |
+| Loop bounds in helper functions | Computed once into a local, never a call in the loop condition | The bound is not recomputed per iteration, and the design simulates. |
