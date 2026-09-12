@@ -5,6 +5,21 @@ package chi_pkg;
   localparam int unsigned CHI_MAX_RSP_FLIT_W = 73;
   localparam int unsigned CHI_MAX_SNP_FLIT_W = 140;
   localparam int unsigned CHI_MAX_DAT_FLIT_W = 797;
+  localparam int unsigned CHI_MAX_NOC_PAYLOAD_W = CHI_MAX_DAT_FLIT_W;
+
+  typedef enum logic [1:0] {
+    CHI_CHANNEL_REQ = 2'b00,
+    CHI_CHANNEL_RSP = 2'b01,
+    CHI_CHANNEL_SNP = 2'b10,
+    CHI_CHANNEL_DAT = 2'b11
+  } chi_channel_e;
+
+  typedef struct packed {
+    chi_channel_e channel;
+    logic [3:0] qos;
+    logic [CHI_MAX_NODEID_W-1:0] targetNodeId;
+    logic [CHI_MAX_NOC_PAYLOAD_W-1:0] payload;
+  } chi_noc_flit_t;
 
   typedef enum logic [6:0] {
     REQ_LCRD_RETURN                    = 7'h00,
