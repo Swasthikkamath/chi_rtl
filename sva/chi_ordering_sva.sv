@@ -8,7 +8,7 @@ module chi_ordering_sva #(
   input logic allocReady,
   input logic [CFG.addrW-7:0] allocLineAddr,
   input logic [DEPTH-1:0] active,
-  input logic [CFG.addrW-7:0] lineAddr [DEPTH]
+  input logic [DEPTH-1:0][CFG.addrW-7:0] lineAddr
 );
   for (genvar firstEntry = 0; firstEntry < DEPTH;
        firstEntry++) begin : active_line_first

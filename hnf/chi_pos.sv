@@ -27,7 +27,10 @@ module chi_pos #(
   input  logic [CFG.addrW-7:0] queryLineAddr,
   output logic [DEPTH-1:0] active,
   output logic [DEPTH-1:0] readyToFree,
-  output logic [CFG.addrW-7:0] lineAddr [DEPTH],
+  // Packed rather than unpacked because the bound ordering assertions take
+  // this array as a port, and an unpacked array port is not portable across
+  // every simulator's bind implementation.
+  output logic [DEPTH-1:0][CFG.addrW-7:0] lineAddr,
   output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requester [DEPTH],
   output logic [CFG.txnIdW-1:0] txnId [DEPTH],
   output chi_pkg::chi_req_opcode_e opcode [DEPTH],

@@ -80,7 +80,7 @@ module chi_hnf_top #(
   logic posFree;
   logic [POS_DEPTH-1:0] posActive;
   logic [POS_DEPTH-1:0] posReadyToFree;
-  logic [CFG.addrW-7:0] posLine [POS_DEPTH];
+  logic [POS_DEPTH-1:0][CFG.addrW-7:0] posLine;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] posRequester [POS_DEPTH];
   logic [CFG.txnIdW-1:0] posTxn [POS_DEPTH];
   chi_req_opcode_e posOpcode [POS_DEPTH];

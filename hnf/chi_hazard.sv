@@ -5,7 +5,7 @@ module chi_hazard #(
   input  logic [CFG.addrW-7:0] requestLineAddr,
   input  chi_pkg::chi_order_e requestOrder,
   input  logic [DEPTH-1:0] active,
-  input  logic [CFG.addrW-7:0] activeLineAddr [DEPTH],
+  input  logic [DEPTH-1:0][CFG.addrW-7:0] activeLineAddr,
   input  logic [DEPTH-1:0] activeOrdered,
   output logic lineHazard,
   output logic orderHazard,
