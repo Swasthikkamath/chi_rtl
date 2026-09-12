@@ -1,0 +1,534 @@
+module chi_hnf_top #(
+  parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
+  parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0] HN_NODE_ID = '0,
+  parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0] SN_NODE_ID = '0,
+  parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
+  parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
+    RNF_NODE_IDS [NUM_RNF] = '{default:'0},
+  parameter bit COMBINED_COMP_DBID = 1'b1
+) (
+  input  logic clk,
+  input  logic resetn,
+  input  logic reqInValid,
+  output logic reqInReady,
+  input  chi_pkg::chi_noc_flit_t reqInFlit,
+  input  logic rspInValid,
+  output logic rspInReady,
+  input  chi_pkg::chi_noc_flit_t rspInFlit,
+  input  logic datInValid,
+  output logic datInReady,
+  input  chi_pkg::chi_noc_flit_t datInFlit,
+  output logic reqOutValid,
+  input  logic reqOutReady,
+  output chi_pkg::chi_noc_flit_t reqOutFlit,
+  output logic rspOutValid,
+  input  logic rspOutReady,
+  output chi_pkg::chi_noc_flit_t rspOutFlit,
+  output logic snpOutValid,
+  input  logic snpOutReady,
+  output chi_pkg::chi_noc_flit_t snpOutFlit,
+  output logic datOutValid,
+  input  logic datOutReady,
+  output chi_pkg::chi_noc_flit_t datOutFlit
+);
+  import chi_cfg_pkg::*;
+  import chi_pkg::*;
+
+  localparam int unsigned POS_DEPTH = (CFG.posEntries > 0) ? CFG.posEntries : 1;
+
+  typedef enum logic [2:0] {
+    HNF_IDLE, HNF_SNOOP_START, HNF_SNOOP_WAIT, HNF_REQ_SEND,
+    HNF_WAIT_RESPONSE, HNF_WAIT_COMP_ACK, HNF_BACKINV_START,
+    HNF_BACKINV_WAIT
+  } hnf_state_e;
+  hnf_state_e state;
+
+  chi_req_flit_t incomingReq;
+  chi_req_flit_t activeReq;
+  chi_rsp_flit_t incomingRsp;
+  chi_dat_flit_t incomingDat;
+  chi_req_flit_t downstreamReq;
+  chi_rsp_flit_t responseFlit;
+  chi_dat_flit_t requesterDat;
+  logic [CFG.addrW-7:0] incomingLine;
+  logic coherentRequest;
+  logic activeCoherent;
+  logic activeWrite;
+  logic activeCmo;
+  logic cmoWrite;
+  logic cmoCombined;
+  logic cmoSnoop;
+  logic cmoPersist;
+  logic [2:0] cmoCategory;
+  logic cmoCompletionPending;
+  logic cmoPersistPending;
+  logic cmoDone;
+
+  logic posAllocReady;
+  logic [clog2Min1(POS_DEPTH)-1:0] posAllocIndex;
+  logic [clog2Min1(POS_DEPTH)-1:0] activePosIndex;
+  logic posFree;
+  logic [POS_DEPTH-1:0] posActive;
+  logic [POS_DEPTH-1:0] posReadyToFree;
+  logic [CFG.addrW-7:0] posLine [POS_DEPTH];
+  logic [CFG.nodeIdW-1:0] posRequester [POS_DEPTH];
+  logic [CFG.txnIdW-1:0] posTxn [POS_DEPTH];
+  chi_req_opcode_e posOpcode [POS_DEPTH];
+  logic [2:0] posLifecycle [POS_DEPTH];
+  logic sameAddressBusy;
+
+  logic sfHit;
+  logic [NUM_RNF-1:0] sfSharers;
+  logic sfPrecise;
+  logic sfHasOwner;
+  logic [clog2Min1(NUM_RNF)-1:0] sfOwner;
+  logic sfUpdate;
+  logic sfUpdateReady;
+  logic [NUM_RNF-1:0] sfUpdateSharers;
+  logic sfInvalidate;
+  logic sfBackInvValid;
+  logic sfBackInvReady;
+  logic [CFG.addrW-7:0] sfBackInvLine;
+  logic [NUM_RNF-1:0] sfBackInvSharers;
+  logic sfBackInvDone;
+
+  logic snpStart;
+  logic snpStartReady;
+  logic [NUM_RNF-1:0] snpStartSharers;
+  logic [CFG.addrW-7:0] snpStartLine;
+  chi_snp_opcode_e snpStartOpcode;
+  logic [CFG.txnIdW-1:0] snpStartTxn;
+  logic [CFG.nodeIdW-1:0] snpFwdNid;
+  logic [CFG.txnIdW-1:0] snpFwdTxn;
+  logic snpRetToSrc;
+  logic snpBusy;
+  logic snpDone;
+  logic snpRspReady;
+
+  logic dctEligible;
+  logic dctFallback;
+  chi_snp_opcode_e dctOpcode;
+  logic [CFG.nodeIdW-1:0] dctFwdNid;
+  logic [CFG.txnIdW-1:0] dctFwdTxn;
+  logic dctRetToSrc;
+
+  logic retryAccept;
+  logic retryAck;
+  logic [1:0] retryClass;
+  logic retryGrantValid;
+  logic [1:0] retryGrantClass;
+  logic [7:0] retryPending [4];
+  logic resourcesAvailable;
+  logic hazardBlocked;
+  logic hazardLine;
+  logic hazardOrder;
+  logic [POS_DEPTH-1:0] activeOrdered;
+  logic requestHandshake;
+  logic retryHandshake;
+  logic activeNeedsSnoop;
+  logic exclReserveReady;
+  logic exclOkay;
+  logic activeExclOkay;
+  logic activeNeedPersist;
+  logic activeGotComp;
+  logic activeGotPersist;
+
+  function automatic logic isCoherent(input chi_req_opcode_e op);
+    return (op == REQ_READ_SHARED) || (op == REQ_READ_CLEAN)
+           || (op == REQ_READ_UNIQUE) || (op == REQ_READ_NOT_SHARED_DIRTY)
+           || (op == REQ_READ_PREFER_UNIQUE) || (op == REQ_CLEAN_SHARED)
+           || (op == REQ_CLEAN_INVALID) || (op == REQ_MAKE_INVALID)
+           || (op == REQ_CLEAN_UNIQUE) || (op == REQ_MAKE_UNIQUE);
+  endfunction
+
+  function automatic logic isWrite(input chi_req_opcode_e op);
+    return (op inside {REQ_WRITE_EVICT_FULL, REQ_WRITE_CLEAN_FULL,
+                       REQ_WRITE_UNIQUE_PTL, REQ_WRITE_UNIQUE_FULL,
+                       REQ_WRITE_BACK_PTL, REQ_WRITE_BACK_FULL,
+                       REQ_WRITE_NO_SNP_PTL, REQ_WRITE_NO_SNP_FULL,
+                       REQ_WRITE_UNIQUE_ZERO, REQ_WRITE_NO_SNP_ZERO});
+  endfunction
+
+  function automatic logic [NUM_RNF-1:0] requesterBit(
+    input logic [CFG.nodeIdW-1:0] nodeId
+  );
+    logic [NUM_RNF-1:0] result;
+    result = '0;
+    for (int unsigned i = 0; i < NUM_RNF; i++)
+      if (nodeId == RNF_NODE_IDS[i][CFG.nodeIdW-1:0])
+        result[i] = 1'b1;
+    return result;
+  endfunction
+
+  function automatic logic [clog2Min1(NUM_RNF)-1:0] requesterIndex(
+    input logic [CFG.nodeIdW-1:0] nodeId
+  );
+    logic [clog2Min1(NUM_RNF)-1:0] result;
+    result = '0;
+    for (int unsigned i = 0; i < NUM_RNF; i++)
+      if (nodeId == RNF_NODE_IDS[i][CFG.nodeIdW-1:0])
+        result = i[clog2Min1(NUM_RNF)-1:0];
+    return result;
+  endfunction
+
+  always_comb begin
+    incomingReq = unpackReqFlit(CFG, reqInFlit.payload[CHI_MAX_REQ_FLIT_W-1:0]);
+    incomingRsp = unpackRspFlit(CFG, rspInFlit.payload[CHI_MAX_RSP_FLIT_W-1:0]);
+    incomingDat = unpackDatFlit(CFG, datInFlit.payload[CHI_MAX_DAT_FLIT_W-1:0]);
+    incomingLine = incomingReq.addr[CFG.addrW-1:6];
+    coherentRequest = isCoherent(incomingReq.opcode);
+  end
+
+  always_comb begin
+    resourcesAvailable = (incomingReq.opcode == REQ_PCRD_RETURN)
+                         || ((state == HNF_IDLE) && posAllocReady
+                             && !hazardBlocked && !sfBackInvValid);
+    reqInReady = resourcesAvailable
+                 || (!resourcesAvailable && incomingReq.allowRetry
+                     && rspOutReady
+                     && (state != HNF_WAIT_RESPONSE));
+    requestHandshake = reqInValid && reqInReady && resourcesAvailable;
+    retryHandshake = reqInValid && reqInReady && !resourcesAvailable;
+
+    downstreamReq = activeReq;
+    downstreamReq.tgtId = SN_NODE_ID[CFG.nodeIdW-1:0];
+    downstreamReq.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    reqOutFlit = '0;
+    reqOutFlit.channel = CHI_CHANNEL_REQ;
+    reqOutFlit.targetNodeId = SN_NODE_ID;
+    reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] =
+      packReqFlit(CFG, downstreamReq);
+    reqOutValid = state == HNF_REQ_SEND;
+
+    responseFlit = incomingRsp;
+    responseFlit.tgtId = activeReq.srcId;
+    responseFlit.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    responseFlit.txnId = activeReq.txnId;
+    if (COMBINED_COMP_DBID && activeWrite
+        && (incomingRsp.opcode == RSP_COMP))
+      responseFlit.opcode = RSP_COMP_DBID_RESP;
+    if (activeReq.exclOrSnoopMeOrCah && activeExclOkay)
+      responseFlit.respErr = RESP_ERR_EXOK;
+    rspOutFlit = '0;
+    rspOutFlit.channel = CHI_CHANNEL_RSP;
+    rspOutFlit.targetNodeId = activeReq.srcId;
+    rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
+      packRspFlit(CFG, responseFlit);
+    rspOutValid = 1'b0;
+
+    requesterDat = incomingDat;
+    requesterDat.tgtId = (incomingDat.srcId == activeReq.srcId)
+                         ? SN_NODE_ID[CFG.nodeIdW-1:0] : activeReq.srcId;
+    requesterDat.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    requesterDat.txnId = activeReq.txnId;
+    datOutFlit = '0;
+    datOutFlit.channel = CHI_CHANNEL_DAT;
+    datOutFlit.targetNodeId = requesterDat.tgtId;
+    datOutFlit.payload = packDatFlit(CFG, requesterDat);
+    datOutValid = 1'b0;
+    datInReady = 1'b0;
+    rspInReady = 1'b0;
+
+    if ((state == HNF_WAIT_RESPONSE) && rspInValid
+        && (incomingRsp.opcode != RSP_SNP_RESP)
+        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED)) begin
+      rspOutValid = 1'b1;
+      rspInReady = rspOutReady;
+    end
+    if ((state == HNF_WAIT_RESPONSE) && datInValid) begin
+      datOutValid = 1'b1;
+      datInReady = datOutReady;
+    end
+    if ((state == HNF_SNOOP_WAIT) || (state == HNF_BACKINV_WAIT))
+      rspInReady = snpRspReady;
+    if (state == HNF_WAIT_COMP_ACK)
+      rspInReady = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
+                   && (incomingRsp.srcId == activeReq.srcId);
+
+    if (retryHandshake) begin
+      responseFlit = '0;
+      responseFlit.tgtId = incomingReq.srcId;
+      responseFlit.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+      responseFlit.txnId = incomingReq.txnId;
+      responseFlit.opcode = RSP_RETRY_ACK;
+      responseFlit.pCrdType = {2'b00, retryClass};
+      rspOutFlit.targetNodeId = incomingReq.srcId;
+      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
+        packRspFlit(CFG, responseFlit);
+      rspOutValid = reqInValid && !resourcesAvailable;
+    end
+  end
+
+  chi_cmo cmo_decode (
+    .clk, .resetn, .opcode(incomingReq.opcode),
+    .startValid(requestHandshake), .completionValid(
+      (state == HNF_WAIT_RESPONSE) && rspInValid && rspInReady
+      && ((incomingRsp.opcode == RSP_COMP)
+          || (incomingRsp.opcode == RSP_COMP_DBID_RESP)
+          || (incomingRsp.opcode == RSP_COMP_CMO)
+          || (incomingRsp.opcode == RSP_COMP_PERSIST))),
+    .persistValid((state == HNF_WAIT_RESPONSE) && rspInValid && rspInReady
+                  && ((incomingRsp.opcode == RSP_PERSIST)
+                      || (incomingRsp.opcode == RSP_COMP_PERSIST))),
+    .isCmo(activeCmo), .isWrite(cmoWrite),
+    .combinedWriteCmo(cmoCombined), .requiresSnoopCompletion(cmoSnoop),
+    .requiresPersist(cmoPersist), .category(cmoCategory),
+    .completionPending(cmoCompletionPending),
+    .persistPending(cmoPersistPending), .done(cmoDone)
+  );
+
+  always_comb begin
+    activeOrdered = '0;
+    if (activeReq.order != ORDER_NONE)
+      activeOrdered = posActive;
+  end
+
+  chi_hazard #(.CFG(CFG), .DEPTH(POS_DEPTH)) hazard (
+    .requestLineAddr(incomingLine), .requestOrder(incomingReq.order),
+    .active(posActive), .activeLineAddr(posLine), .activeOrdered,
+    .lineHazard(hazardLine), .orderHazard(hazardOrder), .blocked(hazardBlocked)
+  );
+
+  chi_excl_mon #(
+    .CFG(CFG), .MONITORS((CFG.exclMonitors > 0) ? CFG.exclMonitors : 1)
+  ) exclusive_monitor (
+    .clk, .resetn,
+    .reserveValid(requestHandshake && incomingReq.exclOrSnoopMeOrCah
+                  && !isWrite(incomingReq.opcode)),
+    .reserveReady(exclReserveReady), .reserveLineAddr(incomingLine),
+    .reserveRequester(incomingReq.srcId),
+    .exclusiveCheckValid(requestHandshake && incomingReq.exclOrSnoopMeOrCah
+                         && isWrite(incomingReq.opcode)),
+    .exclusiveLineAddr(incomingLine),
+    .exclusiveRequester(incomingReq.srcId), .exclusiveOkay(exclOkay),
+    .conflictValid((requestHandshake && isWrite(incomingReq.opcode))
+                   || snpOutValid),
+    .conflictIsWriteOrSnoop(1'b1),
+    .conflictLineAddr(requestHandshake ? incomingLine : snpStartLine)
+  );
+
+  chi_dct_ctrl #(.CFG(CFG)) dct_ctrl (
+    .requestOpcode(activeReq.opcode), .requestOrder(activeReq.order),
+    .requester(activeReq.srcId), .requesterTxnId(activeReq.txnId),
+    .forwarderKnown(sfHasOwner), .forwarder(RNF_NODE_IDS[sfOwner][CFG.nodeIdW-1:0]),
+    .forwarderClean(sfPrecise), .dataPresent(sfHit), .dataFullLine(sfPrecise),
+    .dataPoison(1'b0), .dataError(1'b0), .responseCompatible(1'b1),
+    .mteCompatible(!CFG.mteEn), .eligible(dctEligible),
+    .fallbackToHome(dctFallback), .snoopOpcode(dctOpcode),
+    .fwdNid(dctFwdNid), .fwdTxnId(dctFwdTxn), .retToSrc(dctRetToSrc)
+  );
+
+  chi_pos #(.CFG(CFG), .DEPTH(POS_DEPTH)) pos (
+    .clk, .resetn,
+    .allocValid(requestHandshake && (incomingReq.opcode != REQ_PCRD_RETURN)),
+    .allocReady(posAllocReady), .allocLineAddr(incomingLine),
+    .allocRequester(incomingReq.srcId), .allocTxnId(incomingReq.txnId),
+    .allocOpcode(incomingReq.opcode), .allocNeedSnoop(coherentRequest && sfHit),
+    .allocNeedData(1'b1), .allocNeedComp(1'b1),
+    .allocNeedCompAck(incomingReq.expCompAck), .allocIndex(posAllocIndex),
+    .freeValid(posFree), .freeIndex(activePosIndex),
+    .progressValid(posFree), .progressIndex(activePosIndex),
+    .progressSnoopDone(posFree), .progressDataDone(posFree),
+    .progressCompDone(posFree), .progressCompAckDone(posFree),
+    .sameAddressBusy, .queryLineAddr(incomingLine), .active(posActive),
+    .readyToFree(posReadyToFree), .lineAddr(posLine), .requester(posRequester),
+    .txnId(posTxn), .opcode(posOpcode), .lifecycle(posLifecycle)
+  );
+
+  chi_snoop_filter #(
+    .CFG(CFG), .ENTRIES((CFG.snpFilterEntries > 0) ? CFG.snpFilterEntries : 1),
+    .WAYS((CFG.snpFilterWays > 0) ? CFG.snpFilterWays : 1), .NUM_RNF(NUM_RNF)
+  ) snoop_filter (
+    .clk, .resetn, .lookupValid(1'b1), .lookupLineAddr(
+      (state == HNF_IDLE) ? incomingLine : activeReq.addr[CFG.addrW-1:6]),
+    .lookupHit(sfHit), .lookupSharers(sfSharers), .lookupPrecise(sfPrecise),
+    .lookupHasOwner(sfHasOwner), .lookupOwner(sfOwner),
+    .updateValid(sfUpdate), .updateReady(sfUpdateReady),
+    .updateLineAddr(activeReq.addr[CFG.addrW-1:6]),
+    .updateSharers(sfUpdateSharers), .updatePrecise(1'b1),
+    .updateHasOwner(!sfInvalidate
+      && ((activeReq.opcode == REQ_READ_UNIQUE)
+          || (activeReq.opcode == REQ_MAKE_UNIQUE))),
+    .updateOwner(requesterIndex(activeReq.srcId)), .invalidate(sfInvalidate),
+    .backInvValid(sfBackInvValid), .backInvReady(sfBackInvReady),
+    .backInvLineAddr(sfBackInvLine), .backInvSharers(sfBackInvSharers),
+    .backInvDone(sfBackInvDone)
+  );
+
+  always_comb begin
+    snpStart = (state == HNF_SNOOP_START) || (state == HNF_BACKINV_START);
+    snpStartSharers = (state == HNF_BACKINV_START)
+                      ? sfBackInvSharers : sfSharers;
+    snpStartLine = (state == HNF_BACKINV_START)
+                   ? sfBackInvLine : activeReq.addr[CFG.addrW-1:6];
+    snpStartOpcode = (state == HNF_BACKINV_START) ? SNP_MAKE_INVALID :
+                     (dctEligible ? dctOpcode :
+                      (activeWrite ? SNP_UNIQUE : SNP_SHARED));
+    snpStartTxn = (state == HNF_BACKINV_START) ? '0 : activeReq.txnId;
+    snpFwdNid = dctEligible ? dctFwdNid : '0;
+    snpFwdTxn = dctEligible ? dctFwdTxn : '0;
+    snpRetToSrc = dctEligible ? dctRetToSrc : 1'b1;
+    sfBackInvReady = state == HNF_BACKINV_START && snpStartReady;
+    sfBackInvDone = state == HNF_BACKINV_WAIT && snpDone;
+  end
+
+  chi_snp_gen #(
+    .CFG(CFG), .NUM_RNF(NUM_RNF), .RNF_NODE_IDS(RNF_NODE_IDS),
+    .HN_NODE_ID(HN_NODE_ID)
+  ) snoop_generator (
+    .clk, .resetn, .startValid(snpStart), .startReady(snpStartReady),
+    .startSharers(snpStartSharers), .startLineAddr(snpStartLine),
+    .startOpcode(snpStartOpcode), .startTxnId(snpStartTxn),
+    .startFwdNid(snpFwdNid), .startFwdTxnId(snpFwdTxn),
+    .startRetToSrc(snpRetToSrc), .startNonSecure(activeReq.ns),
+    .snpValid(snpOutValid), .snpReady(snpOutReady), .snpFlit(snpOutFlit),
+    .responseValid(rspInValid
+      && ((incomingRsp.opcode == RSP_SNP_RESP)
+          || (incomingRsp.opcode == RSP_SNP_RESP_FWDED))),
+    .responseReady(snpRspReady), .responseSource(incomingRsp.srcId),
+    .busy(snpBusy), .done(snpDone)
+  );
+
+  chi_retry retry (
+    .clk, .resetn, .requestValid(retryHandshake),
+    .resourcesAvailable(1'b0), .allowRetry(incomingReq.allowRetry),
+    .requestClass(incomingReq.pCrdType[1:0]), .acceptRequest(retryAccept),
+    .sendRetryAck(retryAck), .retryClass,
+    .creditReturnValid(reqInValid && reqInReady
+                       && (incomingReq.opcode == REQ_PCRD_RETURN)),
+    .creditReturnClass(incomingReq.pCrdType[1:0]),
+    .cancelValid(datInValid && datInReady
+                 && (incomingDat.opcode == DAT_WRITE_DATA_CANCEL)),
+    .cancelClass(incomingReq.pCrdType[1:0]), .grantValid(retryGrantValid),
+    .grantReady(1'b0), .grantClass(retryGrantClass), .pendingCount(retryPending)
+  );
+
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      state <= HNF_IDLE;
+      activeReq <= '0;
+      activePosIndex <= '0;
+      activeCoherent <= 1'b0;
+      activeWrite <= 1'b0;
+      activeNeedsSnoop <= 1'b0;
+      activeExclOkay <= 1'b0;
+      activeNeedPersist <= 1'b0;
+      activeGotComp <= 1'b0;
+      activeGotPersist <= 1'b0;
+      posFree <= 1'b0;
+      sfUpdate <= 1'b0;
+      sfUpdateSharers <= '0;
+      sfInvalidate <= 1'b0;
+    end else begin
+      posFree <= 1'b0;
+      sfUpdate <= 1'b0;
+      case (state)
+        HNF_IDLE: begin
+          if (sfBackInvValid)
+            state <= HNF_BACKINV_START;
+          else if (requestHandshake
+                   && (incomingReq.opcode != REQ_PCRD_RETURN)) begin
+            activeReq <= incomingReq;
+            activePosIndex <= posAllocIndex;
+            activeCoherent <= coherentRequest;
+            activeWrite <= isWrite(incomingReq.opcode) || cmoWrite;
+            activeNeedsSnoop <= (coherentRequest || activeCmo) && sfHit
+                                && (sfSharers != '0);
+            activeExclOkay <= !incomingReq.exclOrSnoopMeOrCah
+                              || (isWrite(incomingReq.opcode)
+                                  ? exclOkay : exclReserveReady);
+            activeNeedPersist <= cmoPersist;
+            activeGotComp <= 1'b0;
+            activeGotPersist <= !cmoPersist;
+            if ((coherentRequest || activeCmo) && sfHit && (sfSharers != '0))
+              state <= HNF_SNOOP_START;
+            else
+              state <= HNF_REQ_SEND;
+          end
+        end
+        HNF_SNOOP_START:
+          if (snpStart && snpStartReady)
+            state <= HNF_SNOOP_WAIT;
+        HNF_SNOOP_WAIT:
+          if (snpDone)
+            state <= HNF_REQ_SEND;
+        HNF_REQ_SEND:
+          if (reqOutValid && reqOutReady)
+            state <= HNF_WAIT_RESPONSE;
+        HNF_WAIT_RESPONSE: begin
+          if (rspInValid && rspInReady) begin
+            if ((incomingRsp.opcode == RSP_COMP)
+                || (incomingRsp.opcode == RSP_COMP_DBID_RESP)
+                || (incomingRsp.opcode == RSP_COMP_CMO)
+                || (incomingRsp.opcode == RSP_COMP_PERSIST))
+              activeGotComp <= 1'b1;
+            if ((incomingRsp.opcode == RSP_PERSIST)
+                || (incomingRsp.opcode == RSP_COMP_PERSIST))
+              activeGotPersist <= 1'b1;
+            if ((activeGotComp || (incomingRsp.opcode == RSP_COMP)
+                 || (incomingRsp.opcode == RSP_COMP_DBID_RESP)
+                 || (incomingRsp.opcode == RSP_COMP_CMO)
+                 || (incomingRsp.opcode == RSP_COMP_PERSIST))
+                && (activeGotPersist || !activeNeedPersist
+                    || (incomingRsp.opcode == RSP_PERSIST)
+                    || (incomingRsp.opcode == RSP_COMP_PERSIST))) begin
+              if (activeReq.expCompAck)
+                state <= HNF_WAIT_COMP_ACK;
+              else begin
+                state <= HNF_IDLE;
+                posFree <= 1'b1;
+                if (activeCoherent) begin
+                  sfUpdate <= 1'b1;
+                  if (activeWrite)
+                    sfUpdateSharers <= '0;
+                  else if ((activeReq.opcode == REQ_READ_UNIQUE)
+                           || (activeReq.opcode == REQ_MAKE_UNIQUE))
+                    sfUpdateSharers <= requesterBit(activeReq.srcId);
+                  else
+                    sfUpdateSharers <= sfSharers
+                                       | requesterBit(activeReq.srcId);
+                  sfInvalidate <= activeWrite;
+                end
+              end
+            end
+          end else if (datInValid && datInReady
+                       && (incomingDat.opcode == DAT_COMP_DATA)
+                       && (incomingDat.dataId == incomingDat.numDat)) begin
+            if (activeReq.expCompAck) begin
+              state <= HNF_WAIT_COMP_ACK;
+            end else begin
+              state <= HNF_IDLE;
+              posFree <= 1'b1;
+            end
+            if (activeCoherent) begin
+              sfUpdate <= 1'b1;
+              if (activeWrite)
+                sfUpdateSharers <= '0;
+              else if ((activeReq.opcode == REQ_READ_UNIQUE)
+                       || (activeReq.opcode == REQ_MAKE_UNIQUE))
+                sfUpdateSharers <= requesterBit(activeReq.srcId);
+              else
+                sfUpdateSharers <= sfSharers
+                                   | requesterBit(activeReq.srcId);
+              sfInvalidate <= activeWrite;
+            end
+          end
+        end
+        HNF_WAIT_COMP_ACK: begin
+          if (rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
+              && (incomingRsp.srcId == activeReq.srcId)) begin
+            state <= HNF_IDLE;
+            posFree <= 1'b1;
+          end
+        end
+        HNF_BACKINV_START:
+          if (snpStart && snpStartReady)
+            state <= HNF_BACKINV_WAIT;
+        HNF_BACKINV_WAIT:
+          if (snpDone)
+            state <= HNF_IDLE;
+        default: state <= HNF_IDLE;
+      endcase
+    end
+  end
+endmodule
