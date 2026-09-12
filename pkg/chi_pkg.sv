@@ -377,6 +377,48 @@ package chi_pkg;
     return (flitWidth + 7) / 8;
   endfunction
 
+  // DataID counts 16-byte granules of the 64-byte line, so one DAT packet
+  // advances it by the number of granules the data bus carries at once: 1 for
+  // a 128-bit bus, 2 for 256-bit, 4 for 512-bit (IHI 0050H B2.4.6,
+  // Table B2.16).
+  function automatic int unsigned datIdStep(input chi_cfg_t cfg);
+    int unsigned step;
+    step = (cfg.dataW / 8) / 16;
+    return (step == 0) ? 1 : step;
+  endfunction
+
+  // DataID of the final packet of the data message for a transfer of 1 << size
+  // bytes starting at addr. A transfer of 16 bytes or less is always a single
+  // packet, so the first and the final DataID coincide.
+  function automatic logic [CHI_DATAID_SLOT_W-1:0] datLastDataId(
+    input chi_cfg_t cfg,
+    input logic [CHI_MAX_ADDR_W-1:0] addr,
+    input logic [2:0] size
+  );
+    int unsigned lastByte;
+    int unsigned granule;
+    int unsigned step;
+    step = datIdStep(cfg);
+    lastByte = (32'(addr[5:0]) + (32'd1 << size) - 32'd1) & 32'h3F;
+    granule = (lastByte / 16) & ~(step - 1);
+    return CHI_DATAID_SLOT_W'(granule);
+  endfunction
+
+  // Whether a received DAT packet completes the data message. NumDat counts
+  // the packets elided behind this one, so an elided tail completes the
+  // message on the packet that stands in for it (IHI 0050H B2.9.5.1).
+  function automatic logic datLastPacket(
+    input chi_cfg_t cfg,
+    input logic [CHI_DATAID_SLOT_W-1:0] dataId,
+    input logic [1:0] numDat,
+    input logic [CHI_MAX_ADDR_W-1:0] addr,
+    input logic [2:0] size
+  );
+    int unsigned covered;
+    covered = 32'(dataId) + (32'(numDat) * datIdStep(cfg));
+    return covered >= 32'(datLastDataId(cfg, addr, size));
+  endfunction
+
   // The result is clamped to the width of the counter so that a nonsensical
   // value cannot spin the loop past the point where the shift wraps.
   function automatic int unsigned clog2Min1(input int unsigned value);

@@ -118,7 +118,8 @@ module chi_proto_sva #(
        }))
       && (datInValid && datInReady
           && (incomingDat.opcode == DAT_COMP_DATA)
-          && (incomingDat.dataId == incomingDat.numDat))));
+          && datLastPacket(CFG, incomingDat.dataId, incomingDat.numDat,
+                           activeReq.addr, activeReq.size))));
 
   // PCrdGrant must not carry a TxnID or a DBID (IHI 0050H B2.5.5).
   PCRD_GRANT_FIELDS_UNUSED: assert property (

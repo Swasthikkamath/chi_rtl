@@ -61,6 +61,8 @@ module chi_hnf_top #(
   chi_rsp_flit_t responseFlit;
   chi_dat_flit_t requesterDat;
   logic [CFG.addrW-7:0] incomingLine;
+  logic incomingDatLast;
+  logic pullDatLast;
   logic coherentRequest;
   logic activeCoherent;
   logic activeWrite;
@@ -324,6 +326,14 @@ module chi_hnf_top #(
     incomingRsp = unpackRspFlit(CFG, rspInFlit.payload[CHI_MAX_RSP_FLIT_W-1:0]);
     incomingDat = unpackDatFlit(CFG, datInFlit.payload[CHI_MAX_DAT_FLIT_W-1:0]);
     incomingLine = incomingReq.addr[CFG.addrW-1:6];
+    // A data message occupies as many DAT packets as the data bus needs to
+    // carry Size bytes, so the end of the message is a function of the
+    // transaction and not of the packet alone (IHI 0050H B2.4.6).
+    incomingDatLast = datLastPacket(CFG, incomingDat.dataId, incomingDat.numDat,
+                                    activeReq.addr, activeReq.size);
+    // The stash data pull always reads a whole line.
+    pullDatLast = datLastPacket(CFG, incomingDat.dataId, incomingDat.numDat,
+                                activeReq.addr, 3'd6);
     coherentRequest = isCoherent(incomingReq.opcode);
     atomicRequest = CFG.atomicEn && isAtomicOpcode(incomingReq.opcode);
   end
@@ -1062,8 +1072,7 @@ module chi_hnf_top #(
           if (reqOutValid && reqOutReady)
             state <= HNF_PULL_DATA;
         HNF_PULL_DATA:
-          if (datOutValid && datOutReady
-              && (incomingDat.dataId == incomingDat.numDat)) begin
+          if (datOutValid && datOutReady && pullDatLast) begin
             state <= HNF_IDLE;
             posFree <= 1'b1;
             sfUpdate <= 1'b1;
@@ -1199,7 +1208,7 @@ module chi_hnf_top #(
             end
           end else if (datInValid && datInReady
                        && (incomingDat.opcode == DAT_COMP_DATA)
-                       && (incomingDat.dataId == incomingDat.numDat)) begin
+                       && incomingDatLast) begin
             if (activeReq.expCompAck) begin
               state <= HNF_WAIT_COMP_ACK;
             end else begin

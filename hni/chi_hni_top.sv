@@ -58,6 +58,7 @@ module chi_hni_top #(
   chi_req_flit_t incomingReq;
   chi_rsp_flit_t incomingRsp;
   chi_dat_flit_t incomingDat;
+  logic incomingDatLast;
   chi_req_flit_t activeReq;
   chi_req_flit_t forwardedReq;
   chi_rsp_flit_t returnedRsp;
@@ -103,6 +104,11 @@ module chi_hni_top #(
     incomingReq = unpackReqFlit(CFG, reqInFlit.payload[CHI_MAX_REQ_FLIT_W-1:0]);
     incomingRsp = unpackRspFlit(CFG, rspInFlit.payload[CHI_MAX_RSP_FLIT_W-1:0]);
     incomingDat = unpackDatFlit(CFG, datInFlit.payload[CHI_MAX_DAT_FLIT_W-1:0]);
+    // A data message occupies as many DAT packets as the data bus needs to
+    // carry Size bytes, so the end of the message is a function of the
+    // transaction and not of the packet alone (IHI 0050H B2.4.6).
+    incomingDatLast = datLastPacket(CFG, incomingDat.dataId, incomingDat.numDat,
+                                    activeReq.addr, activeReq.size);
     configAccess = (CFG.cfgAccess == CFG_CHI_MMIO)
                    && ((incomingReq.addr[CFG.addrW-1:0]
                         & ~CFG.addrW'(12'hfff))
@@ -244,7 +250,7 @@ module chi_hni_top #(
             state <= HNI_IDLE;
           else if (datInValid && datInReady
                    && (incomingDat.opcode == DAT_COMP_DATA)
-                   && (incomingDat.dataId == incomingDat.numDat))
+                   && incomingDatLast)
             state <= HNI_IDLE;
         end
         HNI_CFG_WAIT_DATA: begin
