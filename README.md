@@ -40,10 +40,21 @@ the RTL cannot drift apart:
 make doc
 ```
 
-Regeneration needs `pandoc`. The architecture diagrams are generated from
-Graphviz sources in [`doc-src/figures/`](doc-src/figures); `make figures`
-rebuilds the `.png` files and needs `dot`. The rendered images are committed
-so `make doc` works without Graphviz installed.
+Regeneration needs `pandoc` and `python3`. The architecture diagrams are
+generated from Graphviz sources in [`doc-src/figures/`](doc-src/figures);
+`make figures` rebuilds the `.png` files and needs `dot`. The rendered images
+are committed so `make doc` works without Graphviz installed.
+
+Word styling comes from `doc-src/reference.docx`, which
+[`doc-src/build_reference_docx.py`](doc-src/build_reference_docx.py) builds
+from pandoc's own template: A4, Times New Roman body text set justified,
+Courier New in boxed code blocks, thin table rules with a shaded header row,
+9pt captions below the table or figure they name, and a footer carrying the
+project name and page number. Chapter openings, capitalised chapter titles and
+caption placement are applied by
+[`doc-src/house_style.lua`](doc-src/house_style.lua). The Contents, List of
+Tables and List of Figures are Word field codes, so they fill in the first
+time Word opens the file.
 
 ## Lint
 
@@ -128,7 +139,7 @@ simulator would check that this flow cannot.
 | `sva/` | Bound local safety, stability and protocol-field assertions with covers |
 | `top/` | Product top and the compile and elaboration harnesses |
 | `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |
-| `doc-src/` | Design specification source and Graphviz figure sources |
+| `doc-src/` | Design specification source, Graphviz figure sources, Word template |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |
 | `Makefile` | `make lint`, `make sim`, `make simrand` and `make doc` |
