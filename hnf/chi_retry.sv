@@ -24,6 +24,7 @@ module chi_retry #(
   input  logic [3:0] requestQos,
   output logic acceptRequest,
   output logic sendRetryAck,
+  input  logic retryAckSent,
   output logic [3:0] retryClass,
   output logic recordFull,
   input  logic creditUseValid,
@@ -79,7 +80,24 @@ module chi_retry #(
     acceptRequest = requestValid && resourcesAvailable;
     sendRetryAck = requestValid && !resourcesAvailable && allowRetry
                    && allocValid;
-    recordValid = sendRetryAck;
+  end
+
+  // The record is taken when the RetryAck flit is actually accepted, not when
+  // it is first presented, so a back-pressured response channel cannot book
+  // the same Requester twice.
+  always_comb begin
+    recordValid = sendRetryAck && retryAckSent;
+
+    creditsPending = 1'b0;
+    for (int unsigned c = 0; c < CREDIT_TYPES; c++) begin
+      creditsOutstanding[c] = outstanding[c];
+      if (outstanding[c] != '0)
+        creditsPending = 1'b1;
+      pendingCount[c] = '0;
+      for (int unsigned e = 0; e < ENTRIES; e++)
+        if (entryValid[e] && (entryClass[e] == 4'(c)))
+          pendingCount[c] = pendingCount[c] + 1'b1;
+    end
   end
 
   // QoS influences the order in which credits are handed out as resources
@@ -108,17 +126,10 @@ module chi_retry #(
 
   // A grant and a credit consumption or return can land on the same type in
   // the same cycle, so the next count is accumulated before it is registered.
+  // This block only feeds the counter registers, which keeps the grant
+  // decision free of any dependency on it.
   always_comb begin
-    creditsPending = 1'b0;
     for (int unsigned c = 0; c < CREDIT_TYPES; c++) begin
-      creditsOutstanding[c] = outstanding[c];
-      if (outstanding[c] != '0)
-        creditsPending = 1'b1;
-      pendingCount[c] = '0;
-      for (int unsigned e = 0; e < ENTRIES; e++)
-        if (entryValid[e] && (entryClass[e] == 4'(c)))
-          pendingCount[c] = pendingCount[c] + 1'b1;
-
       outstandingNext[c] = outstanding[c];
       if (grantValid && grantReady && (grantClass == 4'(c))
           && !(&outstandingNext[c]))

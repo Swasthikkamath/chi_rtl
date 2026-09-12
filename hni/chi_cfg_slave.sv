@@ -83,7 +83,8 @@ module chi_cfg_slave #(
       ADDR_LIMIT_HI:
         PRDATA = 32'(stagedLimit[selectedRegion] >> 32);
       ADDR_TARGET:
-        PRDATA = {{(32-CFG.nodeIdW){1'b0}}, stagedTarget[selectedRegion]};
+        PRDATA = {{(32 - chi_cfg_pkg::CHI_NODEID_SLOT_W){1'b0}},
+                  stagedTarget[selectedRegion]};
       ADDR_ATTRIBUTES:
         PRDATA = {28'b0, stagedAttributes[selectedRegion]};
       ADDR_COMMIT:

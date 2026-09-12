@@ -140,7 +140,6 @@ module chi_hni_top #(
       packRspFlit(CFG, (state == HNI_CFG_RESPONSE) ? configRsp : returnedRsp);
     rspOutValid = ((state == HNI_WAIT_SUBORDINATE) && rspInValid)
                   || ((state == HNI_CFG_RESPONSE) && !activeConfigRead);
-    rspInReady = (state == HNI_WAIT_SUBORDINATE) && rspOutReady;
 
     forwardedDat = incomingDat;
     forwardedDat.tgtId = activeReq.tgtId;
@@ -174,11 +173,18 @@ module chi_hni_top #(
            (forwardRequesterData ? forwardedDat : returnedDat));
     datOutValid = ((state == HNI_WAIT_SUBORDINATE) && datInValid)
                   || ((state == HNI_CFG_RESPONSE) && activeConfigRead);
+
+    idle = state == HNI_IDLE;
+  end
+
+  // The ready outputs pass the downstream readies straight through, so they
+  // are written on their own to keep the flits and valids above clear of any
+  // dependency on the ready they are paired with.
+  always_comb begin
+    reqInReady = state == HNI_IDLE;
+    rspInReady = (state == HNI_WAIT_SUBORDINATE) && rspOutReady;
     datInReady = (state == HNI_CFG_WAIT_DATA)
                  || ((state == HNI_WAIT_SUBORDINATE) && datOutReady);
-
-    reqInReady = state == HNI_IDLE;
-    idle = state == HNI_IDLE;
   end
 
   always_ff @(posedge clk) begin

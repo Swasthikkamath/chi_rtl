@@ -45,29 +45,19 @@ module chi_mesh #(
   logic [NUM_XPS-1:0][3:0][NUM_XP_PORTS-1:0] xpOutReady;
   chi_noc_flit_t xpOutFlit [NUM_XPS-1:0][3:0][NUM_XP_PORTS-1:0];
 
+  // Each crosspoint registers its output, so the mesh has no combinational
+  // path from any input to any output. Expressing that requires four blocks:
+  // one per direction and side. Writing more than one side in a single block
+  // would make every signal it drives appear to depend on every signal it
+  // reads, which is what a linter reports as a combinational loop.
   always_comb begin
     xpInValid = '0;
-    xpOutReady = '0;
-    reqInReady = '0;
-    rspInReady = '0;
-    snpInReady = '0;
-    datInReady = '0;
-    reqOutValid = '0;
-    rspOutValid = '0;
-    snpOutValid = '0;
-    datOutValid = '0;
     for (int unsigned channelIndex = 0; channelIndex < 4; channelIndex++) begin
       for (int unsigned xpIndex = 0; xpIndex < NUM_XPS; xpIndex++) begin
         for (int unsigned portIndex = 0;
              portIndex < NUM_XP_PORTS; portIndex++)
           xpInFlit[xpIndex][channelIndex][portIndex] = '0;
       end
-    end
-    for (int unsigned nodeIndex = 0; nodeIndex < NUM_PORTS; nodeIndex++) begin
-      reqOutFlit[nodeIndex] = '0;
-      rspOutFlit[nodeIndex] = '0;
-      snpOutFlit[nodeIndex] = '0;
-      datOutFlit[nodeIndex] = '0;
     end
 
     for (int unsigned meshY = 0; meshY < CFG.meshY; meshY++) begin
@@ -81,32 +71,24 @@ module chi_mesh #(
               xpOutValid[xpIndex + CFG.meshX][channelIndex][1];
             xpInFlit[xpIndex][channelIndex][0] =
               xpOutFlit[xpIndex + CFG.meshX][channelIndex][1];
-            xpOutReady[xpIndex][channelIndex][0] =
-              xpInReady[xpIndex + CFG.meshX][channelIndex][1];
           end
           if (meshY > 0) begin
             xpInValid[xpIndex][channelIndex][1] =
               xpOutValid[xpIndex - CFG.meshX][channelIndex][0];
             xpInFlit[xpIndex][channelIndex][1] =
               xpOutFlit[xpIndex - CFG.meshX][channelIndex][0];
-            xpOutReady[xpIndex][channelIndex][1] =
-              xpInReady[xpIndex - CFG.meshX][channelIndex][0];
           end
           if ((meshX + 1) < CFG.meshX) begin
             xpInValid[xpIndex][channelIndex][2] =
               xpOutValid[xpIndex + 1][channelIndex][3];
             xpInFlit[xpIndex][channelIndex][2] =
               xpOutFlit[xpIndex + 1][channelIndex][3];
-            xpOutReady[xpIndex][channelIndex][2] =
-              xpInReady[xpIndex + 1][channelIndex][3];
           end
           if (meshX > 0) begin
             xpInValid[xpIndex][channelIndex][3] =
               xpOutValid[xpIndex - 1][channelIndex][2];
             xpInFlit[xpIndex][channelIndex][3] =
               xpOutFlit[xpIndex - 1][channelIndex][2];
-            xpOutReady[xpIndex][channelIndex][3] =
-              xpInReady[xpIndex - 1][channelIndex][2];
           end
         end
       end
@@ -131,10 +113,33 @@ module chi_mesh #(
         xpInFlit[xpIndex][CHI_CHANNEL_RSP][devicePort] = rspInFlit[nodeIndex];
         xpInFlit[xpIndex][CHI_CHANNEL_SNP][devicePort] = snpInFlit[nodeIndex];
         xpInFlit[xpIndex][CHI_CHANNEL_DAT][devicePort] = datInFlit[nodeIndex];
-        reqInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_REQ][devicePort];
-        rspInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_RSP][devicePort];
-        snpInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_SNP][devicePort];
-        datInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_DAT][devicePort];
+      end
+    end
+  end
+
+  always_comb begin
+    reqOutValid = '0;
+    rspOutValid = '0;
+    snpOutValid = '0;
+    datOutValid = '0;
+    for (int unsigned nodeIndex = 0; nodeIndex < NUM_PORTS; nodeIndex++) begin
+      reqOutFlit[nodeIndex] = '0;
+      rspOutFlit[nodeIndex] = '0;
+      snpOutFlit[nodeIndex] = '0;
+      datOutFlit[nodeIndex] = '0;
+    end
+
+    for (int unsigned nodeIndex = 0; nodeIndex < NUM_PORTS; nodeIndex++) begin
+      int unsigned xpIndex;
+      int unsigned devicePort;
+      xpIndex = int'(PLACEMENTS[nodeIndex].meshY) * CFG.meshX
+                + int'(PLACEMENTS[nodeIndex].meshX);
+      devicePort = 4 + int'(PLACEMENTS[nodeIndex].devicePort);
+      if (PLACEMENTS[nodeIndex].valid
+          && (int'(PLACEMENTS[nodeIndex].meshX) < CFG.meshX)
+          && (int'(PLACEMENTS[nodeIndex].meshY) < CFG.meshY)
+          && (int'(PLACEMENTS[nodeIndex].devicePort)
+              < CFG.numDevPortsPerXp)) begin
         reqOutValid[nodeIndex] = xpOutValid[xpIndex][CHI_CHANNEL_REQ][devicePort];
         rspOutValid[nodeIndex] = xpOutValid[xpIndex][CHI_CHANNEL_RSP][devicePort];
         snpOutValid[nodeIndex] = xpOutValid[xpIndex][CHI_CHANNEL_SNP][devicePort];
@@ -143,10 +148,75 @@ module chi_mesh #(
         rspOutFlit[nodeIndex] = xpOutFlit[xpIndex][CHI_CHANNEL_RSP][devicePort];
         snpOutFlit[nodeIndex] = xpOutFlit[xpIndex][CHI_CHANNEL_SNP][devicePort];
         datOutFlit[nodeIndex] = xpOutFlit[xpIndex][CHI_CHANNEL_DAT][devicePort];
+      end
+    end
+  end
+
+  always_comb begin
+    xpOutReady = '0;
+
+    for (int unsigned meshY = 0; meshY < CFG.meshY; meshY++) begin
+      for (int unsigned meshX = 0; meshX < CFG.meshX; meshX++) begin
+        int unsigned xpIndex;
+        xpIndex = meshY * CFG.meshX + meshX;
+        for (int unsigned channelIndex = 0;
+             channelIndex < 4; channelIndex++) begin
+          if ((meshY + 1) < CFG.meshY)
+            xpOutReady[xpIndex][channelIndex][0] =
+              xpInReady[xpIndex + CFG.meshX][channelIndex][1];
+          if (meshY > 0)
+            xpOutReady[xpIndex][channelIndex][1] =
+              xpInReady[xpIndex - CFG.meshX][channelIndex][0];
+          if ((meshX + 1) < CFG.meshX)
+            xpOutReady[xpIndex][channelIndex][2] =
+              xpInReady[xpIndex + 1][channelIndex][3];
+          if (meshX > 0)
+            xpOutReady[xpIndex][channelIndex][3] =
+              xpInReady[xpIndex - 1][channelIndex][2];
+        end
+      end
+    end
+
+    for (int unsigned nodeIndex = 0; nodeIndex < NUM_PORTS; nodeIndex++) begin
+      int unsigned xpIndex;
+      int unsigned devicePort;
+      xpIndex = int'(PLACEMENTS[nodeIndex].meshY) * CFG.meshX
+                + int'(PLACEMENTS[nodeIndex].meshX);
+      devicePort = 4 + int'(PLACEMENTS[nodeIndex].devicePort);
+      if (PLACEMENTS[nodeIndex].valid
+          && (int'(PLACEMENTS[nodeIndex].meshX) < CFG.meshX)
+          && (int'(PLACEMENTS[nodeIndex].meshY) < CFG.meshY)
+          && (int'(PLACEMENTS[nodeIndex].devicePort)
+              < CFG.numDevPortsPerXp)) begin
         xpOutReady[xpIndex][CHI_CHANNEL_REQ][devicePort] = reqOutReady[nodeIndex];
         xpOutReady[xpIndex][CHI_CHANNEL_RSP][devicePort] = rspOutReady[nodeIndex];
         xpOutReady[xpIndex][CHI_CHANNEL_SNP][devicePort] = snpOutReady[nodeIndex];
         xpOutReady[xpIndex][CHI_CHANNEL_DAT][devicePort] = datOutReady[nodeIndex];
+      end
+    end
+  end
+
+  always_comb begin
+    reqInReady = '0;
+    rspInReady = '0;
+    snpInReady = '0;
+    datInReady = '0;
+
+    for (int unsigned nodeIndex = 0; nodeIndex < NUM_PORTS; nodeIndex++) begin
+      int unsigned xpIndex;
+      int unsigned devicePort;
+      xpIndex = int'(PLACEMENTS[nodeIndex].meshY) * CFG.meshX
+                + int'(PLACEMENTS[nodeIndex].meshX);
+      devicePort = 4 + int'(PLACEMENTS[nodeIndex].devicePort);
+      if (PLACEMENTS[nodeIndex].valid
+          && (int'(PLACEMENTS[nodeIndex].meshX) < CFG.meshX)
+          && (int'(PLACEMENTS[nodeIndex].meshY) < CFG.meshY)
+          && (int'(PLACEMENTS[nodeIndex].devicePort)
+              < CFG.numDevPortsPerXp)) begin
+        reqInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_REQ][devicePort];
+        rspInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_RSP][devicePort];
+        snpInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_SNP][devicePort];
+        datInReady[nodeIndex] = xpInReady[xpIndex][CHI_CHANNEL_DAT][devicePort];
       end
     end
   end

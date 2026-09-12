@@ -52,9 +52,15 @@ module chi_link_rx #(
       internalFlit = '0;
     end
     pushFlit = linkRun && FLITV && (bufferCount < LCRD_DEPTH_COUNT);
-    popFlit = internalValid && internalReady;
     bufferOverflow = linkRun && FLITV
                    && (bufferCount == LCRD_DEPTH_COUNT);
+  end
+
+  // The pop decision consumes the downstream ready, so it is kept apart from
+  // the block that presents the flit. Sharing a block would make the presented
+  // valid appear to depend on the ready it drives.
+  always_comb begin
+    popFlit = internalValid && internalReady;
   end
 
   integer byteIndex;

@@ -6,6 +6,7 @@ link/chi_lcrd_mgr.sv
 link/chi_link_fsm.sv
 link/chi_link_tx.sv
 link/chi_link_rx.sv
+link/chi_link_port.sv
 noc/chi_vc_arb.sv
 noc/chi_xbar.sv
 noc/chi_ring.sv
@@ -34,6 +35,7 @@ hnf/chi_cmo.sv
 hnf/chi_excl_mon.sv
 hnf/chi_hnf_top.sv
 top/chi_interconnect_top.sv
+top/chi_interconnect_compile.sv
 top/chi_link_compile.sv
 top/chi_hnf_compile.sv
 sva/chi_link_sva.sv

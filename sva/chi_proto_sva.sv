@@ -29,7 +29,7 @@ module chi_proto_sva #(
   input chi_pkg::chi_dat_flit_t incomingDat,
   input chi_pkg::chi_req_flit_t activeReq,
   input chi_pkg::chi_rsp_flit_t responseFlit,
-  input logic retryHandshake,
+  input logic retryAckSend,
   input logic retryAck,
   input logic [3:0] retryClass,
   input logic retryGrantValid,
@@ -99,13 +99,13 @@ module chi_proto_sva #(
 
   ACTIVE_RESPONSE_ID_CONSISTENT: assert property (
     @(posedge clk) disable iff (!resetn)
-    rspOutValid && !retryHandshake && !retryGrantSend
+    rspOutValid && !retryAckSend && !retryGrantSend
       |-> ((responseFlit.tgtId == activeReq.srcId)
            && (responseFlit.txnId == activeReq.txnId)));
 
   RETRY_RESPONSE_ID_CONSISTENT: assert property (
     @(posedge clk) disable iff (!resetn)
-    rspOutValid && retryHandshake
+    rspOutValid && retryAckSend
       |-> ((responseFlit.tgtId == incomingReq.srcId)
            && (responseFlit.txnId == incomingReq.txnId)
            && (responseFlit.opcode == RSP_RETRY_ACK)));
@@ -131,7 +131,7 @@ module chi_proto_sva #(
   // A RetryAck and a PCrdGrant must never contend for the response channel.
   RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE: assert property (
     @(posedge clk) disable iff (!resetn)
-    !(retryHandshake && retryGrantSend));
+    !(retryAckSend && retryGrantSend));
 
   RETRY_ACK_THEN_PCRD_GRANT_CLASS: cover property (
     @(posedge clk) disable iff (!resetn)
@@ -196,7 +196,7 @@ bind chi_hnf_top chi_proto_sva #(
   .incomingDat(incomingDat),
   .activeReq(activeReq),
   .responseFlit(responseFlit),
-  .retryHandshake(retryHandshake),
+  .retryAckSend(retryAckSend),
   .retryAck(retryAck),
   .retryClass(retryClass),
   .retryGrantValid(retryGrantValid),

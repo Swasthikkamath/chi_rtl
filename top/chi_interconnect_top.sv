@@ -345,13 +345,11 @@ module chi_interconnect_top #(
           $fatal(1, "SNP flit width is outside the Issue H range");
         if (datFlitWidth(CFG) < (240 + ((CFG.dataW - 128) * 149) / 128))
           $fatal(1, "DAT flit width is below the Issue H minimum");
-        if (CFG.parityEn)
-          $fatal(1, "Top-level parity generation/checking is not supported");
-        if ((CFG.posEntries == 0) || (CFG.lcrdDepth == 0)
+        if ((CFG.posEntries == 0) || (CFG.lcrdDepth < 2)
             || (CFG.exclMonitors == 0) || (CFG.interleaveGranule == 0)
             || (NUM_REGIONS == 0)
             || (AGE_LIMIT == 0))
-          $fatal(1, "Depth and region parameters must be positive");
+          $fatal(1, "Depth and region parameters must be positive, with at least two L-Credits per channel");
         if ((CFG.snpFilterEntries == 0) || (CFG.snpFilterWays == 0)
             || (CFG.snpFilterWays > CFG.snpFilterEntries)
             || ((CFG.snpFilterEntries % CFG.snpFilterWays) != 0))
@@ -496,9 +494,13 @@ module chi_interconnect_top #(
   end
 
   for (genvar i = 0; i < NUM_REQ; i++) begin : requester_sam
+    // Decode and routing are separate blocks so that the mapper outputs do
+    // not appear to feed the decode that produces the mapper inputs.
     always_comb begin
-      requesterReq[i] =
-        unpackReqFlit(CFG, requesterRawReq[i]);
+      requesterReq[i] = unpackReqFlit(CFG, requesterRawReq[i]);
+    end
+
+    always_comb begin
       requesterRouteTarget[i] = requesterSamTarget[i];
       if ((requesterReq[i].opcode == REQ_DVM_OP) && (CFG.numMn > 0))
         requesterRouteTarget[i] =
@@ -538,159 +540,101 @@ module chi_interconnect_top #(
     );
   end
 
-  for (genvar i = 0; i < (CFG.numRnf > 0 ? CFG.numRnf : 1); i++) begin : rnf_ports
-    assign rnf[i].CLK = clk;
-    assign rnf[i].RESETn = resetn;
-    assign rnf[i].TXLINKACTIVEACK = rnf[i].TXLINKACTIVEREQ;
-    assign rnf[i].RXLINKACTIVEREQ = rnf[i].TXLINKACTIVEREQ;
-    assign rnf[i].TXSACTIVE = resetn;
-    assign rnf[i].RXSACTIVE = resetn;
-    assign rnf[i].SYSCOACK = rnf[i].SYSCOREQ;
-    assign rnf[i].TXREQLCRDV = (i < CFG.numRnf) ? reqInReady[OFF_RNF+i] : 1'b0;
-    assign rnf[i].TXRSPLCRDV = (i < CFG.numRnf) ? rspInReady[OFF_RNF+i] : 1'b0;
-    assign rnf[i].TXSNPLCRDV = 1'b0;
-    assign rnf[i].TXDATLCRDV = (i < CFG.numRnf) ? datInReady[OFF_RNF+i] : 1'b0;
-    assign rnf[i].RXREQFLITPEND = 1'b0;
-    assign rnf[i].RXREQFLITV = 1'b0;
-    assign rnf[i].RXREQFLIT = '0;
-    assign rnf[i].RXRSPFLITPEND = (i < CFG.numRnf) ? rspOutValid[OFF_RNF+i] : 1'b0;
-    assign rnf[i].RXRSPFLITV = rnf[i].RXRSPFLITPEND;
-    assign rnf[i].RXRSPFLIT = (i < CFG.numRnf)
-      ? rspOutFlit[OFF_RNF+i].payload[rspFlitWidth(CFG)-1:0] : '0;
-    assign rnf[i].RXSNPFLITPEND = (i < CFG.numRnf) ? snpOutValid[OFF_RNF+i] : 1'b0;
-    assign rnf[i].RXSNPFLITV = rnf[i].RXSNPFLITPEND;
-    assign rnf[i].RXSNPFLIT = (i < CFG.numRnf)
-      ? snpOutFlit[OFF_RNF+i].payload[snpFlitWidth(CFG)-1:0] : '0;
-    assign rnf[i].RXDATFLITPEND = (i < CFG.numRnf) ? datOutValid[OFF_RNF+i] : 1'b0;
-    assign rnf[i].RXDATFLITV = rnf[i].RXDATFLITPEND;
-    assign rnf[i].RXDATFLIT = (i < CFG.numRnf)
-      ? datOutFlit[OFF_RNF+i].payload[datFlitWidth(CFG)-1:0] : '0;
-    assign rnf[i].TXLINKACTIVEACKCHK = 1'b0;
-    assign rnf[i].RXLINKACTIVEREQCHK = 1'b0;
-    assign rnf[i].TXSACTIVECHK = 1'b0;
-    assign rnf[i].RXSACTIVECHK = 1'b0;
-    assign rnf[i].SYSCOACKCHK = 1'b0;
-    assign rnf[i].TXREQLCRDVCHK = 1'b0;
-    assign rnf[i].TXRSPLCRDVCHK = 1'b0;
-    assign rnf[i].TXSNPLCRDVCHK = 1'b0;
-    assign rnf[i].TXDATLCRDVCHK = 1'b0;
-    assign rnf[i].RXREQFLITPENDCHK = 1'b0;
-    assign rnf[i].RXREQFLITVCHK = 1'b0;
-    assign rnf[i].RXREQFLITCHK = '0;
-    assign rnf[i].RXRSPFLITPENDCHK = 1'b0;
-    assign rnf[i].RXRSPFLITVCHK = 1'b0;
-    assign rnf[i].RXRSPFLITCHK = '0;
-    assign rnf[i].RXSNPFLITPENDCHK = 1'b0;
-    assign rnf[i].RXSNPFLITVCHK = 1'b0;
-    assign rnf[i].RXSNPFLITCHK = '0;
-    assign rnf[i].RXDATFLITPENDCHK = 1'b0;
-    assign rnf[i].RXDATFLITVCHK = 1'b0;
-    assign rnf[i].RXDATFLITCHK = '0;
-    if (i < CFG.numRnf) begin : active
-      assign reqInValid[OFF_RNF+i] = rnf[i].TXREQFLITV;
-      assign requesterRawReq[OFF_RNF+i] =
-        {{(CHI_MAX_REQ_FLIT_W-reqFlitWidth(CFG)){1'b0}}, rnf[i].TXREQFLIT};
-      assign reqInFlit[OFF_RNF+i] =
-        reqToNoc(requesterRawReq[OFF_RNF+i],
-                 requesterRouteTarget[OFF_RNF+i]);
-      assign rspInValid[OFF_RNF+i] = rnf[i].TXRSPFLITV;
-      assign rspInFlit[OFF_RNF+i] =
-        rspToNoc({{(CHI_MAX_RSP_FLIT_W-rspFlitWidth(CFG)){1'b0}},
-                  rnf[i].TXRSPFLIT});
-      assign snpInValid[OFF_RNF+i] = 1'b0;
-      assign snpInFlit[OFF_RNF+i] = '0;
-      assign datInValid[OFF_RNF+i] = rnf[i].TXDATFLITV;
-      assign datInFlit[OFF_RNF+i] =
-        datToNoc({{(CHI_MAX_DAT_FLIT_W-datFlitWidth(CFG)){1'b0}},
-                  rnf[i].TXDATFLIT});
-      assign reqOutReady[OFF_RNF+i] = 1'b1;
-      assign rspOutReady[OFF_RNF+i] = rnf[i].RXRSPLCRDV;
-      assign snpOutReady[OFF_RNF+i] = rnf[i].RXSNPLCRDV;
-      assign datOutReady[OFF_RNF+i] = rnf[i].RXDATLCRDV;
-    end
-  end
-
-`define CHI_CONNECT_SIMPLE_RN(PORT, COUNT, OFFSET) \
+  // Every node port goes through a real CHI link layer: L-Credits, receive
+  // buffering, flit parity, and the link activation handshake. A direction a
+  // port never uses is drained so that a misrouted flit cannot stall the
+  // fabric.
+`define CHI_CONNECT_PORT(PORT, COUNT, OFFSET, IS_REQUESTER) \
   for (genvar i = 0; i < (COUNT > 0 ? COUNT : 1); i++) begin : PORT``_ports \
-    assign PORT[i].CLK = clk; assign PORT[i].RESETn = resetn; \
-    assign PORT[i].TXLINKACTIVEACK = PORT[i].TXLINKACTIVEREQ; \
-    assign PORT[i].RXLINKACTIVEREQ = PORT[i].TXLINKACTIVEREQ; \
-    assign PORT[i].TXSACTIVE = resetn; assign PORT[i].RXSACTIVE = resetn; \
-    assign PORT[i].SYSCOACK = PORT[i].SYSCOREQ; \
-    assign PORT[i].TXREQLCRDV = (i < COUNT) ? reqInReady[OFFSET+i] : 1'b0; \
-    assign PORT[i].TXRSPLCRDV = (i < COUNT) ? rspInReady[OFFSET+i] : 1'b0; \
-    assign PORT[i].TXSNPLCRDV = 1'b0; \
-    assign PORT[i].TXDATLCRDV = (i < COUNT) ? datInReady[OFFSET+i] : 1'b0; \
-    assign PORT[i].RXREQFLITPEND = 1'b0; assign PORT[i].RXREQFLITV = 1'b0; assign PORT[i].RXREQFLIT = '0; \
-    assign PORT[i].RXRSPFLITPEND = (i < COUNT) ? rspOutValid[OFFSET+i] : 1'b0; \
-    assign PORT[i].RXRSPFLITV = PORT[i].RXRSPFLITPEND; \
-    assign PORT[i].RXRSPFLIT = (i < COUNT) ? rspOutFlit[OFFSET+i].payload[rspFlitWidth(CFG)-1:0] : '0; \
-    assign PORT[i].RXSNPFLITPEND = (i < COUNT) ? snpOutValid[OFFSET+i] : 1'b0; \
-    assign PORT[i].RXSNPFLITV = PORT[i].RXSNPFLITPEND; \
-    assign PORT[i].RXSNPFLIT = (i < COUNT) ? snpOutFlit[OFFSET+i].payload[snpFlitWidth(CFG)-1:0] : '0; \
-    assign PORT[i].RXDATFLITPEND = (i < COUNT) ? datOutValid[OFFSET+i] : 1'b0; \
-    assign PORT[i].RXDATFLITV = PORT[i].RXDATFLITPEND; \
-    assign PORT[i].RXDATFLIT = (i < COUNT) ? datOutFlit[OFFSET+i].payload[datFlitWidth(CFG)-1:0] : '0; \
-    assign PORT[i].TXLINKACTIVEACKCHK=1'b0; assign PORT[i].RXLINKACTIVEREQCHK=1'b0; \
-    assign PORT[i].TXSACTIVECHK=1'b0; assign PORT[i].RXSACTIVECHK=1'b0; assign PORT[i].SYSCOACKCHK=1'b0; \
-    assign PORT[i].TXREQLCRDVCHK=1'b0; assign PORT[i].TXRSPLCRDVCHK=1'b0; assign PORT[i].TXSNPLCRDVCHK=1'b0; assign PORT[i].TXDATLCRDVCHK=1'b0; \
-    assign PORT[i].RXREQFLITPENDCHK=1'b0; assign PORT[i].RXREQFLITVCHK=1'b0; assign PORT[i].RXREQFLITCHK='0; \
-    assign PORT[i].RXRSPFLITPENDCHK=1'b0; assign PORT[i].RXRSPFLITVCHK=1'b0; assign PORT[i].RXRSPFLITCHK='0; \
-    assign PORT[i].RXSNPFLITPENDCHK=1'b0; assign PORT[i].RXSNPFLITVCHK=1'b0; assign PORT[i].RXSNPFLITCHK='0; \
-    assign PORT[i].RXDATFLITPENDCHK=1'b0; assign PORT[i].RXDATFLITVCHK=1'b0; assign PORT[i].RXDATFLITCHK='0; \
+    logic portReqRxValid, portReqRxReady; \
+    logic [reqFlitWidth(CFG)-1:0] portReqRxFlit; \
+    logic portRspRxValid, portRspRxReady; \
+    logic [rspFlitWidth(CFG)-1:0] portRspRxFlit; \
+    logic portDatRxValid, portDatRxReady; \
+    logic [datFlitWidth(CFG)-1:0] portDatRxFlit; \
+    logic portReqTxValid, portReqTxReady; \
+    logic [reqFlitWidth(CFG)-1:0] portReqTxFlit; \
+    logic portRspTxValid, portRspTxReady; \
+    logic [rspFlitWidth(CFG)-1:0] portRspTxFlit; \
+    logic portSnpTxValid, portSnpTxReady; \
+    logic [snpFlitWidth(CFG)-1:0] portSnpTxFlit; \
+    logic portDatTxValid, portDatTxReady; \
+    logic [datFlitWidth(CFG)-1:0] portDatTxFlit; \
+    logic portLinkUp, portParityError, portCreditError; \
+    chi_link_port #(.CFG(CFG), .REQUESTER_PORT(IS_REQUESTER)) link ( \
+      .clk, .resetn, .chiPort(PORT[i]), \
+      .reqRxValid(portReqRxValid), .reqRxReady(portReqRxReady), \
+      .reqRxFlit(portReqRxFlit), .rspRxValid(portRspRxValid), \
+      .rspRxReady(portRspRxReady), .rspRxFlit(portRspRxFlit), \
+      .datRxValid(portDatRxValid), .datRxReady(portDatRxReady), \
+      .datRxFlit(portDatRxFlit), .reqTxValid(portReqTxValid), \
+      .reqTxReady(portReqTxReady), .reqTxFlit(portReqTxFlit), \
+      .rspTxValid(portRspTxValid), .rspTxReady(portRspTxReady), \
+      .rspTxFlit(portRspTxFlit), .snpTxValid(portSnpTxValid), \
+      .snpTxReady(portSnpTxReady), .snpTxFlit(portSnpTxFlit), \
+      .datTxValid(portDatTxValid), .datTxReady(portDatTxReady), \
+      .datTxFlit(portDatTxFlit), .linkUp(portLinkUp), \
+      .parityError(portParityError), .creditError(portCreditError) \
+    ); \
+    always_comb begin \
+      portRspTxFlit = '0; portDatTxFlit = '0; \
+      portReqTxFlit = '0; portSnpTxFlit = '0; \
+      portRspTxValid = 1'b0; portDatTxValid = 1'b0; \
+      portReqTxValid = 1'b0; portSnpTxValid = 1'b0; \
+      portReqRxReady = 1'b0; portRspRxReady = 1'b0; portDatRxReady = 1'b0; \
+      if (i < COUNT) begin \
+        portReqRxReady = reqInReady[OFFSET+i]; \
+        portRspRxReady = rspInReady[OFFSET+i]; \
+        portDatRxReady = datInReady[OFFSET+i]; \
+        portRspTxValid = rspOutValid[OFFSET+i]; \
+        portRspTxFlit = rspOutFlit[OFFSET+i].payload[rspFlitWidth(CFG)-1:0]; \
+        portDatTxValid = datOutValid[OFFSET+i]; \
+        portDatTxFlit = datOutFlit[OFFSET+i].payload[datFlitWidth(CFG)-1:0]; \
+        if (IS_REQUESTER) begin \
+          portSnpTxValid = snpOutValid[OFFSET+i]; \
+          portSnpTxFlit = snpOutFlit[OFFSET+i].payload[snpFlitWidth(CFG)-1:0]; \
+        end else begin \
+          portReqTxValid = reqOutValid[OFFSET+i]; \
+          portReqTxFlit = reqOutFlit[OFFSET+i].payload[reqFlitWidth(CFG)-1:0]; \
+        end \
+      end \
+    end \
     if (i < COUNT) begin : active \
-      assign reqInValid[OFFSET+i]=PORT[i].TXREQFLITV; \
-      assign requesterRawReq[OFFSET+i]={{(CHI_MAX_REQ_FLIT_W-reqFlitWidth(CFG)){1'b0}},PORT[i].TXREQFLIT}; \
-      assign reqInFlit[OFFSET+i]=reqToNoc(requesterRawReq[OFFSET+i],requesterRouteTarget[OFFSET+i]); \
-      assign rspInValid[OFFSET+i]=PORT[i].TXRSPFLITV; \
-      assign rspInFlit[OFFSET+i]=rspToNoc({{(CHI_MAX_RSP_FLIT_W-rspFlitWidth(CFG)){1'b0}},PORT[i].TXRSPFLIT}); \
-      assign snpInValid[OFFSET+i]=1'b0; assign snpInFlit[OFFSET+i]='0; \
-      assign datInValid[OFFSET+i]=PORT[i].TXDATFLITV; \
-      assign datInFlit[OFFSET+i]=datToNoc({{(CHI_MAX_DAT_FLIT_W-datFlitWidth(CFG)){1'b0}},PORT[i].TXDATFLIT}); \
-      assign reqOutReady[OFFSET+i]=1'b1; assign rspOutReady[OFFSET+i]=PORT[i].RXRSPLCRDV; \
-      assign snpOutReady[OFFSET+i]=PORT[i].RXSNPLCRDV; assign datOutReady[OFFSET+i]=PORT[i].RXDATLCRDV; \
+      if (IS_REQUESTER) begin : requester_ingress \
+        assign reqInValid[OFFSET+i] = portReqRxValid; \
+        assign requesterRawReq[OFFSET+i] = \
+          {{(CHI_MAX_REQ_FLIT_W-reqFlitWidth(CFG)){1'b0}}, portReqRxFlit}; \
+        assign reqInFlit[OFFSET+i] = \
+          reqToNoc(requesterRawReq[OFFSET+i], requesterRouteTarget[OFFSET+i]); \
+        assign reqOutReady[OFFSET+i] = 1'b1; \
+        assign snpOutReady[OFFSET+i] = portSnpTxReady; \
+      end else begin : subordinate_ingress \
+        assign reqInValid[OFFSET+i] = 1'b0; \
+        assign reqInFlit[OFFSET+i] = '0; \
+        assign reqOutReady[OFFSET+i] = portReqTxReady; \
+        assign snpOutReady[OFFSET+i] = 1'b1; \
+      end \
+      assign rspInValid[OFFSET+i] = portRspRxValid; \
+      assign rspInFlit[OFFSET+i] = \
+        rspToNoc({{(CHI_MAX_RSP_FLIT_W-rspFlitWidth(CFG)){1'b0}}, \
+                  portRspRxFlit}); \
+      assign snpInValid[OFFSET+i] = 1'b0; \
+      assign snpInFlit[OFFSET+i] = '0; \
+      assign datInValid[OFFSET+i] = portDatRxValid; \
+      assign datInFlit[OFFSET+i] = \
+        datToNoc({{(CHI_MAX_DAT_FLIT_W-datFlitWidth(CFG)){1'b0}}, \
+                  portDatRxFlit}); \
+      assign rspOutReady[OFFSET+i] = portRspTxReady; \
+      assign datOutReady[OFFSET+i] = portDatTxReady; \
     end \
   end
 
-  `CHI_CONNECT_SIMPLE_RN(rnd, CFG.numRnd, OFF_RND)
-  `CHI_CONNECT_SIMPLE_RN(rni, CFG.numRni, OFF_RNI)
-`undef CHI_CONNECT_SIMPLE_RN
-
-`define CHI_CONNECT_SN(PORT, COUNT, OFFSET) \
-  for (genvar i = 0; i < (COUNT > 0 ? COUNT : 1); i++) begin : PORT``_ports \
-    assign PORT[i].CLK=clk; assign PORT[i].RESETn=resetn; \
-    assign PORT[i].TXLINKACTIVEACK=PORT[i].TXLINKACTIVEREQ; assign PORT[i].RXLINKACTIVEREQ=PORT[i].TXLINKACTIVEREQ; \
-    assign PORT[i].TXSACTIVE=resetn; assign PORT[i].RXSACTIVE=resetn; assign PORT[i].SYSCOACK=PORT[i].SYSCOREQ; \
-    assign PORT[i].TXREQLCRDV=1'b0; assign PORT[i].TXRSPLCRDV=(i<COUNT)?rspInReady[OFFSET+i]:1'b0; \
-    assign PORT[i].TXSNPLCRDV=1'b0; assign PORT[i].TXDATLCRDV=(i<COUNT)?datInReady[OFFSET+i]:1'b0; \
-    assign PORT[i].RXREQFLITPEND=(i<COUNT)?reqOutValid[OFFSET+i]:1'b0; assign PORT[i].RXREQFLITV=PORT[i].RXREQFLITPEND; \
-    assign PORT[i].RXREQFLIT=(i<COUNT)?reqOutFlit[OFFSET+i].payload[reqFlitWidth(CFG)-1:0]:'0; \
-    assign PORT[i].RXRSPFLITPEND=1'b0; assign PORT[i].RXRSPFLITV=1'b0; assign PORT[i].RXRSPFLIT='0; \
-    assign PORT[i].RXSNPFLITPEND=1'b0; assign PORT[i].RXSNPFLITV=1'b0; assign PORT[i].RXSNPFLIT='0; \
-    assign PORT[i].RXDATFLITPEND=(i<COUNT)?datOutValid[OFFSET+i]:1'b0; assign PORT[i].RXDATFLITV=PORT[i].RXDATFLITPEND; \
-    assign PORT[i].RXDATFLIT=(i<COUNT)?datOutFlit[OFFSET+i].payload[datFlitWidth(CFG)-1:0]:'0; \
-    assign PORT[i].TXLINKACTIVEACKCHK=1'b0; assign PORT[i].RXLINKACTIVEREQCHK=1'b0; \
-    assign PORT[i].TXSACTIVECHK=1'b0; assign PORT[i].RXSACTIVECHK=1'b0; assign PORT[i].SYSCOACKCHK=1'b0; \
-    assign PORT[i].TXREQLCRDVCHK=1'b0; assign PORT[i].TXRSPLCRDVCHK=1'b0; assign PORT[i].TXSNPLCRDVCHK=1'b0; assign PORT[i].TXDATLCRDVCHK=1'b0; \
-    assign PORT[i].RXREQFLITPENDCHK=1'b0; assign PORT[i].RXREQFLITVCHK=1'b0; assign PORT[i].RXREQFLITCHK='0; \
-    assign PORT[i].RXRSPFLITPENDCHK=1'b0; assign PORT[i].RXRSPFLITVCHK=1'b0; assign PORT[i].RXRSPFLITCHK='0; \
-    assign PORT[i].RXSNPFLITPENDCHK=1'b0; assign PORT[i].RXSNPFLITVCHK=1'b0; assign PORT[i].RXSNPFLITCHK='0; \
-    assign PORT[i].RXDATFLITPENDCHK=1'b0; assign PORT[i].RXDATFLITVCHK=1'b0; assign PORT[i].RXDATFLITCHK='0; \
-    if(i<COUNT) begin : active \
-      assign reqInValid[OFFSET+i]=1'b0; assign reqInFlit[OFFSET+i]='0; \
-      assign rspInValid[OFFSET+i]=PORT[i].TXRSPFLITV; \
-      assign rspInFlit[OFFSET+i]=rspToNoc({{(CHI_MAX_RSP_FLIT_W-rspFlitWidth(CFG)){1'b0}},PORT[i].TXRSPFLIT}); \
-      assign snpInValid[OFFSET+i]=1'b0; assign snpInFlit[OFFSET+i]='0; \
-      assign datInValid[OFFSET+i]=PORT[i].TXDATFLITV; \
-      assign datInFlit[OFFSET+i]=datToNoc({{(CHI_MAX_DAT_FLIT_W-datFlitWidth(CFG)){1'b0}},PORT[i].TXDATFLIT}); \
-      assign reqOutReady[OFFSET+i]=PORT[i].RXREQLCRDV; assign rspOutReady[OFFSET+i]=1'b1; \
-      assign snpOutReady[OFFSET+i]=1'b1; assign datOutReady[OFFSET+i]=PORT[i].RXDATLCRDV; \
-    end \
-  end
-
-  `CHI_CONNECT_SN(snf, CFG.numSnf, OFF_SNF)
-  `CHI_CONNECT_SN(sni, CFG.numSni, OFF_SNI)
-`undef CHI_CONNECT_SN
+  `CHI_CONNECT_PORT(rnf, CFG.numRnf, OFF_RNF, 1'b1)
+  `CHI_CONNECT_PORT(rnd, CFG.numRnd, OFF_RND, 1'b1)
+  `CHI_CONNECT_PORT(rni, CFG.numRni, OFF_RNI, 1'b1)
+  `CHI_CONNECT_PORT(snf, CFG.numSnf, OFF_SNF, 1'b0)
+  `CHI_CONNECT_PORT(sni, CFG.numSni, OFF_SNI, 1'b0)
+`undef CHI_CONNECT_PORT
 
   for (genvar i = 0; i < CFG.numHnf; i++) begin : hnf_nodes
     chi_hnf_top #(

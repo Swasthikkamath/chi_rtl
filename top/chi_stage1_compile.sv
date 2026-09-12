@@ -7,25 +7,94 @@ module chi_stage1_compile #(
   localparam int unsigned NUM_LOGICAL_NODES =
     CFG.numRnf + CFG.numRnd + CFG.numRni + CFG.numSnf + CFG.numSni
     + CFG.numHnf + CFG.numHni + CFG.numMn;
-  // Independent sums of the fields consumed by each pack/unpack function.
+  // Independent sums of the fields each pack/unpack function moves, listed in
+  // flit order so that the width helpers in chi_pkg are checked against the
+  // field list rather than against themselves (IHI 0050H B13.9, B13.10).
   localparam int unsigned REQ_PACKED_FIELDS_W =
-    4 + CFG.nodeIdW + CFG.nodeIdW + CFG.txnIdW + CFG.nodeIdW + 1
-    + CFG.txnIdW + 7 + 3 + CFG.addrW + 1 + 1 + 1 + 1 + 2 + 4 + 4 + 1
-    + reqGroupLpidWidth(CFG) + 1 + 1 + 2 + 1
-    + (CFG.mpamEn ? CHI_MPAM_W : 0) + (CFG.mecEn ? CHI_MECID_W : 0)
-    + CFG.rsvdcW;
+    4                             // QoS
+    + CFG.nodeIdW                 // TgtID
+    + CFG.nodeIdW                 // SrcID
+    + CHI_TXNID_FLIT_W            // TxnID
+    + CFG.nodeIdW                 // ReturnNID / StashNID / DataTarget
+    + 1                           // StashNIDValid / Endian / Deep
+    + CHI_RTNTXNID_SLOT_W         // ReturnTxnID / StashLPID
+    + 7                           // Opcode
+    + 1                           // MultiReq
+    + CHI_NUMREQ_SLOT_W           // NumReq, overlaid by Size
+    + CFG.addrW                   // Addr
+    + CHI_PAS_W                   // PAS
+    + 1                           // LikelyShared
+    + 1                           // AllowRetry
+    + 2                           // Order
+    + 4                           // PCrdType
+    + 4                           // MemAttr
+    + 1                           // SnpAttr / DoDWT
+    + CHI_GROUPID_SLOT_W          // GroupID / LPID / PGroupID / TagGroupID
+    + 1                           // Excl / SnoopMe / CAH
+    + 1                           // ExpCompAck
+    + 2                           // TagOp
+    + 1                           // TraceTag
+    + mpamBusWidth(CFG)           // MPAM
+    + pbhaBusWidth(CFG)           // PBHA
+    + reqMecStreamWidth(CFG)      // MECID or StreamID
+    + secSid1Width(CFG)           // SecSID1
+    + CFG.rsvdcW;                 // RSVDC
   localparam int unsigned RSP_PACKED_FIELDS_W =
-    4 + CFG.nodeIdW + CFG.nodeIdW + CFG.txnIdW + 5 + 2 + 3 + 3 + 3
-    + rspDbidGroupWidth(CFG) + 4 + 2 + 1;
+    4                             // QoS
+    + CFG.nodeIdW                 // TgtID
+    + CFG.nodeIdW                 // SrcID
+    + CHI_TXNID_FLIT_W            // TxnID
+    + 5                           // Opcode
+    + 2                           // RespErr
+    + 3                           // Resp
+    + 3                           // FwdState, overlaid by DataPull
+    + 3                           // CBusy
+    + CHI_RSP_DBID_SLOT_W         // DBID / GroupID / StashGroupID
+    + 4                           // PCrdType
+    + 2                           // TagOp
+    + 1                           // TraceTag
+    + CHI_CACHELINEID_W;          // CacheLineID
   localparam int unsigned SNP_PACKED_FIELDS_W =
-    4 + CFG.nodeIdW + CFG.txnIdW + CFG.nodeIdW
-    + snpTxnLpidVmidWidth(CFG) + 5 + (CFG.addrW - 3) + 1 + 1 + 1 + 1 + 1
-    + (CFG.mpamEn ? CHI_MPAM_W : 0) + (CFG.mecEn ? CHI_MECID_W : 0);
+    4                             // QoS
+    + CFG.nodeIdW                 // SrcID
+    + CHI_TXNID_FLIT_W            // TxnID
+    + CFG.nodeIdW                 // FwdNID, overlaid by PBHA
+    + CHI_RTNTXNID_SLOT_W         // FwdTxnID / StashLPID / VMIDExt
+    + 5                           // Opcode
+    + (CFG.addrW - 3)             // Addr
+    + CHI_PAS_W                   // PAS
+    + 1                           // DoNotGoToSD
+    + 1                           // RetToSrc
+    + 1                           // TraceTag
+    + mpamBusWidth(CFG)           // MPAM
+    + mecIdBusWidth(CFG);         // MECID
   localparam int unsigned DAT_PACKED_FIELDS_W =
-    4 + CFG.nodeIdW + CFG.nodeIdW + CFG.txnIdW + CFG.nodeIdW
-    + 4 + 2 + 3 + 8 + 1 + 3 + datDbidMecWidth(CFG) + CFG.ccidW
-    + 2 + 2 + (CFG.dataW / 32) + (CFG.dataW / 128) + 1 + 1 + 2 + 1
-    + CFG.rsvdcW + (CFG.dataW / 8) + CFG.dataW
+    4                             // QoS
+    + CFG.nodeIdW                 // TgtID
+    + CFG.nodeIdW                 // SrcID
+    + CHI_TXNID_FLIT_W            // TxnID
+    + CFG.nodeIdW                 // HomeNID, overlaid by PBHA and MECID
+    + 4                           // Opcode
+    + 2                           // RespErr
+    + 3                           // Resp
+    + CHI_DATASOURCE_W            // DataSource / FwdState
+    + 1                           // DataPull
+    + 3                           // CBusy
+    + mecIdBusWidth(CFG)          // MECID
+    + CHI_DAT_DBID_SLOT_W         // DBID
+    + CHI_CCID_SLOT_W             // CCID
+    + CHI_DATAID_SLOT_W           // DataID
+    + CHI_CACHELINEID_W           // CacheLineID
+    + 2                           // TagOp
+    + (CFG.dataW / 32)            // Tag
+    + (CFG.dataW / 128)           // TU
+    + 1                           // TraceTag
+    + 1                           // CAH
+    + 2                           // NumDat
+    + 1                           // Replicate
+    + CFG.rsvdcW                  // RSVDC
+    + (CFG.dataW / 8)             // BE
+    + CFG.dataW                   // Data
     + (CFG.dataCheckEn ? (CFG.dataW / 8) : 0)
     + (CFG.poisonEn ? (CFG.dataW / 64) : 0);
 
@@ -76,8 +145,9 @@ module chi_stage1_compile #(
         initial $fatal(1, "CHI RSVDC_W must be 0, 4, 8, 12, 16, 24, or 32");
       end
       if ((CFG.numIfPerNode == 0) || (CFG.replChannels == 0)
-          || (CFG.posEntries == 0) || (CFG.lcrdDepth == 0)) begin : check_positive_counts
-        initial $fatal(1, "Interface, replication, POS, and L-Credit counts must be positive");
+          || (CFG.posEntries == 0) || (CFG.retryRecords == 0)
+          || (CFG.lcrdDepth < 2)) begin : check_positive_counts
+        initial $fatal(1, "Interface, replication, POS and retry-record counts must be positive, with at least two L-Credits per channel");
       end
       if ((CFG.snpFilterEntries == 0) || (CFG.snpFilterWays == 0)
           || ((CFG.snpFilterEntries % CFG.snpFilterWays) != 0)) begin : check_snp_filter

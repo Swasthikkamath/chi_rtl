@@ -127,6 +127,7 @@ module chi_hnf_top #(
   logic [3:0] retryClass;
   logic [1:0] retryCategory;
   logic retryRecordFull;
+  logic retryAckSend;
   logic retryGrantValid;
   logic retryGrantReady;
   logic retryGrantSend;
@@ -327,6 +328,8 @@ module chi_hnf_top #(
     atomicRequest = CFG.atomicEn && isAtomicOpcode(incomingReq.opcode);
   end
 
+  // Resource evaluation sits in its own block because the retry tracker turns
+  // it into the RetryAck decision that the output block below consumes.
   always_comb begin
     // PCrdReturn carries no transaction, and PrefetchTgt has no response and
     // must never be retried, so both are accepted and discarded here
@@ -342,14 +345,16 @@ module chi_hnf_top #(
                  || (state == HNF_DMT_RESP) || (state == HNF_ATOMIC_DBID)
                  || (state == HNF_ATOMIC_RETURN) || (state == HNF_STASH_COMP)
                  || (state == HNF_STASH_DONE);
-    // RetryAck is optional: when the retry record table is full the request is
-    // held with back-pressure instead, which keeps the credit accounting exact.
-    reqInReady = resourcesAvailable
-                 || (retryAck && rspOutReady && !rspOutBusy);
-    requestHandshake = reqInValid && reqInReady && resourcesAvailable;
-    retryHandshake = reqInValid && reqInReady && !resourcesAvailable;
-    retryGrantSend = retryGrantValid && !retryHandshake && !rspOutBusy;
-    retryGrantReady = retryGrantSend && rspOutReady;
+  end
+
+  // Everything this block drives is a flit or a valid, so none of it may look
+  // at the ready it is paired with. The response channel is shared by the
+  // active transaction, a RetryAck and a PCrdGrant, and that contention is
+  // resolved here without the ready.
+  always_comb begin
+    retryAckSend = reqInValid && !resourcesAvailable && retryAck && !rspOutBusy;
+    retryGrantSend = retryGrantValid && !retryAckSend && !rspOutBusy;
+    requestHandshake = reqInValid && resourcesAvailable;
     idle = (state == HNF_IDLE) && !sfBackInvValid;
 
     downstreamReq = activeReq;
@@ -398,25 +403,13 @@ module chi_hnf_top #(
     datOutFlit.targetNodeId = requesterDat.tgtId;
     datOutFlit.payload = packDatFlit(CFG, requesterDat);
     datOutValid = 1'b0;
-    datInReady = 1'b0;
-    rspInReady = 1'b0;
 
     if ((state == HNF_WAIT_RESPONSE) && rspInValid
         && (incomingRsp.opcode != RSP_SNP_RESP)
-        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED)) begin
+        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED))
       rspOutValid = 1'b1;
-      rspInReady = rspOutReady;
-    end
-    if ((state == HNF_WAIT_RESPONSE) && datInValid) begin
+    if ((state == HNF_WAIT_RESPONSE) && datInValid)
       datOutValid = 1'b1;
-      datInReady = datOutReady;
-    end
-    if ((state == HNF_SNOOP_WAIT) || (state == HNF_BACKINV_WAIT))
-      rspInReady = snpRspReady;
-    // A snoop that invalidates a dirty peer copy supplies the value the
-    // atomic operates on, which removes the downstream read.
-    if ((state == HNF_SNOOP_WAIT) && activeAtomic)
-      datInReady = 1'b1;
 
     if ((state == HNF_ORDER_RECEIPT) || (state == HNF_DMT_RESP)) begin
       rspOutValid = 1'b1;
@@ -439,21 +432,12 @@ module chi_hnf_top #(
     end
 
     if (state == HNF_PULL_DATA) begin
-      datInReady = datOutReady;
       datOutValid = datInValid && (incomingDat.opcode == DAT_COMP_DATA);
       datOutFlit.targetNodeId = dataPullTarget;
       datOutFlit.payload = packDatFlit(CFG, pullDat);
     end
 
-    // A ReadReceipt from the Subordinate is optional and carries no state the
-    // Home needs once the read has been forwarded, so it is always drained.
-    if (rspInValid && (incomingRsp.opcode == RSP_READ_RECEIPT))
-      rspInReady = 1'b1;
-    if (state == HNF_WAIT_COMP_ACK)
-      rspInReady = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
-                   && (incomingRsp.srcId == activeReq.srcId);
-
-    if (retryHandshake) begin
+    if (retryAckSend) begin
       responseFlit = '0;
       responseFlit.tgtId = incomingReq.srcId;
       responseFlit.srcId = HN_NODE_ID;
@@ -463,7 +447,7 @@ module chi_hnf_top #(
       rspOutFlit.targetNodeId = incomingReq.srcId;
       rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
         packRspFlit(CFG, responseFlit);
-      rspOutValid = reqInValid && !resourcesAvailable;
+      rspOutValid = 1'b1;
     end
 
     if (retryGrantSend) begin
@@ -496,7 +480,44 @@ module chi_hnf_top #(
         datOutFlit.targetNodeId = activeReq.srcId;
         datOutFlit.payload = packDatFlit(CFG, atomicReturnDat);
       end
+    end
+  end
 
+  // The ready outputs are the only place a downstream ready is consumed. They
+  // are kept in a block of their own so that the flits and valids above stay
+  // independent of them, which is what makes the ready/valid handshake on
+  // every channel free of a combinational loop.
+  always_comb begin
+    // RetryAck is optional: when the retry record table is full the request is
+    // held with back-pressure instead, which keeps the credit accounting exact.
+    reqInReady = resourcesAvailable || (retryAckSend && rspOutReady);
+    retryHandshake = retryAckSend && rspOutReady;
+    retryGrantReady = retryGrantSend && rspOutReady;
+    rspInReady = 1'b0;
+    datInReady = 1'b0;
+
+    if ((state == HNF_WAIT_RESPONSE) && rspInValid
+        && (incomingRsp.opcode != RSP_SNP_RESP)
+        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED))
+      rspInReady = rspOutReady;
+    if ((state == HNF_WAIT_RESPONSE) && datInValid)
+      datInReady = datOutReady;
+    if ((state == HNF_SNOOP_WAIT) || (state == HNF_BACKINV_WAIT))
+      rspInReady = snpRspReady;
+    // A snoop that invalidates a dirty peer copy supplies the value the
+    // atomic operates on, which removes the downstream read.
+    if ((state == HNF_SNOOP_WAIT) && activeAtomic)
+      datInReady = 1'b1;
+    if (state == HNF_PULL_DATA)
+      datInReady = datOutReady;
+    // A ReadReceipt from the Subordinate is optional and carries no state the
+    // Home needs once the read has been forwarded, so it is always drained.
+    if (rspInValid && (incomingRsp.opcode == RSP_READ_RECEIPT))
+      rspInReady = 1'b1;
+    if (state == HNF_WAIT_COMP_ACK)
+      rspInReady = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
+                   && (incomingRsp.srcId == activeReq.srcId);
+    if (atomicStateActive) begin
       datInReady = (state == HNF_ATOMIC_OPERAND)
                    || (state == HNF_ATOMIC_INITIAL);
       rspInReady = (state == HNF_ATOMIC_WCOMP);
@@ -892,7 +913,8 @@ module chi_hnf_top #(
     .resourcesAvailable, .allowRetry(incomingReq.allowRetry),
     .requestCategory(retryCategory), .requestSrcId(incomingReq.srcId),
     .requestQos(incomingReq.qos), .acceptRequest(retryAccept),
-    .sendRetryAck(retryAck), .retryClass, .recordFull(retryRecordFull),
+    .sendRetryAck(retryAck), .retryAckSent(retryHandshake),
+    .retryClass, .recordFull(retryRecordFull),
     .creditUseValid(requestHandshake && !incomingReq.allowRetry
                     && !droppedRequest),
     .creditUseClass(incomingReq.pCrdType),
