@@ -73,6 +73,7 @@ module chi_hni_top #(
   logic activeConfigRead;
   logic activeDecodeError;
   logic forwardRequesterData;
+  logic droppedRequest;
   logic [clog2Min1(NUM_REGIONS)-1:0] selectedRegion;
   logic [CFG.addrW-1:0] stagedBase [NUM_REGIONS-1:0];
   logic [CFG.addrW-1:0] stagedLimit [NUM_REGIONS-1:0];
@@ -107,6 +108,10 @@ module chi_hni_top #(
                         & ~CFG.addrW'(12'hfff))
                        == CFG_MMIO_BASE);
     configRead = isRead(incomingReq.opcode);
+    // PCrdReturn carries no transaction and PrefetchTgt has no response, so
+    // both are accepted and discarded (IHI 0050H B2.5.6, B4.2.6.2).
+    droppedRequest = (incomingReq.opcode == REQ_PCRD_RETURN)
+                     || (incomingReq.opcode == REQ_PREFETCH_TGT);
     activeConfigRead = isRead(activeReq.opcode);
 
     forwardedReq = activeReq;
@@ -204,7 +209,7 @@ module chi_hni_top #(
       end
       case (state)
         HNI_IDLE: begin
-          if (reqInValid && reqInReady) begin
+          if (reqInValid && reqInReady && !droppedRequest) begin
             activeReq <= incomingReq;
             activeDecodeError <= samError && !configAccess;
             if (configAccess) begin

@@ -48,6 +48,7 @@ module chi_interconnect_top #(
   localparam int unsigned NUM_REQ_E = (NUM_REQ > 0) ? NUM_REQ : 1;
   localparam int unsigned NUM_DVM = (NUM_REQ > 0) ? NUM_REQ : 1;
   localparam int unsigned NUM_HNF_E = (CFG.numHnf > 0) ? CFG.numHnf : 1;
+  localparam int unsigned NUM_SNF_E = (CFG.numSnf > 0) ? CFG.numSnf : 1;
   localparam int unsigned NUM_HNI_E = (CFG.numHni > 0) ? CFG.numHni : 1;
   localparam int unsigned OFF_RNF = 0;
   localparam int unsigned OFF_RND = OFF_RNF + CFG.numRnf;
@@ -60,6 +61,7 @@ module chi_interconnect_top #(
 
   typedef logic [CHI_MAX_NODEID_W-1:0] node_id_array_t [NUM_NODES-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] hnf_id_array_t [NUM_HNF_E-1:0];
+  typedef logic [CHI_MAX_NODEID_W-1:0] snf_id_array_t [NUM_SNF_E];
   typedef logic [CHI_MAX_NODEID_W-1:0]
     rnf_id_array_t [(CFG.numRnf > 0 ? CFG.numRnf : 1)-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] dvm_id_array_t [NUM_DVM-1:0];
@@ -90,6 +92,13 @@ module chi_interconnect_top #(
     hnf_id_array_t values;
     for (int unsigned i = 0; i < NUM_HNF_E; i++)
       values[i] = (i < CFG.numHnf) ? ids[OFF_HNF+i] : '0;
+    return values;
+  endfunction
+
+  function automatic snf_id_array_t makeSnfIds(input node_id_array_t ids);
+    snf_id_array_t values;
+    for (int unsigned i = 0; i < NUM_SNF_E; i++)
+      values[i] = (i < CFG.numSnf) ? ids[OFF_SNF+i] : '0;
     return values;
   endfunction
 
@@ -210,6 +219,7 @@ module chi_interconnect_top #(
 
   localparam node_id_array_t EFFECTIVE_NODE_IDS = makeNodeIds();
   localparam hnf_id_array_t HNF_NODE_IDS = makeHnfIds(EFFECTIVE_NODE_IDS);
+  localparam snf_id_array_t SNF_NODE_IDS = makeSnfIds(EFFECTIVE_NODE_IDS);
   localparam rnf_id_array_t RNF_NODE_IDS = makeRnfIds(EFFECTIVE_NODE_IDS);
   localparam dvm_id_array_t DVM_NODE_IDS = makeDvmIds(EFFECTIVE_NODE_IDS);
   localparam region_addr_array_t EFFECTIVE_REGION_BASE = makeRegionBase();
@@ -255,6 +265,7 @@ module chi_interconnect_top #(
 
   logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterSamTarget;
   logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterRouteTarget;
+  logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterPrefetchTarget;
   logic [NUM_REQ_E-1:0][3:0] requesterSamAttributes;
   logic [NUM_REQ_E-1:0] requesterSamError;
   chi_req_flit_t requesterReq [NUM_REQ_E-1:0];
@@ -492,7 +503,19 @@ module chi_interconnect_top #(
       if ((requesterReq[i].opcode == REQ_DVM_OP) && (CFG.numMn > 0))
         requesterRouteTarget[i] =
           EFFECTIVE_NODE_IDS[OFF_MN];
+      // PrefetchTgt always goes straight to a Subordinate Node through its
+      // own mapper (IHI 0050H B3.3.1).
+      if ((requesterReq[i].opcode == REQ_PREFETCH_TGT) && (CFG.numSnf > 0))
+        requesterRouteTarget[i] = requesterPrefetchTarget[i];
     end
+
+    chi_prefetch_map #(
+      .CFG(CFG), .NUM_SNF(NUM_SNF_E), .SNF_NODE_IDS(SNF_NODE_IDS)
+    ) prefetch_map (
+      .address(requesterReq[i].addr[CFG.addrW-1:0]),
+      .targetNodeId(requesterPrefetchTarget[i])
+    );
+
     chi_sam #(
       .CFG(CFG), .NUM_REGIONS(NUM_REGIONS), .HASH_TO_HNF(1'b1),
       .NUM_HNF(NUM_HNF_E), .HN_NODE_IDS(HNF_NODE_IDS),

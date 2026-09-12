@@ -5,7 +5,8 @@ module chi_hnf_top #(
   parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     RNF_NODE_IDS [NUM_RNF] = '{default:'0},
-  parameter bit COMBINED_COMP_DBID = 1'b1
+  parameter bit COMBINED_COMP_DBID = 1'b1,
+  parameter bit COMBINED_COMP_STASH_DONE = 1'b1
 ) (
   input  logic clk,
   input  logic resetn,
@@ -47,7 +48,8 @@ module chi_hnf_top #(
     HNF_BACKINV_WAIT, HNF_ATOMIC_DBID, HNF_ATOMIC_OPERAND,
     HNF_ATOMIC_READ, HNF_ATOMIC_INITIAL, HNF_ATOMIC_WRITE,
     HNF_ATOMIC_WDATA, HNF_ATOMIC_WCOMP, HNF_ATOMIC_RETURN,
-    HNF_ORDER_RECEIPT, HNF_DMT_RESP
+    HNF_ORDER_RECEIPT, HNF_DMT_RESP, HNF_STASH_COMP, HNF_STASH_DONE,
+    HNF_PULL_REQ, HNF_PULL_DATA
   } hnf_state_e;
   hnf_state_e state;
 
@@ -135,6 +137,7 @@ module chi_hnf_top #(
   logic [7:0] retryOutstanding [CHI_CREDIT_TYPES];
   chi_rsp_flit_t grantFlit;
   logic resourcesAvailable;
+  logic droppedRequest;
   logic rspOutBusy;
   logic hazardBlocked;
   logic hazardLine;
@@ -163,6 +166,37 @@ module chi_hnf_top #(
   logic activeDwt;
   logic orderedReceiptRequired;
   chi_rsp_flit_t orderResponse;
+
+  logic stashIsStash;
+  logic stashIndependent;
+  logic stashSeparateDone;
+  logic stashTargetValid;
+  logic [NUM_RNF-1:0] stashTargetMask;
+  chi_snp_opcode_e stashTargetSnoop;
+  logic stashLpidValid;
+  logic [chi_cfg_pkg::CHI_MAX_LPID_W-1:0] stashLpid;
+  chi_req_opcode_e stashPullOpcode;
+  chi_resp_e stashPullResp;
+  logic stashUnique;
+  logic activeStash;
+  logic activeStashUnique;
+  logic activeStashIndependent;
+  logic activeStashSeparate;
+  logic [NUM_RNF-1:0] activeStashTargetMask;
+  chi_snp_opcode_e activeStashSnoop;
+  logic activeStashLpidValid;
+  logic [chi_cfg_pkg::CHI_MAX_LPID_W-1:0] activeStashLpid;
+  chi_resp_e activeStashPullResp;
+  logic dataPullValid;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] dataPullTarget;
+  logic [chi_cfg_pkg::CHI_RSP_DBID_SLOT_W-1:0] dataPullTxnId;
+  logic stashPullPending;
+  logic stashDirUpdate;
+  logic sfUpdateHasOwner;
+  logic [clog2Min1(NUM_RNF)-1:0] sfUpdateOwner;
+  chi_req_flit_t pullReq;
+  chi_dat_flit_t pullDat;
+  chi_rsp_flit_t stashResponse;
 
   logic atomicRequest;
   logic activeAtomic;
@@ -257,7 +291,9 @@ module chi_hnf_top #(
                        REQ_WRITE_UNIQUE_PTL, REQ_WRITE_UNIQUE_FULL,
                        REQ_WRITE_BACK_PTL, REQ_WRITE_BACK_FULL,
                        REQ_WRITE_NO_SNP_PTL, REQ_WRITE_NO_SNP_FULL,
-                       REQ_WRITE_UNIQUE_ZERO, REQ_WRITE_NO_SNP_ZERO});
+                       REQ_WRITE_UNIQUE_ZERO, REQ_WRITE_NO_SNP_ZERO,
+                       REQ_WRITE_UNIQUE_FULL_STASH,
+                       REQ_WRITE_UNIQUE_PTL_STASH});
   endfunction
 
   function automatic logic [NUM_RNF-1:0] requesterBit(
@@ -292,14 +328,20 @@ module chi_hnf_top #(
   end
 
   always_comb begin
-    resourcesAvailable = (incomingReq.opcode == REQ_PCRD_RETURN)
+    // PCrdReturn carries no transaction, and PrefetchTgt has no response and
+    // must never be retried, so both are accepted and discarded here
+    // (IHI 0050H B2.5.6, B4.2.6.2).
+    droppedRequest = (incomingReq.opcode == REQ_PCRD_RETURN)
+                     || (incomingReq.opcode == REQ_PREFETCH_TGT);
+    resourcesAvailable = droppedRequest
                          || ((state == HNF_IDLE) && posAllocReady
                              && !hazardBlocked && !sfBackInvValid);
     // The response channel belongs to the active transaction in these states,
     // so neither a RetryAck nor a PCrdGrant can use it.
     rspOutBusy = (state == HNF_WAIT_RESPONSE) || (state == HNF_ORDER_RECEIPT)
                  || (state == HNF_DMT_RESP) || (state == HNF_ATOMIC_DBID)
-                 || (state == HNF_ATOMIC_RETURN);
+                 || (state == HNF_ATOMIC_RETURN) || (state == HNF_STASH_COMP)
+                 || (state == HNF_STASH_DONE);
     // RetryAck is optional: when the retry record table is full the request is
     // held with back-pressure instead, which keeps the credit accounting exact.
     reqInReady = resourcesAvailable
@@ -381,6 +423,26 @@ module chi_hnf_top #(
       rspOutFlit.targetNodeId = activeReq.srcId;
       rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
         packRspFlit(CFG, orderResponse);
+    end
+
+    if ((state == HNF_STASH_COMP) || (state == HNF_STASH_DONE)) begin
+      rspOutValid = 1'b1;
+      rspOutFlit.targetNodeId = activeReq.srcId;
+      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
+        packRspFlit(CFG, stashResponse);
+    end
+
+    if (state == HNF_PULL_REQ) begin
+      reqOutValid = 1'b1;
+      reqOutFlit.targetNodeId = SN_NODE_ID;
+      reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] = packReqFlit(CFG, pullReq);
+    end
+
+    if (state == HNF_PULL_DATA) begin
+      datInReady = datOutReady;
+      datOutValid = datInValid && (incomingDat.opcode == DAT_COMP_DATA);
+      datOutFlit.targetNodeId = dataPullTarget;
+      datOutFlit.payload = packDatFlit(CFG, pullDat);
     end
 
     // A ReadReceipt from the Subordinate is optional and carries no state the
@@ -540,6 +602,69 @@ module chi_hnf_top #(
     orderResponse.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(activePosIndex);
   end
 
+  chi_stash_ctrl #(
+    .CFG(CFG), .NUM_RNF(NUM_RNF), .RNF_NODE_IDS(RNF_NODE_IDS)
+  ) stash_ctrl (
+    .requestOpcode(incomingReq.opcode),
+    .requestStashNidValid(incomingReq.stashNidValidOrEndianOrDeep),
+    .requestStashNid(incomingReq.returnNidOrStashNidOrDataTarget),
+    .requestStashLpidSlot(incomingReq.returnTxnIdOrStashLpid),
+    .homeHasLatestCopy(sfHit && !sfHasOwner), .isStash(stashIsStash),
+    .isIndependentStash(stashIndependent),
+    .isSeparateStashDone(stashSeparateDone),
+    .isUniqueStash(stashUnique),
+    .targetValid(stashTargetValid), .targetMask(stashTargetMask),
+    .targetSnoopOpcode(stashTargetSnoop), .stashLpidValid(stashLpidValid),
+    .stashLpid(stashLpid), .dataPullOpcode(stashPullOpcode),
+    .dataPullResp(stashPullResp)
+  );
+
+  // A stash target that answered with Data Pull is owed the cache line, so the
+  // Home reads it and returns CompData under the TxnID the target supplied
+  // (IHI 0050H B7.1.1).
+  always_comb begin
+    stashPullPending = activeStash && dataPullValid;
+
+    stashResponse = '0;
+    stashResponse.qos = activeReq.qos;
+    stashResponse.tgtId = activeReq.srcId;
+    stashResponse.srcId = HN_NODE_ID;
+    stashResponse.txnId = activeReq.txnId;
+    // Comp_I is the correct answer whenever the Home does not know that the
+    // line is held in the next-level cache (IHI 0050H B7.3).
+    stashResponse.resp = RESP_I;
+    // StashDone reuses the DBID slot for the Requester's StashGroupID.
+    stashResponse.dbIdOrGroupId =
+      CHI_RSP_DBID_SLOT_W'(activeReq.groupIdOrLpid);
+    if (state == HNF_STASH_DONE)
+      stashResponse.opcode = RSP_STASH_DONE;
+    else if (activeStashSeparate && COMBINED_COMP_STASH_DONE)
+      stashResponse.opcode = RSP_COMP_STASH_DONE;
+    else
+      stashResponse.opcode = RSP_COMP;
+
+    pullReq = '0;
+    pullReq.qos = activeReq.qos;
+    pullReq.tgtId = SN_NODE_ID;
+    pullReq.srcId = HN_NODE_ID;
+    pullReq.txnId = CHI_TXNID_FLIT_W'(activePosIndex);
+    pullReq.addr = activeReq.addr;
+    pullReq.pas = activeReq.pas;
+    pullReq.memAttr = activeReq.memAttr;
+    pullReq.size = 3'd6;
+    pullReq.opcode = REQ_READ_NO_SNP;
+
+    pullDat = incomingDat;
+    pullDat.tgtId = dataPullTarget;
+    pullDat.srcId = HN_NODE_ID;
+    pullDat.txnId = CHI_MAX_TXNID_W'(dataPullTxnId);
+    pullDat.homeNidOrPbha = HN_NODE_ID;
+    pullDat.opcode = DAT_COMP_DATA;
+    pullDat.resp = activeStashPullResp;
+    pullDat.dbId = '0;
+    pullDat.dataPull = 1'b0;
+  end
+
   // PCrdGrant names the recorded Requester and carries no TxnID or DBID
   // (IHI 0050H B2.5.5).
   always_comb begin
@@ -652,7 +777,7 @@ module chi_hnf_top #(
 
   chi_pos #(.CFG(CFG), .DEPTH(POS_DEPTH)) pos (
     .clk, .resetn,
-    .allocValid(requestHandshake && (incomingReq.opcode != REQ_PCRD_RETURN)),
+    .allocValid(requestHandshake && !droppedRequest),
     .allocReady(posAllocReady), .allocLineAddr(incomingLine),
     .allocRequester(incomingReq.srcId), .allocTxnId(incomingReq.txnId),
     .allocOpcode(incomingReq.opcode), .allocNeedSnoop(coherentRequest && sfHit),
@@ -678,19 +803,32 @@ module chi_hnf_top #(
     .updateValid(sfUpdate), .updateReady(sfUpdateReady),
     .updateLineAddr(activeReq.addr[CFG.addrW-1:6]),
     .updateSharers(sfUpdateSharers), .updatePrecise(1'b1),
-    .updateHasOwner(!sfInvalidate
-      && ((activeReq.opcode == REQ_READ_UNIQUE)
-          || (activeReq.opcode == REQ_MAKE_UNIQUE))),
-    .updateOwner(requesterIndex(activeReq.srcId)), .invalidate(sfInvalidate),
+    .updateHasOwner(sfUpdateHasOwner), .updateOwner(sfUpdateOwner),
+    .invalidate(sfInvalidate),
     .backInvValid(sfBackInvValid), .backInvReady(sfBackInvReady),
     .backInvLineAddr(sfBackInvLine), .backInvSharers(sfBackInvSharers),
     .backInvDone(sfBackInvDone)
   );
 
+  // A Data Pull hands the stash target a copy of the line, so the directory
+  // records that target rather than the stash Requester.
+  always_comb begin
+    sfUpdateOwner = stashDirUpdate ? requesterIndex(dataPullTarget)
+                                   : requesterIndex(activeReq.srcId);
+    sfUpdateHasOwner = !sfInvalidate
+                       && (stashDirUpdate ? activeStashUnique
+                           : ((activeReq.opcode == REQ_READ_UNIQUE)
+                              || (activeReq.opcode == REQ_MAKE_UNIQUE)));
+  end
+
   always_comb begin
     snpStart = (state == HNF_SNOOP_START) || (state == HNF_BACKINV_START);
-    snpStartSharers = (state == HNF_BACKINV_START)
-                      ? sfBackInvSharers : sfSharers;
+    // An independent stash request only hints the target; a write with stash
+    // hint invalidates the peers as well (IHI 0050H B7.2, B7.3). The target is
+    // snooped whether or not the directory records it as a sharer.
+    snpStartSharers = (state == HNF_BACKINV_START) ? sfBackInvSharers
+                      : (activeStashIndependent ? activeStashTargetMask
+                         : (sfSharers | activeStashTargetMask));
     snpStartLine = (state == HNF_BACKINV_START)
                    ? sfBackInvLine : activeReq.addr[CFG.addrW-1:6];
     // An atomic must leave every peer copy Invalid, and CleanInvalid also
@@ -716,12 +854,21 @@ module chi_hnf_top #(
     .startOpcode(snpStartOpcode), .startTxnId(snpStartTxn),
     .startFwdNid(snpFwdNid), .startFwdTxnId(snpFwdTxn),
     .startRetToSrc(snpRetToSrc), .startPas(activeReq.pas),
+    .startStashTarget(activeStashTargetMask),
+    .startStashOpcode(activeStashSnoop),
+    .startStashLpidValid(activeStashLpidValid),
+    .startStashLpid(activeStashLpid),
     .snpValid(snpOutValid), .snpReady(snpOutReady), .snpFlit(snpOutFlit),
     .responseValid(rspInValid
       && ((incomingRsp.opcode == RSP_SNP_RESP)
           || (incomingRsp.opcode == RSP_SNP_RESP_FWDED))),
     .responseReady(snpRspReady), .responseSource(incomingRsp.srcId),
-    .busy(snpBusy), .done(snpDone)
+    // DataPull occupies the low bit of the shared FwdState slot and the TxnID
+    // for the implied read arrives in DBID (IHI 0050H Table B13.7).
+    .responseDataPull(incomingRsp.fwdState[0]),
+    .responseDbId(incomingRsp.dbIdOrGroupId),
+    .dataPullValid(dataPullValid), .dataPullTarget(dataPullTarget),
+    .dataPullTxnId(dataPullTxnId), .busy(snpBusy), .done(snpDone)
   );
 
   // The Home Node partitions its P-Credits by request category so that a
@@ -747,7 +894,7 @@ module chi_hnf_top #(
     .requestQos(incomingReq.qos), .acceptRequest(retryAccept),
     .sendRetryAck(retryAck), .retryClass, .recordFull(retryRecordFull),
     .creditUseValid(requestHandshake && !incomingReq.allowRetry
-                    && (incomingReq.opcode != REQ_PCRD_RETURN)),
+                    && !droppedRequest),
     .creditUseClass(incomingReq.pCrdType),
     .creditReturnValid(reqInValid && reqInReady
                        && (incomingReq.opcode == REQ_PCRD_RETURN)),
@@ -775,6 +922,15 @@ module chi_hnf_top #(
       activeGotComp <= 1'b0;
       activeGotPersist <= 1'b0;
       activeAtomic <= 1'b0;
+      activeStash <= 1'b0;
+      activeStashUnique <= 1'b0;
+      activeStashIndependent <= 1'b0;
+      activeStashSeparate <= 1'b0;
+      activeStashTargetMask <= '0;
+      activeStashSnoop <= SNP_STASH_SHARED;
+      activeStashLpidValid <= 1'b0;
+      activeStashLpid <= '0;
+      activeStashPullResp <= RESP_I;
       activeDmt <= 1'b0;
       activeDmtSeparate <= 1'b0;
       activeDwt <= 1'b0;
@@ -788,19 +944,29 @@ module chi_hnf_top #(
       sfUpdate <= 1'b0;
       sfUpdateSharers <= '0;
       sfInvalidate <= 1'b0;
+      stashDirUpdate <= 1'b0;
     end else begin
       posFree <= 1'b0;
       sfUpdate <= 1'b0;
+      stashDirUpdate <= 1'b0;
       case (state)
         HNF_IDLE: begin
           if (sfBackInvValid)
             state <= HNF_BACKINV_START;
-          else if (requestHandshake
-                   && (incomingReq.opcode != REQ_PCRD_RETURN)) begin
+          else if (requestHandshake && !droppedRequest) begin
             activeReq <= incomingReq;
             activePosIndex <= posAllocIndex;
             activeCoherent <= coherentRequest;
             activeAtomic <= atomicRequest;
+            activeStash <= stashIsStash;
+            activeStashUnique <= stashUnique;
+            activeStashIndependent <= stashIndependent;
+            activeStashSeparate <= stashSeparateDone;
+            activeStashTargetMask <= stashTargetValid ? stashTargetMask : '0;
+            activeStashSnoop <= stashTargetSnoop;
+            activeStashLpidValid <= stashLpidValid;
+            activeStashLpid <= stashLpid;
+            activeStashPullResp <= stashPullResp;
             activeDmt <= dmtEligible;
             activeDmtSeparate <= dmtEligible && dmtSeparateResponse;
             activeDwt <= dwtEligible && dwtDoDwt;
@@ -810,8 +976,9 @@ module chi_hnf_top #(
             atomicDataSent <= 1'b0;
             atomicInitialBuffer <= '0;
             activeWrite <= isWrite(incomingReq.opcode) || cmoWrite;
-            activeNeedsSnoop <= (coherentRequest || activeCmo) && sfHit
-                                && (sfSharers != '0);
+            activeNeedsSnoop <= stashTargetValid
+                                || ((coherentRequest || activeCmo) && sfHit
+                                    && (sfSharers != '0));
             activeExclOkay <= !incomingReq.exclOrSnoopMeOrCah
                               || (isWrite(incomingReq.opcode)
                                   ? exclOkay : exclReserveReady);
@@ -820,11 +987,16 @@ module chi_hnf_top #(
             activeGotPersist <= !cmoPersist;
             if (orderedReceiptRequired)
               state <= HNF_ORDER_RECEIPT;
-            else if ((coherentRequest || activeCmo || atomicRequest) && sfHit
-                     && (sfSharers != '0))
+            else if (stashTargetValid
+                     || (((coherentRequest || activeCmo || atomicRequest)
+                          && sfHit && (sfSharers != '0))))
               state <= HNF_SNOOP_START;
             else if (atomicRequest)
               state <= HNF_ATOMIC_DBID;
+            // A stash request without a target has no data to move, so the
+            // Home completes it immediately (IHI 0050H B7.4.2).
+            else if (stashIndependent)
+              state <= HNF_STASH_COMP;
             else
               state <= HNF_REQ_SEND;
           end
@@ -840,8 +1012,45 @@ module chi_hnf_top #(
             atomicInitialFromSnoop <= 1'b1;
           end
           if (snpDone)
-            state <= activeAtomic ? HNF_ATOMIC_DBID : HNF_REQ_SEND;
+            state <= activeAtomic ? HNF_ATOMIC_DBID
+                     : (activeStashIndependent ? HNF_STASH_COMP
+                        : HNF_REQ_SEND);
         end
+        HNF_STASH_COMP:
+          if (rspOutValid && rspOutReady) begin
+            if (activeStashSeparate && !COMBINED_COMP_STASH_DONE)
+              state <= HNF_STASH_DONE;
+            else if (stashPullPending)
+              state <= HNF_PULL_REQ;
+            else begin
+              state <= HNF_IDLE;
+              posFree <= 1'b1;
+            end
+          end
+        HNF_STASH_DONE:
+          if (rspOutValid && rspOutReady) begin
+            if (stashPullPending)
+              state <= HNF_PULL_REQ;
+            else begin
+              state <= HNF_IDLE;
+              posFree <= 1'b1;
+            end
+          end
+        HNF_PULL_REQ:
+          if (reqOutValid && reqOutReady)
+            state <= HNF_PULL_DATA;
+        HNF_PULL_DATA:
+          if (datOutValid && datOutReady
+              && (incomingDat.dataId == incomingDat.numDat)) begin
+            state <= HNF_IDLE;
+            posFree <= 1'b1;
+            sfUpdate <= 1'b1;
+            sfInvalidate <= 1'b0;
+            stashDirUpdate <= 1'b1;
+            sfUpdateSharers <= activeStashUnique
+                               ? requesterBit(dataPullTarget)
+                               : (sfSharers | requesterBit(dataPullTarget));
+          end
         HNF_ATOMIC_DBID:
           if (rspOutValid && rspOutReady)
             state <= HNF_ATOMIC_OPERAND;
@@ -948,8 +1157,10 @@ module chi_hnf_top #(
               if (activeReq.expCompAck)
                 state <= HNF_WAIT_COMP_ACK;
               else begin
-                state <= HNF_IDLE;
-                posFree <= 1'b1;
+                // A write with stash hint whose target asked for Data Pull
+                // still owes that target the cache line.
+                state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
+                posFree <= !stashPullPending;
                 if (activeCoherent) begin
                   sfUpdate <= 1'b1;
                   if (activeWrite)
@@ -970,8 +1181,8 @@ module chi_hnf_top #(
             if (activeReq.expCompAck) begin
               state <= HNF_WAIT_COMP_ACK;
             end else begin
-              state <= HNF_IDLE;
-              posFree <= 1'b1;
+              state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
+              posFree <= !stashPullPending;
             end
             if (activeCoherent) begin
               sfUpdate <= 1'b1;
@@ -990,8 +1201,8 @@ module chi_hnf_top #(
         HNF_WAIT_COMP_ACK: begin
           if (rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
               && (incomingRsp.srcId == activeReq.srcId)) begin
-            state <= HNF_IDLE;
-            posFree <= 1'b1;
+            state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
+            posFree <= !stashPullPending;
           end
         end
         HNF_BACKINV_START:

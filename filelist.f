@@ -16,6 +16,7 @@ noc/chi_mesh.sv
 noc/chi_noc_top.sv
 sam/chi_hn_hash.sv
 sam/chi_sam.sv
+sam/chi_prefetch_map.sv
 hni/chi_cfg_slave.sv
 hni/chi_hni_top.sv
 mn/chi_mn_dvm.sv
@@ -28,6 +29,7 @@ hnf/chi_dct_ctrl.sv
 hnf/chi_atomic_alu.sv
 hnf/chi_dmt_ctrl.sv
 hnf/chi_dwt_ctrl.sv
+hnf/chi_stash_ctrl.sv
 hnf/chi_cmo.sv
 hnf/chi_excl_mon.sv
 hnf/chi_hnf_top.sv

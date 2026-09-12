@@ -17,12 +17,21 @@ module chi_snp_gen #(
   input  logic [CFG.txnIdW-1:0] startFwdTxnId,
   input  logic startRetToSrc,
   input  chi_pkg::chi_pas_e startPas,
+  input  logic [NUM_RNF-1:0] startStashTarget,
+  input  chi_pkg::chi_snp_opcode_e startStashOpcode,
+  input  logic startStashLpidValid,
+  input  logic [chi_cfg_pkg::CHI_MAX_LPID_W-1:0] startStashLpid,
   output logic snpValid,
   input  logic snpReady,
   output chi_pkg::chi_noc_flit_t snpFlit,
   input  logic responseValid,
   output logic responseReady,
   input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] responseSource,
+  input  logic responseDataPull,
+  input  logic [chi_cfg_pkg::CHI_RSP_DBID_SLOT_W-1:0] responseDbId,
+  output logic dataPullValid,
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] dataPullTarget,
+  output logic [chi_cfg_pkg::CHI_RSP_DBID_SLOT_W-1:0] dataPullTxnId,
   output logic busy,
   output logic done
 );
@@ -40,6 +49,11 @@ module chi_snp_gen #(
   logic [CFG.txnIdW-1:0] fwdTxnIdReg;
   logic retToSrcReg;
   chi_pas_e pasReg;
+  logic [NUM_RNF-1:0] stashTargetReg;
+  chi_snp_opcode_e stashOpcodeReg;
+  logic stashLpidValidReg;
+  logic [chi_cfg_pkg::CHI_MAX_LPID_W-1:0] stashLpidReg;
+  logic selectedIsStashTarget;
   chi_snp_flit_t protocolFlit;
 
   always_comb begin
@@ -52,12 +66,21 @@ module chi_snp_gen #(
       end
     end
 
+    selectedIsStashTarget = selectedValid && stashTargetReg[selected];
+
     protocolFlit = '0;
     protocolFlit.srcId = HN_NODE_ID;
     protocolFlit.txnId = txnIdReg;
     protocolFlit.fwdNidOrPbha = fwdNidReg;
     protocolFlit.fwdTxnIdOrStashLpidOrVmidExt = fwdTxnIdReg;
-    protocolFlit.opcode = opcodeReg;
+    // For the stash target the shared 12-bit slot carries
+    // {6'b0, StashLPIDValid, StashLPID} instead of FwdTxnID
+    // (IHI 0050H Table B13.8).
+    if (selectedIsStashTarget)
+      protocolFlit.fwdTxnIdOrStashLpidOrVmidExt =
+        {{(chi_cfg_pkg::CHI_RTNTXNID_SLOT_W - chi_cfg_pkg::CHI_MAX_LPID_W - 1)
+            {1'b0}}, stashLpidValidReg, stashLpidReg};
+    protocolFlit.opcode = selectedIsStashTarget ? stashOpcodeReg : opcodeReg;
     protocolFlit.addr = '0;
     protocolFlit.addr[CFG.addrW-4:0] = {lineAddrReg, 3'b000};
     protocolFlit.pas = pasReg;
@@ -85,6 +108,13 @@ module chi_snp_gen #(
       fwdTxnIdReg <= '0;
       retToSrcReg <= 1'b0;
       pasReg <= PAS_SECURE;
+      stashTargetReg <= '0;
+      stashOpcodeReg <= SNP_STASH_SHARED;
+      stashLpidValidReg <= 1'b0;
+      stashLpidReg <= '0;
+      dataPullValid <= 1'b0;
+      dataPullTarget <= '0;
+      dataPullTxnId <= '0;
       done <= 1'b0;
     end else begin
       done <= 1'b0;
@@ -99,6 +129,13 @@ module chi_snp_gen #(
             fwdTxnIdReg <= startFwdTxnId;
             retToSrcReg <= startRetToSrc;
             pasReg <= startPas;
+            stashTargetReg <= startStashTarget;
+            stashOpcodeReg <= startStashOpcode;
+            stashLpidValidReg <= startStashLpidValid;
+            stashLpidReg <= startStashLpid;
+            dataPullValid <= 1'b0;
+            dataPullTarget <= '0;
+            dataPullTxnId <= '0;
             if (startSharers == '0)
               done <= 1'b1;
             else
@@ -111,6 +148,14 @@ module chi_snp_gen #(
         end
         SNP_WAIT: begin
           if (responseValid && responseReady) begin
+            // A stash target that wants the line answers with DataPull set
+            // and names the TxnID the Home must use for the implied read in
+            // the DBID field (IHI 0050H B7.3).
+            if (selectedIsStashTarget && responseDataPull) begin
+              dataPullValid <= 1'b1;
+              dataPullTarget <= RNF_NODE_IDS[selected];
+              dataPullTxnId <= responseDbId;
+            end
             remaining[selected] <= 1'b0;
             if ((remaining & ~(NUM_RNF'(1) << selected)) == '0) begin
               state <= SNP_IDLE;
