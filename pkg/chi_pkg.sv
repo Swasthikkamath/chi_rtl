@@ -377,10 +377,12 @@ package chi_pkg;
     return (flitWidth + 7) / 8;
   endfunction
 
+  // The result is clamped to the width of the counter so that a nonsensical
+  // value cannot spin the loop past the point where the shift wraps.
   function automatic int unsigned clog2Min1(input int unsigned value);
     int unsigned result;
     result = 1;
-    while ((1 << result) < value)
+    while ((result < 31) && ((32'd1 << result) < value))
       result++;
     return result;
   endfunction
@@ -401,13 +403,22 @@ package chi_pkg;
     logic [CHI_MAX_NODEID_W-1:0] nodeId;
     int unsigned bitPos;
     int signed idWidth;
+    // Every field width is taken once into a local. A loop bound that is itself
+    // a function call would be re-evaluated on each iteration, and Verilator
+    // 5.020 miscompiles that when the callee contains a loop of its own.
+    int unsigned portW;
+    int unsigned xW;
+    int unsigned yW;
     nodeId = '0;
     bitPos = 0;
     idWidth = deviceIdWidth(cfg);
+    portW = clog2Min1(cfg.numDevPortsPerXp);
+    xW = clog2Min1(cfg.meshX);
+    yW = clog2Min1(cfg.meshY);
     for (int i = 0; i < idWidth; i++) nodeId[bitPos++] = deviceId[i];
-    for (int i = 0; i < clog2Min1(cfg.numDevPortsPerXp); i++) nodeId[bitPos++] = devicePort[i];
-    for (int i = 0; i < clog2Min1(cfg.meshX); i++) nodeId[bitPos++] = meshX[i];
-    for (int i = 0; i < clog2Min1(cfg.meshY); i++) nodeId[bitPos++] = meshY[i];
+    for (int i = 0; i < portW; i++) nodeId[bitPos++] = devicePort[i];
+    for (int i = 0; i < xW; i++) nodeId[bitPos++] = meshX[i];
+    for (int i = 0; i < yW; i++) nodeId[bitPos++] = meshY[i];
     return nodeId;
   endfunction
 
@@ -423,35 +434,43 @@ package chi_pkg;
 
   function automatic int unsigned nodeIdDeviceId(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
     int unsigned value;
+    int signed idWidth;
     value = 0;
-    for (int i = 0; i < deviceIdWidth(cfg); i++) value[i] = nodeId[i];
+    idWidth = deviceIdWidth(cfg);
+    for (int i = 0; i < idWidth; i++) value[i] = nodeId[i];
     return value;
   endfunction
 
   function automatic int unsigned nodeIdDevicePort(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
     int unsigned value;
     int unsigned base;
+    int unsigned portW;
     value = 0;
     base = deviceIdWidth(cfg);
-    for (int i = 0; i < clog2Min1(cfg.numDevPortsPerXp); i++) value[i] = nodeId[base+i];
+    portW = clog2Min1(cfg.numDevPortsPerXp);
+    for (int i = 0; i < portW; i++) value[i] = nodeId[base+i];
     return value;
   endfunction
 
   function automatic int unsigned nodeIdMeshX(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
     int unsigned value;
     int unsigned base;
+    int unsigned xW;
     value = 0;
     base = deviceIdWidth(cfg) + clog2Min1(cfg.numDevPortsPerXp);
-    for (int i = 0; i < clog2Min1(cfg.meshX); i++) value[i] = nodeId[base+i];
+    xW = clog2Min1(cfg.meshX);
+    for (int i = 0; i < xW; i++) value[i] = nodeId[base+i];
     return value;
   endfunction
 
   function automatic int unsigned nodeIdMeshY(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
     int unsigned value;
     int unsigned base;
+    int unsigned yW;
     value = 0;
     base = deviceIdWidth(cfg) + clog2Min1(cfg.numDevPortsPerXp) + clog2Min1(cfg.meshX);
-    for (int i = 0; i < clog2Min1(cfg.meshY); i++) value[i] = nodeId[base+i];
+    yW = clog2Min1(cfg.meshY);
+    for (int i = 0; i < yW; i++) value[i] = nodeId[base+i];
     return value;
   endfunction
 
