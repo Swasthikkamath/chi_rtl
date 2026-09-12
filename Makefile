@@ -20,8 +20,12 @@ SIM_FLAGS = --binary --assert --sv -Wno-fatal \
 SIM_SRC = tb/chi_node_link_bfm.sv tb/chi_sim_harness.sv tb/chi_smoke_tb.sv
 SIM_BIN = obj_dir/chi_smoke
 
-DOC_SRC = doc-src/chi_interconnect_design_spec.md
-DOC_OUT = docs/chi_interconnect_design_spec.docx
+DOT       ?= dot
+DOC_SRC    = doc-src/chi_interconnect_design_spec.md
+DOC_OUT    = docs/chi_interconnect_design_spec.docx
+FIG_DIR    = doc-src/figures
+FIG_DOT    = $(wildcard $(FIG_DIR)/*.dot)
+FIG_PNG    = $(FIG_DOT:.dot=.png)
 
 # Verilator initialises state to zero, which hides anything that depends on a
 # register or an input having been driven. Re-running with randomised
@@ -29,7 +33,7 @@ DOC_OUT = docs/chi_interconnect_design_spec.docx
 # for free, and is the only way this flow catches a missing driver.
 SIM_SEEDS = 1 2 7 42 1234
 
-.PHONY: all lint sim simrand doc clean
+.PHONY: all lint sim simrand doc figures clean
 
 all: lint sim simrand doc
 
@@ -60,9 +64,19 @@ $(SIM_BIN): $(SIM_SRC) filelist.f
 
 doc: $(DOC_OUT)
 
-$(DOC_OUT): $(DOC_SRC)
+# Figures are generated from Graphviz sources so the diagrams cannot drift out
+# of review: the .dot files are the reviewable artifact, the .png files are
+# build output that happens to be committed so the document builds without
+# Graphviz installed.
+figures: $(FIG_PNG)
+
+$(FIG_DIR)/%.png: $(FIG_DIR)/%.dot
+	$(DOT) -Tpng -Gdpi=150 -o $@ $<
+
+$(DOC_OUT): $(DOC_SRC) $(FIG_PNG)
 	@mkdir -p docs
-	$(PANDOC) $(DOC_SRC) --toc --toc-depth=2 -o $@
+	$(PANDOC) $(DOC_SRC) --toc --toc-depth=2 \
+	  --resource-path=doc-src -o $@
 
 clean:
 	rm -rf obj_dir

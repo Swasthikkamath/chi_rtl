@@ -1,0 +1,103 @@
+// Top-level architecture of the configurable CHI interconnect.
+// Rendered by the doc target; see Makefile.
+//
+// The vertical axis is the request path: a Requester's REQ flit enters a link
+// layer, is decoded to a TgtID, crosses the selected network, is serialized by
+// a Home Node, and leaves through a second link layer to a Subordinate.
+digraph chiArchitecture {
+  rankdir=TB;
+  splines=polyline;
+  nodesep=0.30;
+  ranksep=0.40;
+  bgcolor="white";
+  compound=true;
+  node [shape=box, style="rounded,filled", fillcolor="#f5f5f5",
+        fontname="Helvetica", fontsize=10, margin="0.14,0.08"];
+  edge [fontname="Helvetica", fontsize=9, color="#555555"];
+  graph [fontname="Helvetica", fontsize=11, labeljust="l"];
+
+  subgraph cluster_req {
+    label="Request Nodes  (external, one chi_if each)";
+    style="rounded"; color="#8899aa"; fontcolor="#334455";
+    rnf [label="RN-F x numRnf\ncoherent, caching", fillcolor="#dce9f7"];
+    rnd [label="RN-D x numRnd\nDVM capable", fillcolor="#dce9f7"];
+    rni [label="RN-I x numRni\nI/O coherent", fillcolor="#dce9f7"];
+  }
+
+  reqlink [fillcolor="#e8f0e0", shape=box, style="filled",
+    label=<<table border="0" cellborder="0" cellspacing="1">
+      <tr><td colspan="2" align="center"><b>chi_link_port</b>  (one per Requester port)</td></tr>
+      <tr><td align="left">chi_link_fsm</td><td align="left">activation: STOP, ACTIVATE, RUN, DEACTIVATE</td></tr>
+      <tr><td align="left">chi_lcrd_mgr</td><td align="left">L-Credit pool, lcrdDepth per channel</td></tr>
+      <tr><td align="left">chi_link_rx</td><td align="left">receive buffer, flit parity check</td></tr>
+      <tr><td align="left">chi_link_tx</td><td align="left">credit-gated transmit, parity generate</td></tr>
+    </table>>];
+
+  subgraph cluster_sam {
+    label="Address decode  (Requester side, per port)";
+    style="rounded"; color="#bba060"; fontcolor="#6b5520";
+    sam   [label="chi_sam\nregion match, PAS check", fillcolor="#fdf0d5"];
+    hash  [label="chi_hn_hash\nXOR fold, interleaveGranule", fillcolor="#fdf0d5"];
+    pfmap [label="chi_prefetch_map\nPrefetchTgt to SN-F", fillcolor="#fdf0d5"];
+  }
+
+  noc [fillcolor="#e0e0f0", style="filled",
+    label=<<table border="0" cellborder="0" cellspacing="1">
+      <tr><td><b>chi_noc_top</b>   topology = CROSSBAR | RING | MESH_2D</td></tr>
+      <tr><td>independent REQ / RSP / SNP / DAT networks, ready-valid</td></tr>
+      <tr><td>chi_route_compute, chi_router, chi_vc_arb (QoS, AGE_LIMIT)</td></tr>
+    </table>>];
+
+  subgraph cluster_home {
+    label="Home and Misc Nodes  (internal fabric endpoints, no link layer)";
+    style="rounded"; color="#bb8899"; fontcolor="#77334f";
+    hnf [label="chi_hnf_top x numHnf\ncoherent Home\nPOS, directory, snoops", fillcolor="#f7dce9"];
+    hni [label="chi_hni_top x numHni\nnoncoherent Home\nCHI-MMIO config", fillcolor="#f7dce9"];
+    mn  [label="chi_mn_dvm x numMn\nDVM sequencer", fillcolor="#f7dce9"];
+  }
+
+  sublink [label="chi_link_port  (one per Subordinate port)\nsame four blocks, Subordinate channel set",
+    fillcolor="#e8f0e0"];
+
+  subgraph cluster_sub {
+    label="Subordinate Nodes  (external, one chi_if each)";
+    style="rounded"; color="#8899aa"; fontcolor="#334455";
+    snf [label="SN-F x numSnf\nmemory", fillcolor="#dce9f7"];
+    sni [label="SN-I x numSni\nperipheral", fillcolor="#dce9f7"];
+  }
+
+  // Side annotations. constraint=false keeps them off the main request path.
+  cfg [label="chi_cfg_slave\nAPB4 register map\ncfgAccess = CFG_APB", fillcolor="#fdf0d5"];
+  status [label="linkUp\nlinkParityError\nlinkCreditError\nper node ordinal",
+    shape=note, fillcolor="#ffffff"];
+
+  rnf -> reqlink [label="  TX/RX REQ RSP DAT SNP"];
+  rnd -> reqlink [style=dashed];
+  rni -> reqlink [style=dashed];
+
+  reqlink -> sam [label="  REQ address"];
+  sam -> hash  [label="  hashed region"];
+  sam -> pfmap [label="  PrefetchTgt"];
+
+  hash  -> noc [label="  TgtID"];
+  pfmap -> noc [label="  TgtID = SN-F"];
+  reqlink -> noc [label="  RSP, DAT", constraint=false];
+
+  noc -> hnf;
+  noc -> hni;
+  noc -> mn;
+  hnf -> noc [label="  snoops,\n  downstream REQ", constraint=false];
+  hni -> noc [style=dashed, constraint=false];
+  mn  -> noc [style=dashed, constraint=false];
+
+  noc -> sublink [label="  REQ to Subordinate"];
+  sublink -> snf;
+  sublink -> sni;
+
+  cfg -> sam [label="  region update", constraint=false, color="#bb8844"];
+  reqlink -> status [style=dotted, arrowhead=none, constraint=false];
+  sublink -> status [style=dotted, arrowhead=none, constraint=false];
+
+  { rank=same; reqlink; cfg; }
+  { rank=same; noc; status; }
+}

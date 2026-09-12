@@ -106,35 +106,65 @@ packed flit field by itself is carriage, not implementation.
 
 # 2 Architecture and hierarchy
 
-## 2.1 Block diagram
+## 2.1 Architecture
 
-```
-  RN-F / RN-D / RN-I arrays              SN-F / SN-I arrays
-        one chi_if each                     one chi_if each
-               |                                   |
-        chi_link_port                       chi_link_port
-   L-Credits, parity, activation      L-Credits, parity, activation
-               |                                   |
-      requester SAM + PrefetchTgt map              |
-               |                                   |
-      +------------------ chi_noc_top -------------------+
-      |  CROSSBAR          RING            MESH_2D       |
-      |  separate REQ / RSP / SNP / DAT ready-valid      |
-      +--------------------------+-----------------------+
-                                 |
-            +--------------------+--------------------+
-            |                    |                    |
-       chi_hnf_top          chi_hni_top           chi_mn_dvm
-      coherent Home       noncoherent Home       DVM sequencer
-      + CFG-MMIO endpoint
-            |                    |
-          SN-F                 SN-I
+![Top-level architecture. The vertical axis is the request path.](figures/chi_architecture.png){width=100%}
 
-  APB4 --> chi_cfg_slave --> shared SAM region-update broadcast
-```
+Read the figure top to bottom as the life of a request. A Requester drives a
+REQ flit onto its `chi_if`. The `chi_link_port` for that port converts the
+CHI link-layer contract, which is credit-based and has no ready signal, into
+the ready/valid handshake the fabric uses internally: it will not accept a
+flit unless the link is in RUN and an L-Credit is outstanding, and it checks
+flit parity on the way in. The address then goes to that port's `chi_sam`,
+which finds the matching region, applies the `PAS` check and produces a
+`TgtID` — through `chi_hn_hash` for an interleaved coherent region, or
+through `chi_prefetch_map` for a `PrefetchTgt` hint, which is routed straight
+to an SN-F because no Home resource may be consumed for it. `chi_noc_top`
+carries the flit across whichever of the three topologies was elaborated, on
+one of four independent networks. A Home Node serializes it, and anything it
+must send downstream leaves through a second `chi_link_port` to a Subordinate.
 
-HN-F, HN-I and MN are internal endpoints on the fabric, not external
-`chi_if` ports, so they have no link layer.
+Three properties of this arrangement are worth stating explicitly, because
+they are the ones that constrain everything else.
+
+The link layer is per port and symmetric. Every external port gets the same
+four blocks, so credit accounting and activation are a property of the port
+rather than of the node class. Only the channel set differs: a Requester port
+receives REQ, RSP and DAT and transmits RSP, SNP and DAT, while a Subordinate
+port receives RSP and DAT and transmits REQ, RSP and DAT.
+
+HN-F, HN-I and MN are internal fabric endpoints, not external `chi_if` ports.
+They have no link layer, no L-Credits and no activation handshake, which is
+why their ordinals read zero in the `linkUp` output. A request reaches them
+over the internal ready/valid fabric only.
+
+The SAM is per Requester port, not central. Each port decodes its own
+address, which is what B3.1 describes when it says Requesters must have a
+System Address Map. A single `chi_cfg_slave` broadcasts region updates to all
+of them so they stay consistent.
+
+### Home Node internal architecture
+
+![chi_hnf_top internal structure. One request is in flight at a time.](figures/chi_hnf.png){width=100%}
+
+The coherent Home is where nearly all protocol state lives, so it is shown
+separately. A request is either admitted into `chi_pos` or handed to
+`chi_retry`, which is the only path that can answer with `RetryAck` and later
+`PCrdGrant`. An admitted request is checked by `chi_hazard` against every
+other active POS entry for a same-line or ordering conflict before the FSM
+acts on it. One globally serial FSM of 22 states then drives whichever engine
+the opcode selects: the directory and snoop generator for coherence, the DMT,
+DWT and stash controllers when the transaction can be offloaded so that data
+bypasses the Home, and the atomic, cache-maintenance and exclusive-monitor
+blocks for operations the Home performs itself.
+
+The single-FSM structure is the dominant simplification in this design. The
+POS holds `posEntries` entries and detects hazards across all of them, but
+only one transaction advances at a time, so POS depth currently buys hazard
+visibility rather than throughput. Section 9.1 covers the consequences.
+
+Figures are generated from Graphviz sources in `doc-src/figures/`; `make doc`
+rebuilds them.
 
 ## 2.2 RTL hierarchy
 
