@@ -17,7 +17,7 @@ SIM_FLAGS = --binary --assert --sv -Wno-fatal \
             -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN \
             -Wno-BLKLOOPINIT -f filelist.f
 
-SIM_TB  = tb/chi_smoke_tb.sv
+SIM_SRC = tb/chi_node_link_bfm.sv tb/chi_sim_harness.sv tb/chi_smoke_tb.sv
 SIM_BIN = obj_dir/chi_smoke
 
 DOC_SRC = doc-src/chi_interconnect_design_spec.md
@@ -43,8 +43,8 @@ lint:
 sim: $(SIM_BIN)
 	$(SIM_BIN)
 
-$(SIM_BIN): $(SIM_TB) filelist.f
-	$(VERILATOR) $(SIM_FLAGS) $(SIM_TB) --top-module chi_smoke_tb -o chi_smoke
+$(SIM_BIN): $(SIM_SRC) filelist.f
+	$(VERILATOR) $(SIM_FLAGS) $(SIM_SRC) --top-module chi_smoke_tb -o chi_smoke
 
 doc: $(DOC_OUT)
 
