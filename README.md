@@ -40,7 +40,10 @@ the RTL cannot drift apart:
 make doc
 ```
 
-Regeneration needs `pandoc`.
+Regeneration needs `pandoc`. The architecture diagrams are generated from
+Graphviz sources in [`doc-src/figures/`](doc-src/figures); `make figures`
+rebuilds the `.png` files and needs `dot`. The rendered images are committed
+so `make doc` works without Graphviz installed.
 
 ## Lint
 
@@ -125,7 +128,7 @@ simulator would check that this flow cannot.
 | `sva/` | Bound local safety, stability and protocol-field assertions with covers |
 | `top/` | Product top and the compile and elaboration harnesses |
 | `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |
-| `doc-src/` | Design specification source |
+| `doc-src/` | Design specification source and Graphviz figure sources |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |
 | `Makefile` | `make lint`, `make sim`, `make simrand` and `make doc` |
