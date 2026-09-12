@@ -95,7 +95,7 @@ packed flit field by itself is carriage, not implementation.
 | Bidirectional ring | B1.2 | Implemented | Shortest-direction routing, clockwise tie-break, directional registers, local and transit alternation, and ejection round-robin. |
 | 2D mesh with deterministic XY routing | B1.2, B3 | Implemented | Per-channel routers, one output register per crosspoint output, and placement-driven device ports. |
 | Per-hop L-Credits inside the fabric | B13.11 | Not implemented | Internal topology links use ready/valid with registered crosspoint outputs. CHI L-Credits terminate at the node ports. |
-| Requester SAM, HN striping and HN-I SAM | B3.1--B3.3 | Implemented | Ordered region table, security rejection, XOR-fold hash and runtime update ports. |
+| Requester SAM, HN striping and HN-I SAM | B3.1--B3.3 | Implemented | Ordered region table, security rejection, XOR-fold hash and runtime update ports. The decode result overwrites the incoming `TgtID`, which B3.3.1 permits. All five B3.3.1 cases are distinguished, including the two that bypass the address mapper; see Section 6.1. |
 | `PrefetchTgt` routing | B3.3.1, B4.2.6.2 | Implemented | `chi_prefetch_map` maps the address to an SN-F independently of the HN hash, the request bypasses the Home, and both the HN-F and HN-I accept and discard it without a response and without a RetryAck. |
 | Coherent read family | B4, B5.1 | Partial | `ReadShared`, `ReadClean`, `ReadNotSharedDirty`, `ReadUnique`, `ReadOnce`, `ReadPreferUnique`, `ReadOnceCleanInvalid` and `ReadOnceMakeInvalid` are classified, snooped when required, forwarded, and completed. Response-state selection is simplified and not every legal state combination is produced. |
 | Write family | B5.3 | Partial | Fourteen writes including the stash forms are classified and relayed with `CompDBIDResp` combining. Partial-write byte-enable rules, write cancellation and every combined form are incomplete. |
@@ -945,7 +945,41 @@ there is no end-to-end livelock watchdog and no bounded-completion proof.
 
 # 6 System Address Map
 
-## 6.1 Lookup and default regions
+## 6.1 How the TgtID is determined
+
+B3.1 puts the SAM on the Requester side and gives it one job: determine the
+`TgtID` of a request. B3.3.1 then allows that logic to live either in the
+Request Node or in the interconnect, and states that a Request Node must
+expect the interconnect to remap the `TgtID` it sent. This design takes the
+interconnect-side option, so `reqToNoc` in `chi_interconnect_top` overwrites
+the incoming `TgtID` with the decode result and copies the same value into
+the internal flit's route target. Address decode therefore happens exactly
+once, at the Requester port; every hop after that routes on NodeID alone.
+
+B3.3.1 does not send every request through the address mapper. The cases it
+distinguishes are handled as follows.
+
+| Request | Source of `TgtID` | Where |
+|---------------------------|--------------------------------|---------------------|
+| `DVMOp` | The opcode, which selects the MN | Route block, by opcode |
+| `PrefetchTgt` | A separate address mapper to an SN-F | `chi_prefetch_map` |
+| `PCrdReturn` | The `TgtID` the Requester sent, which B3.3.1 requires to match the `SrcID` of the `PCrdGrant` that supplied the credit | Route block, preserved |
+| Replay on a pre-allocated credit, `AllowRetry == 0` | The `TgtID` the Requester sent, which B3.3.1 requires to be the `SrcID` of the `RetryAck` or the original `TgtID` | Route block, preserved |
+| Everything else | The region table, and the HN-F hash for an interleaved region | `chi_sam` |
+
+: Table 6.1 Source of the request `TgtID` for each case in B3.3.1
+
+The last two rows are why the route block cannot simply use the mapper
+output. A `PCrdReturn` does not use its address field, so decoding it would
+send the credit back to whichever Home owns the region containing address
+zero rather than to the Home that granted it, leaking a P-Credit on every
+return. A replay must reach the Home that issued the `RetryAck` because only
+that Home holds the matching retry record, and a region table edited between
+the `RetryAck` and the replay would otherwise redirect it. `PrefetchTgt` is
+unaffected by the `AllowRetry` rule because B2.10.2.1 requires `AllowRetry`
+to be 1 for it.
+
+## 6.2 Lookup and default regions
 
 Regions use inclusive `[base, limit]` bounds with ascending-index first-match
 priority. Attributes are `[3:2]=kind`, `[1]=secureOnly`, `[0]=valid`. A
@@ -961,11 +995,11 @@ With `NUM_REGIONS=4` and `USE_DEFAULT_REGIONS=1`:
 | 2 | `CFG_MMIO_BASE` | `2^addrW-1` | MMIO, HNI0 when present | 1 |
 | 3 | `0` | `0` | zero target | 0 |
 
-: Table 6.1 Default region table loaded at reset
+: Table 6.2 Default region table loaded at reset
 
 The default `CFG_MMIO_BASE` is `2^addrW - 4096`.
 
-## 6.2 HN hash and worked example
+## 6.3 HN hash and worked example
 
 ```
 granuleNumber = address >> log2(interleaveGranule)
@@ -977,7 +1011,7 @@ target        = HN_NODE_IDS[hnfIndex]
 At the defaults, address `0x0000_0000_10c0` gives granule number `0x43`,
 folded value `0x42`, index `2` and target HNF2 (`11'h40a`).
 
-## 6.3 `PrefetchTgt` mapping
+## 6.4 `PrefetchTgt` mapping
 
 `PrefetchTgt` is sent by a Requester directly to a Subordinate and never
 reaches the Home, so it cannot use the HN hash. `chi_prefetch_map` maps the
@@ -993,7 +1027,7 @@ The transaction has no response, so nothing is tracked for it, and it must
 never be given a `RetryAck`. Both Home types accept and discard it if one
 reaches them.
 
-## 6.4 Retargeting
+## 6.5 Retargeting
 
 APB or CHI-MMIO updates replace one active region atomically at the SAM clock
 edge, and the update is broadcast to the requester SAMs and to the HN-I
@@ -1659,7 +1693,11 @@ the cross-references in the prose stay correct in every output format.
 11. System coherency and link power sequencing are placeholders.
 12. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
-    performance characterization.
+    performance characterization. The smoke run in Section 12.7 drives no
+    traffic at all: it brings the links up and then asserts that no flit is
+    delivered. So every row this document marks Implemented rests on reading
+    the source and on lint, not on having been executed, and the bound SVA
+    cannot fire until something drives the design.
 
 ## 13.2 Implementation-defined decision log
 
