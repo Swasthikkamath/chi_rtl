@@ -7,7 +7,7 @@ module chi_hni_top #(
     REGION_BASE [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [CFG.addrW-1:0]
     REGION_LIMIT [NUM_REGIONS-1:0] = '{default:'0},
-  parameter logic [CFG.nodeIdW-1:0]
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [3:0]
     REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0}
@@ -36,13 +36,13 @@ module chi_hni_top #(
   input  logic [chi_pkg::clog2Min1(NUM_REGIONS)-1:0] regionUpdateIndex,
   input  logic [CFG.addrW-1:0] regionUpdateBase,
   input  logic [CFG.addrW-1:0] regionUpdateLimit,
-  input  logic [CFG.nodeIdW-1:0] regionUpdateTarget,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] regionUpdateTarget,
   input  logic [3:0] regionUpdateAttributes,
   output logic mmioRegionUpdate,
   output logic [chi_pkg::clog2Min1(NUM_REGIONS)-1:0] mmioRegionUpdateIndex,
   output logic [CFG.addrW-1:0] mmioRegionUpdateBase,
   output logic [CFG.addrW-1:0] mmioRegionUpdateLimit,
-  output logic [CFG.nodeIdW-1:0] mmioRegionUpdateTarget,
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] mmioRegionUpdateTarget,
   output logic [3:0] mmioRegionUpdateAttributes,
   output logic idle
 );
@@ -65,7 +65,7 @@ module chi_hni_top #(
   chi_dat_flit_t forwardedDat;
   chi_dat_flit_t returnedDat;
   chi_dat_flit_t configDat;
-  logic [CFG.nodeIdW-1:0] samTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] samTarget;
   logic [3:0] samAttributes;
   logic samError;
   logic configAccess;
@@ -76,7 +76,7 @@ module chi_hni_top #(
   logic [clog2Min1(NUM_REGIONS)-1:0] selectedRegion;
   logic [CFG.addrW-1:0] stagedBase [NUM_REGIONS-1:0];
   logic [CFG.addrW-1:0] stagedLimit [NUM_REGIONS-1:0];
-  logic [CFG.nodeIdW-1:0] stagedTarget [NUM_REGIONS-1:0];
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] stagedTarget [NUM_REGIONS-1:0];
   logic [3:0] stagedAttributes [NUM_REGIONS-1:0];
 
   function automatic logic isRead(input chi_req_opcode_e opcode);
@@ -92,7 +92,7 @@ module chi_hni_top #(
     .REGION_TARGET(REGION_TARGET), .REGION_ATTRIBUTES(REGION_ATTRIBUTES)
   ) hni_sam (
     .clk, .resetn, .address(incomingReq.addr[CFG.addrW-1:0]),
-    .nonSecure(incomingReq.ns), .targetNodeId(samTarget),
+    .nonSecure(pasNonSecure(incomingReq.pas)), .targetNodeId(samTarget),
     .matchedAttributes(samAttributes), .unmappedError(samError),
     .regionUpdate, .regionUpdateIndex, .regionUpdateBase,
     .regionUpdateLimit, .regionUpdateTarget, .regionUpdateAttributes
@@ -111,7 +111,7 @@ module chi_hni_top #(
 
     forwardedReq = activeReq;
     forwardedReq.tgtId = activeReq.tgtId;
-    forwardedReq.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    forwardedReq.srcId = HN_NODE_ID;
     reqOutFlit = '0;
     reqOutFlit.channel = CHI_CHANNEL_REQ;
     reqOutFlit.targetNodeId = activeReq.tgtId;
@@ -120,11 +120,11 @@ module chi_hni_top #(
 
     returnedRsp = incomingRsp;
     returnedRsp.tgtId = activeReq.srcId;
-    returnedRsp.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    returnedRsp.srcId = HN_NODE_ID;
     returnedRsp.txnId = activeReq.txnId;
     configRsp = '0;
     configRsp.tgtId = activeReq.srcId;
-    configRsp.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    configRsp.srcId = HN_NODE_ID;
     configRsp.txnId = activeReq.txnId;
     configRsp.opcode = RSP_COMP;
     configRsp.respErr = activeDecodeError ? RESP_ERR_NDERR : RESP_ERR_OK;
@@ -139,22 +139,22 @@ module chi_hni_top #(
 
     forwardedDat = incomingDat;
     forwardedDat.tgtId = activeReq.tgtId;
-    forwardedDat.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    forwardedDat.srcId = HN_NODE_ID;
     returnedDat = incomingDat;
     returnedDat.tgtId = activeReq.srcId;
-    returnedDat.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    returnedDat.srcId = HN_NODE_ID;
     returnedDat.txnId = activeReq.txnId;
     forwardRequesterData = incomingDat.srcId == activeReq.srcId;
     configDat = '0;
     configDat.tgtId = activeReq.srcId;
-    configDat.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    configDat.srcId = HN_NODE_ID;
     configDat.txnId = activeReq.txnId;
     configDat.opcode = DAT_COMP_DATA;
     configDat.respErr = RESP_ERR_OK;
     case (activeReq.addr[7:0])
       8'h08: configDat.data[CFG.addrW-1:0] = stagedBase[selectedRegion];
       8'h10: configDat.data[CFG.addrW-1:0] = stagedLimit[selectedRegion];
-      8'h18: configDat.data[CFG.nodeIdW-1:0] = stagedTarget[selectedRegion];
+      8'h18: configDat.data[chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] = stagedTarget[selectedRegion];
       8'h20: configDat.data[3:0] = stagedAttributes[selectedRegion];
       default: configDat.data[clog2Min1(NUM_REGIONS)-1:0] = selectedRegion;
     endcase
@@ -247,7 +247,7 @@ module chi_hni_top #(
                   selectedRegion <= incomingDat.data[clog2Min1(NUM_REGIONS)-1:0];
               8'h08: stagedBase[selectedRegion] <= incomingDat.data[CFG.addrW-1:0];
               8'h10: stagedLimit[selectedRegion] <= incomingDat.data[CFG.addrW-1:0];
-              8'h18: stagedTarget[selectedRegion] <= incomingDat.data[CFG.nodeIdW-1:0];
+              8'h18: stagedTarget[selectedRegion] <= incomingDat.data[chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0];
               8'h20: stagedAttributes[selectedRegion] <= incomingDat.data[3:0];
               8'h28: begin
                 mmioRegionUpdate <= 1'b1;

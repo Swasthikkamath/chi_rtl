@@ -39,7 +39,7 @@ module chi_sam_compile (
   localparam logic [APB_CFG.addrW-1:0] REGION_LIMIT [NUM_REGIONS-1:0] =
     '{48'hffff_ffff_ffff, 48'h0000_0000_0000,
       48'h0000_0000_0000, 48'h0000_0000_0000};
-  localparam logic [APB_CFG.nodeIdW-1:0] REGION_TARGET [NUM_REGIONS-1:0] =
+  localparam logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] REGION_TARGET [NUM_REGIONS-1:0] =
     '{default:'0};
   localparam logic [3:0] REGION_ATTRIBUTES [NUM_REGIONS-1:0] =
     '{4'b0001, 4'b0000, 4'b0000, 4'b0000};
@@ -48,12 +48,12 @@ module chi_sam_compile (
   logic [clog2Min1(NUM_REGIONS)-1:0] regionUpdateIndex;
   logic [APB_CFG.addrW-1:0] regionUpdateBase;
   logic [APB_CFG.addrW-1:0] regionUpdateLimit;
-  logic [APB_CFG.nodeIdW-1:0] regionUpdateTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] regionUpdateTarget;
   logic [3:0] regionUpdateAttributes;
   logic [APB_CFG.addrW-1:0] sampleAddress;
-  logic [APB_CFG.nodeIdW-1:0] requesterTarget;
-  logic [APB_CFG.nodeIdW-1:0] subordinateTarget;
-  logic [APB_CFG.nodeIdW-1:0] defaultHashTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] subordinateTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] defaultHashTarget;
   logic [3:0] requesterAttributes;
   logic [3:0] subordinateAttributes;
   logic requesterUnmapped;

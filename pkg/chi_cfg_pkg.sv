@@ -1,6 +1,6 @@
 package chi_cfg_pkg;
   localparam int unsigned CHI_MIN_NODEID_W = 7;
-  localparam int unsigned CHI_MAX_NODEID_W = 11;
+  localparam int unsigned CHI_MAX_NODEID_W = 16;
   localparam int unsigned CHI_MIN_ADDR_W   = 44;
   localparam int unsigned CHI_MAX_ADDR_W   = 52;
   localparam int unsigned CHI_MIN_TXNID_W  = 8;
@@ -14,6 +14,26 @@ package chi_cfg_pkg;
   localparam int unsigned CHI_MAX_RSVDC_W  = 32;
   localparam int unsigned CHI_MECID_W      = 16;
   localparam int unsigned CHI_MPAM_W       = 15;
+  localparam int unsigned CHI_MPAM_SHORT_W = 12;
+
+  // Issue H fixes these flit slot widths independently of the node-side
+  // field widths a node chooses to use (IHI 0050H B13.9.1-B13.9.4).
+  // Internal node-identifier buses carry the widest legal NodeID so that one
+  // width applies to every flit slot, parameter table, and internal port.
+  localparam int unsigned CHI_NODEID_SLOT_W   = CHI_MAX_NODEID_W;
+  localparam int unsigned CHI_TXNID_FLIT_W    = 12;
+  localparam int unsigned CHI_RTNTXNID_SLOT_W = 12;
+  localparam int unsigned CHI_NUMREQ_SLOT_W   = 6;
+  localparam int unsigned CHI_GROUPID_SLOT_W  = 8;
+  localparam int unsigned CHI_PAS_W           = 3;
+  localparam int unsigned CHI_CACHELINEID_W   = 6;
+  localparam int unsigned CHI_PBHA_W          = 4;
+  localparam int unsigned CHI_STREAMID_W      = 16;
+  localparam int unsigned CHI_DATASOURCE_W    = 8;
+  localparam int unsigned CHI_CCID_SLOT_W     = 2;
+  localparam int unsigned CHI_DATAID_SLOT_W   = 2;
+  localparam int unsigned CHI_RSP_DBID_SLOT_W = 12;
+  localparam int unsigned CHI_DAT_DBID_SLOT_W = 16;
 
   typedef enum logic [1:0] {
     CROSSBAR = 2'b00,
@@ -61,6 +81,7 @@ package chi_cfg_pkg;
     int unsigned        rsvdcW;
     int unsigned        ccidW;
     int unsigned        groupIdW;
+    int unsigned        mpamW;
     // These counts are integration metadata. One interface instance represents
     // one physical CHI interface; later top-level RTL can create arrays/replicas.
     int unsigned        numIfPerNode;
@@ -82,6 +103,9 @@ package chi_cfg_pkg;
     logic               mpamEn;
     logic               mteEn;
     logic               mecEn;
+    logic               pbhaEn;
+    logic               cdaEn;
+    logic               multiReqEn;
     logic               dctEn;
     logic               dmtEn;
     logic               dwtEn;
@@ -96,7 +120,7 @@ package chi_cfg_pkg;
     numRnf: 4, numRnd: 0, numRni: 1,
     numSnf: 2, numSni: 1, numHnf: 4, numHni: 1, numMn: 1,
     dataW: 256, addrW: 48, nodeIdW: 11, txnIdW: 12,
-    lpidW: 5, rsvdcW: 0, ccidW: 2, groupIdW: 8,
+    lpidW: 5, rsvdcW: 0, ccidW: 2, groupIdW: 8, mpamW: 0,
     numIfPerNode: 1, replChannels: 1,
     topology: MESH_2D, meshX: 3, meshY: 3, numDevPortsPerXp: 2,
     snpFilterEntries: 1024, snpFilterWays: 4,
@@ -104,6 +128,7 @@ package chi_cfg_pkg;
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,
     mpamEn: 1'b0, mteEn: 1'b0, mecEn: 1'b0,
+    pbhaEn: 1'b0, cdaEn: 1'b0, multiReqEn: 1'b0,
     dctEn: 1'b1, dmtEn: 1'b1, dwtEn: 1'b1,
     atomicEn: 1'b1, dvmEn: 1'b1, stashEn: 1'b1, exclEn: 1'b1,
     cfgAccess: CFG_PARAM_ONLY

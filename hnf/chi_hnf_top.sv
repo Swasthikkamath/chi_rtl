@@ -72,7 +72,7 @@ module chi_hnf_top #(
   logic [POS_DEPTH-1:0] posActive;
   logic [POS_DEPTH-1:0] posReadyToFree;
   logic [CFG.addrW-7:0] posLine [POS_DEPTH];
-  logic [CFG.nodeIdW-1:0] posRequester [POS_DEPTH];
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] posRequester [POS_DEPTH];
   logic [CFG.txnIdW-1:0] posTxn [POS_DEPTH];
   chi_req_opcode_e posOpcode [POS_DEPTH];
   logic [2:0] posLifecycle [POS_DEPTH];
@@ -99,7 +99,7 @@ module chi_hnf_top #(
   logic [CFG.addrW-7:0] snpStartLine;
   chi_snp_opcode_e snpStartOpcode;
   logic [CFG.txnIdW-1:0] snpStartTxn;
-  logic [CFG.nodeIdW-1:0] snpFwdNid;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] snpFwdNid;
   logic [CFG.txnIdW-1:0] snpFwdTxn;
   logic snpRetToSrc;
   logic snpBusy;
@@ -109,7 +109,7 @@ module chi_hnf_top #(
   logic dctEligible;
   logic dctFallback;
   chi_snp_opcode_e dctOpcode;
-  logic [CFG.nodeIdW-1:0] dctFwdNid;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] dctFwdNid;
   logic [CFG.txnIdW-1:0] dctFwdTxn;
   logic dctRetToSrc;
 
@@ -151,23 +151,23 @@ module chi_hnf_top #(
   endfunction
 
   function automatic logic [NUM_RNF-1:0] requesterBit(
-    input logic [CFG.nodeIdW-1:0] nodeId
+    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] nodeId
   );
     logic [NUM_RNF-1:0] result;
     result = '0;
     for (int unsigned i = 0; i < NUM_RNF; i++)
-      if (nodeId == RNF_NODE_IDS[i][CFG.nodeIdW-1:0])
+      if (nodeId == RNF_NODE_IDS[i])
         result[i] = 1'b1;
     return result;
   endfunction
 
   function automatic logic [clog2Min1(NUM_RNF)-1:0] requesterIndex(
-    input logic [CFG.nodeIdW-1:0] nodeId
+    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] nodeId
   );
     logic [clog2Min1(NUM_RNF)-1:0] result;
     result = '0;
     for (int unsigned i = 0; i < NUM_RNF; i++)
-      if (nodeId == RNF_NODE_IDS[i][CFG.nodeIdW-1:0])
+      if (nodeId == RNF_NODE_IDS[i])
         result = i[clog2Min1(NUM_RNF)-1:0];
     return result;
   endfunction
@@ -193,8 +193,8 @@ module chi_hnf_top #(
     idle = (state == HNF_IDLE) && !sfBackInvValid;
 
     downstreamReq = activeReq;
-    downstreamReq.tgtId = SN_NODE_ID[CFG.nodeIdW-1:0];
-    downstreamReq.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    downstreamReq.tgtId = SN_NODE_ID;
+    downstreamReq.srcId = HN_NODE_ID;
     reqOutFlit = '0;
     reqOutFlit.channel = CHI_CHANNEL_REQ;
     reqOutFlit.targetNodeId = SN_NODE_ID;
@@ -204,7 +204,7 @@ module chi_hnf_top #(
 
     responseFlit = incomingRsp;
     responseFlit.tgtId = activeReq.srcId;
-    responseFlit.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    responseFlit.srcId = HN_NODE_ID;
     responseFlit.txnId = activeReq.txnId;
     if (COMBINED_COMP_DBID && activeWrite
         && (incomingRsp.opcode == RSP_COMP))
@@ -220,8 +220,8 @@ module chi_hnf_top #(
 
     requesterDat = incomingDat;
     requesterDat.tgtId = (incomingDat.srcId == activeReq.srcId)
-                         ? SN_NODE_ID[CFG.nodeIdW-1:0] : activeReq.srcId;
-    requesterDat.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+                         ? SN_NODE_ID : activeReq.srcId;
+    requesterDat.srcId = HN_NODE_ID;
     requesterDat.txnId = activeReq.txnId;
     datOutFlit = '0;
     datOutFlit.channel = CHI_CHANNEL_DAT;
@@ -250,7 +250,7 @@ module chi_hnf_top #(
     if (retryHandshake) begin
       responseFlit = '0;
       responseFlit.tgtId = incomingReq.srcId;
-      responseFlit.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+      responseFlit.srcId = HN_NODE_ID;
       responseFlit.txnId = incomingReq.txnId;
       responseFlit.opcode = RSP_RETRY_ACK;
       responseFlit.pCrdType = {2'b00, retryClass};
@@ -312,7 +312,7 @@ module chi_hnf_top #(
   chi_dct_ctrl #(.CFG(CFG)) dct_ctrl (
     .requestOpcode(activeReq.opcode), .requestOrder(activeReq.order),
     .requester(activeReq.srcId), .requesterTxnId(activeReq.txnId),
-    .forwarderKnown(sfHasOwner), .forwarder(RNF_NODE_IDS[sfOwner][CFG.nodeIdW-1:0]),
+    .forwarderKnown(sfHasOwner), .forwarder(RNF_NODE_IDS[sfOwner]),
     .forwarderClean(sfPrecise), .dataPresent(sfHit), .dataFullLine(sfPrecise),
     .dataPoison(1'b0), .dataError(1'b0), .responseCompatible(1'b1),
     .mteCompatible(!CFG.mteEn), .eligible(dctEligible),
@@ -382,7 +382,7 @@ module chi_hnf_top #(
     .startSharers(snpStartSharers), .startLineAddr(snpStartLine),
     .startOpcode(snpStartOpcode), .startTxnId(snpStartTxn),
     .startFwdNid(snpFwdNid), .startFwdTxnId(snpFwdTxn),
-    .startRetToSrc(snpRetToSrc), .startNonSecure(activeReq.ns),
+    .startRetToSrc(snpRetToSrc), .startPas(activeReq.pas),
     .snpValid(snpOutValid), .snpReady(snpOutReady), .snpFlit(snpOutFlit),
     .responseValid(rspInValid
       && ((incomingRsp.opcode == RSP_SNP_RESP)

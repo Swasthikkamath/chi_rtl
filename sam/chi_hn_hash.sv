@@ -7,7 +7,7 @@ module chi_hn_hash #(
   parameter int unsigned HN_HASH_SHIFT = CFG.hnHashShift
 ) (
   input  logic [CFG.addrW-1:0] address,
-  output logic [CFG.nodeIdW-1:0] targetNodeId
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] targetNodeId
 );
   function automatic int unsigned granuleShift(input int unsigned granule);
     int unsigned shift;
@@ -29,6 +29,6 @@ module chi_hn_hash #(
     granuleNumber = address >> GRANULE_SHIFT;
     hashValue = granuleNumber ^ (granuleNumber >> HN_HASH_SHIFT);
     hnfIndex = int'(hashValue % CFG.addrW'(NUM_HNF));
-    targetNodeId = HN_NODE_IDS[hnfIndex][CFG.nodeIdW-1:0];
+    targetNodeId = HN_NODE_IDS[hnfIndex];
   end
 endmodule

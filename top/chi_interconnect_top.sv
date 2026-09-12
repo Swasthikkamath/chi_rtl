@@ -17,7 +17,7 @@ module chi_interconnect_top #(
     REGION_BASE [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [CFG.addrW-1:0]
     REGION_LIMIT [NUM_REGIONS-1:0] = '{default:'0},
-  parameter logic [CFG.nodeIdW-1:0]
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [3:0]
     REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0}
@@ -64,7 +64,7 @@ module chi_interconnect_top #(
     rnf_id_array_t [(CFG.numRnf > 0 ? CFG.numRnf : 1)-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] dvm_id_array_t [NUM_DVM-1:0];
   typedef logic [CFG.addrW-1:0] region_addr_array_t [NUM_REGIONS-1:0];
-  typedef logic [CFG.nodeIdW-1:0] region_target_array_t [NUM_REGIONS-1:0];
+  typedef logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] region_target_array_t [NUM_REGIONS-1:0];
   typedef logic [3:0] region_attr_array_t [NUM_REGIONS-1:0];
 
   function automatic node_id_array_t makeNodeIds();
@@ -143,9 +143,9 @@ module chi_interconnect_top #(
     if (USE_DEFAULT_REGIONS) begin
       values = '{default:'0};
       if ((NUM_REGIONS > 1) && (CFG.numHni > 0))
-        values[1] = ids[OFF_HNI][CFG.nodeIdW-1:0];
+        values[1] = ids[OFF_HNI];
       if ((NUM_REGIONS > 2) && (CFG.numHni > 0))
-        values[2] = ids[OFF_HNI][CFG.nodeIdW-1:0];
+        values[2] = ids[OFF_HNI];
     end
     return values;
   endfunction
@@ -166,7 +166,7 @@ module chi_interconnect_top #(
 
   function automatic chi_noc_flit_t reqToNoc(
     input logic [CHI_MAX_REQ_FLIT_W-1:0] payload,
-    input logic [CFG.nodeIdW-1:0] samTarget
+    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] samTarget
   );
     chi_noc_flit_t value;
     chi_req_flit_t request;
@@ -253,8 +253,8 @@ module chi_interconnect_top #(
   logic [NUM_NODES-1:0] datOutReady;
   chi_noc_flit_t datOutFlit [NUM_NODES-1:0];
 
-  logic [NUM_REQ_E-1:0][CFG.nodeIdW-1:0] requesterSamTarget;
-  logic [NUM_REQ_E-1:0][CFG.nodeIdW-1:0] requesterRouteTarget;
+  logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterSamTarget;
+  logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterRouteTarget;
   logic [NUM_REQ_E-1:0][3:0] requesterSamAttributes;
   logic [NUM_REQ_E-1:0] requesterSamError;
   chi_req_flit_t requesterReq [NUM_REQ_E-1:0];
@@ -264,20 +264,20 @@ module chi_interconnect_top #(
   logic [clog2Min1(NUM_REGIONS)-1:0] apbRegionUpdateIndex;
   logic [CFG.addrW-1:0] apbRegionUpdateBase;
   logic [CFG.addrW-1:0] apbRegionUpdateLimit;
-  logic [CFG.nodeIdW-1:0] apbRegionUpdateTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] apbRegionUpdateTarget;
   logic [3:0] apbRegionUpdateAttributes;
   logic selectedRegionUpdate;
   logic [clog2Min1(NUM_REGIONS)-1:0] selectedRegionUpdateIndex;
   logic [CFG.addrW-1:0] selectedRegionUpdateBase;
   logic [CFG.addrW-1:0] selectedRegionUpdateLimit;
-  logic [CFG.nodeIdW-1:0] selectedRegionUpdateTarget;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] selectedRegionUpdateTarget;
   logic [3:0] selectedRegionUpdateAttributes;
   logic [NUM_HNI_E-1:0] mmioRegionUpdate;
   logic [clog2Min1(NUM_REGIONS)-1:0]
     mmioRegionUpdateIndex [NUM_HNI_E-1:0];
   logic [CFG.addrW-1:0] mmioRegionUpdateBase [NUM_HNI_E-1:0];
   logic [CFG.addrW-1:0] mmioRegionUpdateLimit [NUM_HNI_E-1:0];
-  logic [CFG.nodeIdW-1:0] mmioRegionUpdateTarget [NUM_HNI_E-1:0];
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] mmioRegionUpdateTarget [NUM_HNI_E-1:0];
   logic [3:0] mmioRegionUpdateAttributes [NUM_HNI_E-1:0];
   logic [NUM_HNI_E-1:0] hniIdle;
   logic [(CFG.numHnf > 0 ? CFG.numHnf : 1)-1:0] hnfIdle;
@@ -310,6 +310,30 @@ module chi_interconnect_top #(
           $fatal(1, "Unsupported RSVDC width");
         if ((CFG.numIfPerNode != 1) || (CFG.replChannels != 1))
           $fatal(1, "Only one interface and one channel replica are supported");
+        if (!((CFG.mpamW == 0) || (CFG.mpamW == CHI_MPAM_SHORT_W)
+              || (CFG.mpamW == CHI_MPAM_W)))
+          $fatal(1, "MPAM width must be 0, 12, or 15");
+        if (CFG.mpamEn && (CFG.mpamW == 0))
+          $fatal(1, "Enabling MPAM requires a 12-bit or 15-bit MPAM bus");
+        // MECID and StreamID share one REQ field of width Max(E,R), so only
+        // one of the two extensions can be carried on a given interface.
+        if (CFG.mecEn && CFG.cdaEn)
+          $fatal(1, "MEC and RME-CDA cannot share the REQ MECID/StreamID field");
+        // The packed widths must stay inside the Issue H flit totals, which
+        // catches any pack/unpack field list that drifts from B13.9.
+        if ((reqFlitWidth(CFG) < (93 + CFG.addrW))
+            || (reqFlitWidth(CFG) > (120 + CFG.addrW + CHI_MAX_RSVDC_W
+                                     + CHI_MPAM_W + CHI_PBHA_W + 1
+                                     + CHI_STREAMID_W)))
+          $fatal(1, "REQ flit width is outside the Issue H range");
+        if ((rspFlitWidth(CFG) < 71) || (rspFlitWidth(CFG) > 89))
+          $fatal(1, "RSP flit width is outside the Issue H range");
+        if ((snpFlitWidth(CFG) < (53 + CFG.addrW - 3))
+            || (snpFlitWidth(CFG) > (71 + CFG.addrW - 3
+                                     + CHI_MPAM_W + CHI_MECID_W)))
+          $fatal(1, "SNP flit width is outside the Issue H range");
+        if (datFlitWidth(CFG) < (240 + ((CFG.dataW - 128) * 149) / 128))
+          $fatal(1, "DAT flit width is below the Issue H minimum");
         if (CFG.parityEn)
           $fatal(1, "Top-level parity generation/checking is not supported");
         if ((CFG.posEntries == 0) || (CFG.lcrdDepth == 0)
@@ -467,7 +491,7 @@ module chi_interconnect_top #(
       requesterRouteTarget[i] = requesterSamTarget[i];
       if ((requesterReq[i].opcode == REQ_DVM_OP) && (CFG.numMn > 0))
         requesterRouteTarget[i] =
-          EFFECTIVE_NODE_IDS[OFF_MN][CFG.nodeIdW-1:0];
+          EFFECTIVE_NODE_IDS[OFF_MN];
     end
     chi_sam #(
       .CFG(CFG), .NUM_REGIONS(NUM_REGIONS), .HASH_TO_HNF(1'b1),
@@ -478,7 +502,7 @@ module chi_interconnect_top #(
       .REGION_ATTRIBUTES(EFFECTIVE_REGION_ATTRIBUTES)
     ) sam (
       .clk, .resetn, .address(requesterReq[i].addr[CFG.addrW-1:0]),
-      .nonSecure(requesterReq[i].ns),
+      .nonSecure(pasNonSecure(requesterReq[i].pas)),
       .targetNodeId(requesterSamTarget[i]),
       .matchedAttributes(requesterSamAttributes[i]),
       .unmappedError(requesterSamError[i]),
@@ -675,7 +699,7 @@ module chi_interconnect_top #(
       .CFG(CFG), .HN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_HNI+i]),
       .NUM_REGIONS(NUM_REGIONS), .CFG_MMIO_BASE(CFG_MMIO_BASE),
       .REGION_BASE('{default:'0}), .REGION_LIMIT('{default:{CFG.addrW{1'b1}}}),
-      .REGION_TARGET('{default:EFFECTIVE_NODE_IDS[OFF_SNI+(i % CFG.numSni)][CFG.nodeIdW-1:0]}),
+      .REGION_TARGET('{default:EFFECTIVE_NODE_IDS[OFF_SNI+(i % CFG.numSni)]}),
       .REGION_ATTRIBUTES('{default:{SAM_REGION_DIRECT,1'b0,1'b1}})
     ) hni (
       .clk, .resetn, .reqInValid(reqOutValid[OFF_HNI+i]),

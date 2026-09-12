@@ -13,16 +13,16 @@ module chi_snp_gen #(
   input  logic [CFG.addrW-7:0] startLineAddr,
   input  chi_pkg::chi_snp_opcode_e startOpcode,
   input  logic [CFG.txnIdW-1:0] startTxnId,
-  input  logic [CFG.nodeIdW-1:0] startFwdNid,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] startFwdNid,
   input  logic [CFG.txnIdW-1:0] startFwdTxnId,
   input  logic startRetToSrc,
-  input  logic startNonSecure,
+  input  chi_pkg::chi_pas_e startPas,
   output logic snpValid,
   input  logic snpReady,
   output chi_pkg::chi_noc_flit_t snpFlit,
   input  logic responseValid,
   output logic responseReady,
-  input  logic [CFG.nodeIdW-1:0] responseSource,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] responseSource,
   output logic busy,
   output logic done
 );
@@ -36,10 +36,10 @@ module chi_snp_gen #(
   logic [CFG.addrW-7:0] lineAddrReg;
   chi_snp_opcode_e opcodeReg;
   logic [CFG.txnIdW-1:0] txnIdReg;
-  logic [CFG.nodeIdW-1:0] fwdNidReg;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] fwdNidReg;
   logic [CFG.txnIdW-1:0] fwdTxnIdReg;
   logic retToSrcReg;
-  logic nonSecureReg;
+  chi_pas_e pasReg;
   chi_snp_flit_t protocolFlit;
 
   always_comb begin
@@ -53,14 +53,14 @@ module chi_snp_gen #(
     end
 
     protocolFlit = '0;
-    protocolFlit.srcId = HN_NODE_ID[CFG.nodeIdW-1:0];
+    protocolFlit.srcId = HN_NODE_ID;
     protocolFlit.txnId = txnIdReg;
     protocolFlit.fwdNidOrPbha = fwdNidReg;
     protocolFlit.fwdTxnIdOrStashLpidOrVmidExt = fwdTxnIdReg;
     protocolFlit.opcode = opcodeReg;
     protocolFlit.addr = '0;
     protocolFlit.addr[CFG.addrW-4:0] = {lineAddrReg, 3'b000};
-    protocolFlit.ns = nonSecureReg;
+    protocolFlit.pas = pasReg;
     protocolFlit.retToSrc = retToSrcReg;
 
     snpFlit = '0;
@@ -69,7 +69,7 @@ module chi_snp_gen #(
     snpFlit.payload[CHI_MAX_SNP_FLIT_W-1:0] = packSnpFlit(CFG, protocolFlit);
     snpValid = (state == SNP_SEND) && selectedValid;
     responseReady = (state == SNP_WAIT)
-                    && (responseSource == RNF_NODE_IDS[selected][CFG.nodeIdW-1:0]);
+                    && (responseSource == RNF_NODE_IDS[selected]);
     startReady = state == SNP_IDLE;
     busy = state != SNP_IDLE;
   end
@@ -84,7 +84,7 @@ module chi_snp_gen #(
       fwdNidReg <= '0;
       fwdTxnIdReg <= '0;
       retToSrcReg <= 1'b0;
-      nonSecureReg <= 1'b0;
+      pasReg <= PAS_SECURE;
       done <= 1'b0;
     end else begin
       done <= 1'b0;
@@ -98,7 +98,7 @@ module chi_snp_gen #(
             fwdNidReg <= startFwdNid;
             fwdTxnIdReg <= startFwdTxnId;
             retToSrcReg <= startRetToSrc;
-            nonSecureReg <= startNonSecure;
+            pasReg <= startPas;
             if (startSharers == '0)
               done <= 1'b1;
             else

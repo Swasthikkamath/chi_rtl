@@ -3,10 +3,10 @@ module chi_dct_ctrl #(
 ) (
   input  chi_pkg::chi_req_opcode_e requestOpcode,
   input  chi_pkg::chi_order_e requestOrder,
-  input  logic [CFG.nodeIdW-1:0] requester,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requester,
   input  logic [CFG.txnIdW-1:0] requesterTxnId,
   input  logic forwarderKnown,
-  input  logic [CFG.nodeIdW-1:0] forwarder,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] forwarder,
   input  logic forwarderClean,
   input  logic dataPresent,
   input  logic dataFullLine,
@@ -17,7 +17,7 @@ module chi_dct_ctrl #(
   output logic eligible,
   output logic fallbackToHome,
   output chi_pkg::chi_snp_opcode_e snoopOpcode,
-  output logic [CFG.nodeIdW-1:0] fwdNid,
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] fwdNid,
   output logic [CFG.txnIdW-1:0] fwdTxnId,
   output logic retToSrc
 );

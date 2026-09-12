@@ -7,10 +7,10 @@ module chi_excl_mon #(
   input  logic reserveValid,
   output logic reserveReady,
   input  logic [CFG.addrW-7:0] reserveLineAddr,
-  input  logic [CFG.nodeIdW-1:0] reserveRequester,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] reserveRequester,
   input  logic exclusiveCheckValid,
   input  logic [CFG.addrW-7:0] exclusiveLineAddr,
-  input  logic [CFG.nodeIdW-1:0] exclusiveRequester,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] exclusiveRequester,
   output logic exclusiveOkay,
   input  logic conflictValid,
   input  logic conflictIsWriteOrSnoop,
@@ -18,7 +18,7 @@ module chi_excl_mon #(
 );
   logic valid [MONITORS];
   logic [CFG.addrW-7:0] lineAddr [MONITORS];
-  logic [CFG.nodeIdW-1:0] requester [MONITORS];
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requester [MONITORS];
   logic [chi_pkg::clog2Min1(MONITORS)-1:0] reserveIndex;
   logic reserveFound;
 

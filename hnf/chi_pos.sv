@@ -7,7 +7,7 @@ module chi_pos #(
   input  logic allocValid,
   output logic allocReady,
   input  logic [CFG.addrW-7:0] allocLineAddr,
-  input  logic [CFG.nodeIdW-1:0] allocRequester,
+  input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] allocRequester,
   input  logic [CFG.txnIdW-1:0] allocTxnId,
   input  chi_pkg::chi_req_opcode_e allocOpcode,
   input  logic allocNeedSnoop,
@@ -28,7 +28,7 @@ module chi_pos #(
   output logic [DEPTH-1:0] active,
   output logic [DEPTH-1:0] readyToFree,
   output logic [CFG.addrW-7:0] lineAddr [DEPTH],
-  output logic [CFG.nodeIdW-1:0] requester [DEPTH],
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requester [DEPTH],
   output logic [CFG.txnIdW-1:0] txnId [DEPTH],
   output chi_pkg::chi_req_opcode_e opcode [DEPTH],
   output logic [2:0] lifecycle [DEPTH]

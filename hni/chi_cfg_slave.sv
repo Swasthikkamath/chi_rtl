@@ -5,7 +5,7 @@ module chi_cfg_slave #(
     REGION_BASE [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [CFG.addrW-1:0]
     REGION_LIMIT [NUM_REGIONS-1:0] = '{default:'0},
-  parameter logic [CFG.nodeIdW-1:0]
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [3:0]
     REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0}
@@ -28,7 +28,7 @@ module chi_cfg_slave #(
   output logic [chi_pkg::clog2Min1(NUM_REGIONS)-1:0] regionUpdateIndex,
   output logic [CFG.addrW-1:0] regionUpdateBase,
   output logic [CFG.addrW-1:0] regionUpdateLimit,
-  output logic [CFG.nodeIdW-1:0] regionUpdateTarget,
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] regionUpdateTarget,
   output logic [3:0] regionUpdateAttributes
 );
   import chi_cfg_pkg::*;
@@ -46,7 +46,7 @@ module chi_cfg_slave #(
   logic [clog2Min1(NUM_REGIONS)-1:0] selectedRegion;
   logic [CFG.addrW-1:0] stagedBase [NUM_REGIONS-1:0];
   logic [CFG.addrW-1:0] stagedLimit [NUM_REGIONS-1:0];
-  logic [CFG.nodeIdW-1:0] stagedTarget [NUM_REGIONS-1:0];
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] stagedTarget [NUM_REGIONS-1:0];
   logic [3:0] stagedAttributes [NUM_REGIONS-1:0];
   logic transfer;
   logic addressImplemented;
@@ -143,7 +143,7 @@ module chi_cfg_slave #(
             stagedLimit[selectedRegion][CFG.addrW-1:32] <=
               strobedData[CFG.addrW-33:0];
           ADDR_TARGET:
-            stagedTarget[selectedRegion] <= strobedData[CFG.nodeIdW-1:0];
+            stagedTarget[selectedRegion] <= strobedData[chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0];
           ADDR_ATTRIBUTES:
             stagedAttributes[selectedRegion] <= strobedData[3:0];
           ADDR_COMMIT:

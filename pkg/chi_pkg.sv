@@ -1,10 +1,26 @@
 package chi_pkg;
   import chi_cfg_pkg::*;
 
-  localparam int unsigned CHI_MAX_REQ_FLIT_W = 215;
-  localparam int unsigned CHI_MAX_RSP_FLIT_W = 73;
-  localparam int unsigned CHI_MAX_SNP_FLIT_W = 140;
-  localparam int unsigned CHI_MAX_DAT_FLIT_W = 797;
+  // Issue H flit totals (IHI 0050H B13.9). The constant terms below are the
+  // spec totals with every variable-width field at its minimum, so the
+  // maxima here are the spec formulas evaluated at their widest legal point.
+  localparam int unsigned CHI_REQ_FIXED_W = 72;
+  localparam int unsigned CHI_RSP_FIXED_W = 57;
+  localparam int unsigned CHI_SNP_FIXED_W = 39;
+  localparam int unsigned CHI_DAT_FIXED_W = 70;
+
+  localparam int unsigned CHI_MAX_REQ_FLIT_W = CHI_REQ_FIXED_W
+      + (3 * CHI_MAX_NODEID_W) + CHI_MAX_ADDR_W + CHI_MAX_RSVDC_W
+      + CHI_MPAM_W + CHI_PBHA_W + 1 + CHI_STREAMID_W;
+  localparam int unsigned CHI_MAX_RSP_FLIT_W = CHI_RSP_FIXED_W
+      + (2 * CHI_MAX_NODEID_W);
+  localparam int unsigned CHI_MAX_SNP_FLIT_W = CHI_SNP_FIXED_W
+      + (2 * CHI_MAX_NODEID_W) + (CHI_MAX_ADDR_W - 3)
+      + CHI_MPAM_W + CHI_MECID_W;
+  localparam int unsigned CHI_MAX_DAT_FLIT_W = CHI_DAT_FIXED_W
+      + (3 * CHI_MAX_NODEID_W) + CHI_MECID_W + CHI_MAX_RSVDC_W
+      + 512 + (512 / 8) + (512 / 32) + (512 / 128)
+      + (512 / 8) + (512 / 64);
   localparam int unsigned CHI_MAX_NOC_PAYLOAD_W = CHI_MAX_DAT_FLIT_W;
 
   typedef enum logic [1:0] {
@@ -108,7 +124,7 @@ package chi_pkg;
     RSP_COMP            = 5'h04, RSP_COMP_DBID_RESP = 5'h05,
     RSP_DBID_RESP       = 5'h06, RSP_PCRD_GRANT     = 5'h07,
     RSP_READ_RECEIPT    = 5'h08, RSP_SNP_RESP_FWDED = 5'h09,
-    RSP_TAG_MATCH       = 5'h0A, RSP_SEP_DATA       = 5'h0B,
+    RSP_TAG_MATCH       = 5'h0A, RSP_RESP_SEP_DATA  = 5'h0B,
     RSP_PERSIST         = 5'h0C, RSP_COMP_PERSIST   = 5'h0D,
     RSP_DBID_RESP_ORD   = 5'h0E, RSP_STASH_DONE     = 5'h10,
     RSP_COMP_STASH_DONE = 5'h11, RSP_COMP_CMO       = 5'h14
@@ -133,7 +149,7 @@ package chi_pkg;
     DAT_COPY_BACK_WR_DATA    = 4'h2, DAT_NON_COPY_BACK_WR_DATA = 4'h3,
     DAT_COMP_DATA            = 4'h4, DAT_SNP_RESP_DATA_PTL   = 4'h5,
     DAT_SNP_RESP_DATA_FWDED  = 4'h6, DAT_WRITE_DATA_CANCEL   = 4'h7,
-    DAT_SEP_RESP             = 4'hB, DAT_NCB_WR_DATA_COMP_ACK = 4'hC
+    DAT_DATA_SEP_RESP        = 4'hB, DAT_NCB_WR_DATA_COMP_ACK = 4'hC
   } chi_dat_opcode_e;
 
   typedef enum logic [1:0] {
@@ -146,11 +162,19 @@ package chi_pkg;
     RESP_ERR_DERR = 2'b10, RESP_ERR_NDERR = 2'b11
   } chi_resp_err_e;
 
+  // Resp[2] is PassDirty and Resp[1:0] is the cache state, so the label set
+  // must keep that bit structure (IHI 0050H B13.10.34). RESP_UC_UD is UC in
+  // completion responses and UC or UD in snoop responses; RESP_UD_PD is
+  // UC_PD in snoop responses.
   typedef enum logic [2:0] {
-    RESP_I = 3'b000, RESP_SC = 3'b001, RESP_UC = 3'b010,
-    RESP_UD = 3'b011, RESP_SD = 3'b100, RESP_I_PD = 3'b101,
-    RESP_SC_PD = 3'b110, RESP_UD_PD = 3'b111
+    RESP_I = 3'b000, RESP_SC = 3'b001, RESP_UC_UD = 3'b010,
+    RESP_SD = 3'b011, RESP_I_PD = 3'b100, RESP_SC_PD = 3'b101,
+    RESP_UD_PD = 3'b110, RESP_SD_PD = 3'b111
   } chi_resp_e;
+
+  function automatic logic respPassDirty(input chi_resp_e resp);
+    return resp[2];
+  endfunction
 
   typedef enum logic [2:0] {
     CACHE_I = 3'b000, CACHE_SC = 3'b001, CACHE_UC = 3'b010,
@@ -162,10 +186,35 @@ package chi_pkg;
     TAG_OP_UPDATE = 2'b10, TAG_OP_MATCH = 2'b11
   } chi_tag_op_e;
 
-  typedef enum logic [1:0] {
-    PAS_SECURE = 2'b00, PAS_NON_SECURE = 2'b01,
-    PAS_ROOT = 2'b10, PAS_REALM = 2'b11
+  // DVMType values carried in the DVM message payload (IHI 0050H B8.4.1).
+  typedef enum logic [2:0] {
+    DVM_TYPE_TLBI = 3'b000, DVM_TYPE_BPI = 3'b001,
+    DVM_TYPE_PICI = 3'b010, DVM_TYPE_VICI = 3'b011,
+    DVM_TYPE_SYNC = 3'b100, DVM_TYPE_RESERVED_5 = 3'b101,
+    DVM_TYPE_RESERVED_6 = 3'b110, DVM_TYPE_RESERVED_7 = 3'b111
+  } chi_dvm_type_e;
+
+  // Issue H replaces the separate NS and NSE bits with a 3-bit PAS field.
+  // System Agent and Non-secure Protected additionally require GDI support
+  // (IHI 0050H B13.10.68).
+  typedef enum logic [2:0] {
+    PAS_SECURE = 3'b000, PAS_NON_SECURE = 3'b001,
+    PAS_ROOT = 3'b010, PAS_REALM = 3'b011,
+    PAS_SYSTEM_AGENT = 3'b100, PAS_NON_SECURE_PROTECTED = 3'b101,
+    PAS_RESERVED_6 = 3'b110, PAS_RESERVED_7 = 3'b111
   } chi_pas_e;
+
+  // Retained so logic written against the pre-Issue-H NS/NSE encoding keeps
+  // one definition of what each PAS value means.
+  function automatic logic pasNonSecure(input chi_pas_e pas);
+    return (pas == PAS_NON_SECURE) || (pas == PAS_REALM)
+           || (pas == PAS_NON_SECURE_PROTECTED);
+  endfunction
+
+  function automatic logic pasMecIdApplicable(input chi_pas_e pas);
+    return (pas == PAS_REALM) || (pas == PAS_SYSTEM_AGENT)
+           || (pas == PAS_NON_SECURE_PROTECTED);
+  endfunction
 
   typedef struct packed {
     logic [3:0] qos;
@@ -173,13 +222,14 @@ package chi_pkg;
     logic [CHI_MAX_NODEID_W-1:0] srcId;
     logic [CHI_MAX_TXNID_W-1:0] txnId;
     logic [CHI_MAX_NODEID_W-1:0] returnNidOrStashNidOrDataTarget;
-    logic controlCommon;
-    logic [CHI_MAX_TXNID_W-1:0] returnTxnIdOrStashLpid;
+    logic stashNidValidOrEndianOrDeep;
+    logic [CHI_RTNTXNID_SLOT_W-1:0] returnTxnIdOrStashLpid;
     chi_req_opcode_e opcode;
+    logic multiReq;
+    logic [CHI_NUMREQ_SLOT_W-1:0] numReq;
     logic [2:0] size;
     logic [CHI_MAX_ADDR_W-1:0] addr;
-    logic ns;
-    logic nse;
+    chi_pas_e pas;
     logic likelyShared;
     logic allowRetry;
     chi_order_e order;
@@ -192,7 +242,10 @@ package chi_pkg;
     chi_tag_op_e tagOp;
     logic traceTag;
     logic [CHI_MPAM_W-1:0] mpam;
+    logic [CHI_PBHA_W-1:0] pbha;
     logic [CHI_MECID_W-1:0] mecId;
+    logic [CHI_STREAMID_W-1:0] streamId;
+    logic secSid1;
     logic [31:0] rsvdc;
   } chi_req_flit_t;
 
@@ -206,10 +259,11 @@ package chi_pkg;
     chi_resp_e resp;
     logic [2:0] fwdState;
     logic [2:0] cBusy;
-    logic [CHI_MAX_TXNID_W-1:0] dbIdOrGroupId;
+    logic [CHI_RSP_DBID_SLOT_W-1:0] dbIdOrGroupId;
     logic [3:0] pCrdType;
     chi_tag_op_e tagOp;
     logic traceTag;
+    logic [CHI_CACHELINEID_W-1:0] cacheLineId;
   } chi_rsp_flit_t;
 
   typedef struct packed {
@@ -217,11 +271,10 @@ package chi_pkg;
     logic [CHI_MAX_NODEID_W-1:0] srcId;
     logic [CHI_MAX_TXNID_W-1:0] txnId;
     logic [CHI_MAX_NODEID_W-1:0] fwdNidOrPbha;
-    logic [CHI_MAX_TXNID_W-1:0] fwdTxnIdOrStashLpidOrVmidExt;
+    logic [CHI_RTNTXNID_SLOT_W-1:0] fwdTxnIdOrStashLpidOrVmidExt;
     chi_snp_opcode_e opcode;
     logic [CHI_MAX_ADDR_W-4:0] addr;
-    logic ns;
-    logic nse;
+    chi_pas_e pas;
     logic doNotGoToSd;
     logic retToSrc;
     logic traceTag;
@@ -241,9 +294,11 @@ package chi_pkg;
     logic [7:0] dataSourceOrFwdState;
     logic dataPull;
     logic [2:0] cBusy;
-    logic [15:0] dbIdOrMecId;
-    logic [CHI_MAX_CCID_W-1:0] ccId;
-    logic [1:0] dataId;
+    logic [CHI_MECID_W-1:0] mecId;
+    logic [CHI_DAT_DBID_SLOT_W-1:0] dbId;
+    logic [CHI_CCID_SLOT_W-1:0] ccId;
+    logic [CHI_DATAID_SLOT_W-1:0] dataId;
+    logic [CHI_CACHELINEID_W-1:0] cacheLineId;
     chi_tag_op_e tagOp;
     logic [15:0] tag;
     logic [3:0] tu;
@@ -262,41 +317,57 @@ package chi_pkg;
     return (firstWidth > secondWidth) ? firstWidth : secondWidth;
   endfunction
 
-  function automatic int unsigned reqGroupLpidWidth(input chi_cfg_t cfg);
-    return maxWidth(cfg.groupIdW, cfg.lpidW);
+  // Optional-bus widths. Issue H allows MPAM at 12 or 15 bits, and lets the
+  // MECID and StreamID buses share one field of width Max(E,R).
+  function automatic int unsigned mpamBusWidth(input chi_cfg_t cfg);
+    if (!cfg.mpamEn) return 0;
+    return (cfg.mpamW == CHI_MPAM_SHORT_W) ? CHI_MPAM_SHORT_W : CHI_MPAM_W;
   endfunction
 
-  function automatic int unsigned rspDbidGroupWidth(input chi_cfg_t cfg);
-    return maxWidth(cfg.txnIdW, cfg.groupIdW);
+  function automatic int unsigned mecIdBusWidth(input chi_cfg_t cfg);
+    return cfg.mecEn ? CHI_MECID_W : 0;
   endfunction
 
-  function automatic int unsigned snpTxnLpidVmidWidth(input chi_cfg_t cfg);
-    return maxWidth(maxWidth(cfg.txnIdW, cfg.lpidW), 8);
+  function automatic int unsigned streamIdBusWidth(input chi_cfg_t cfg);
+    return cfg.cdaEn ? CHI_STREAMID_W : 0;
   endfunction
 
-  function automatic int unsigned datDbidMecWidth(input chi_cfg_t cfg);
-    return cfg.mecEn ? CHI_MECID_W : cfg.txnIdW;
+  function automatic int unsigned reqMecStreamWidth(input chi_cfg_t cfg);
+    return maxWidth(mecIdBusWidth(cfg), streamIdBusWidth(cfg));
   endfunction
 
+  function automatic int unsigned pbhaBusWidth(input chi_cfg_t cfg);
+    return cfg.pbhaEn ? CHI_PBHA_W : 0;
+  endfunction
+
+  function automatic int unsigned secSid1Width(input chi_cfg_t cfg);
+    return cfg.cdaEn ? 1 : 0;
+  endfunction
+
+  // Total = 93 + RAW + Y + M + PB + S + Max(E,R) at NodeID_Width 7, rising to
+  // 120 + ... at NodeID_Width 16 (IHI 0050H B13.9.1).
   function automatic int unsigned reqFlitWidth(input chi_cfg_t cfg);
-    return 35 + (3 * cfg.nodeIdW) + (2 * cfg.txnIdW) + cfg.addrW
-           + reqGroupLpidWidth(cfg) + cfg.rsvdcW
-           + (cfg.mpamEn ? CHI_MPAM_W : 0) + (cfg.mecEn ? CHI_MECID_W : 0);
+    return CHI_REQ_FIXED_W + (3 * cfg.nodeIdW) + cfg.addrW + cfg.rsvdcW
+           + mpamBusWidth(cfg) + pbhaBusWidth(cfg) + secSid1Width(cfg)
+           + reqMecStreamWidth(cfg);
   endfunction
 
+  // Total = 71 to 89 (IHI 0050H B13.9.2).
   function automatic int unsigned rspFlitWidth(input chi_cfg_t cfg);
-    return 27 + (2 * cfg.nodeIdW) + cfg.txnIdW + rspDbidGroupWidth(cfg);
+    return CHI_RSP_FIXED_W + (2 * cfg.nodeIdW);
   endfunction
 
+  // Total = 53 + SAW + M + E to 71 + SAW + M + E (IHI 0050H B13.9.3).
   function automatic int unsigned snpFlitWidth(input chi_cfg_t cfg);
-    return 11 + cfg.addrW + (2 * cfg.nodeIdW) + cfg.txnIdW
-           + snpTxnLpidVmidWidth(cfg)
-           + (cfg.mpamEn ? CHI_MPAM_W : 0) + (cfg.mecEn ? CHI_MECID_W : 0);
+    return CHI_SNP_FIXED_W + (2 * cfg.nodeIdW) + (cfg.addrW - 3)
+           + mpamBusWidth(cfg) + mecIdBusWidth(cfg);
   endfunction
 
+  // Total = (240 to 267) + Y + DC + P for a 128-bit data bus, scaling with
+  // the data bus width (IHI 0050H B13.9.4).
   function automatic int unsigned datFlitWidth(input chi_cfg_t cfg);
-    return 34 + (3 * cfg.nodeIdW) + cfg.txnIdW + datDbidMecWidth(cfg)
-           + cfg.ccidW + cfg.dataW + (cfg.dataW / 8)
+    return CHI_DAT_FIXED_W + (3 * cfg.nodeIdW) + mecIdBusWidth(cfg)
+           + cfg.dataW + (cfg.dataW / 8)
            + (cfg.dataW / 32) + (cfg.dataW / 128) + cfg.rsvdcW
            + (cfg.dataCheckEn ? (cfg.dataW / 8) : 0)
            + (cfg.poisonEn ? (cfg.dataW / 64) : 0);
@@ -398,17 +469,30 @@ package chi_pkg;
     int unsigned bitPos;
     packedFlit = '0; bitPos = 0;
     `CHI_PACK_FIELD(qos, 4) `CHI_PACK_FIELD(tgtId, cfg.nodeIdW)
-    `CHI_PACK_FIELD(srcId, cfg.nodeIdW) `CHI_PACK_FIELD(txnId, cfg.txnIdW)
+    `CHI_PACK_FIELD(srcId, cfg.nodeIdW) `CHI_PACK_FIELD(txnId, CHI_TXNID_FLIT_W)
     `CHI_PACK_FIELD(returnNidOrStashNidOrDataTarget, cfg.nodeIdW)
-    `CHI_PACK_BIT(controlCommon) `CHI_PACK_FIELD(returnTxnIdOrStashLpid, cfg.txnIdW)
-    `CHI_PACK_FIELD(opcode, 7) `CHI_PACK_FIELD(size, 3) `CHI_PACK_FIELD(addr, cfg.addrW)
-    `CHI_PACK_BIT(ns) `CHI_PACK_BIT(nse) `CHI_PACK_BIT(likelyShared)
+    `CHI_PACK_BIT(stashNidValidOrEndianOrDeep)
+    `CHI_PACK_FIELD(returnTxnIdOrStashLpid, CHI_RTNTXNID_SLOT_W)
+    `CHI_PACK_FIELD(opcode, 7) `CHI_PACK_BIT(multiReq)
+    if (flit.multiReq) begin
+      `CHI_PACK_FIELD(numReq, CHI_NUMREQ_SLOT_W)
+    end else begin
+      `CHI_PACK_FIELD(size, 3)
+      bitPos += (CHI_NUMREQ_SLOT_W - 3);
+    end
+    `CHI_PACK_FIELD(addr, cfg.addrW)
+    `CHI_PACK_FIELD(pas, CHI_PAS_W) `CHI_PACK_BIT(likelyShared)
     `CHI_PACK_BIT(allowRetry) `CHI_PACK_FIELD(order, 2) `CHI_PACK_FIELD(pCrdType, 4)
     `CHI_PACK_FIELD(memAttr, 4) `CHI_PACK_BIT(snpAttrOrDoDwt)
-    `CHI_PACK_FIELD(groupIdOrLpid, reqGroupLpidWidth(cfg)) `CHI_PACK_BIT(exclOrSnoopMeOrCah)
+    `CHI_PACK_FIELD(groupIdOrLpid, CHI_GROUPID_SLOT_W) `CHI_PACK_BIT(exclOrSnoopMeOrCah)
     `CHI_PACK_BIT(expCompAck) `CHI_PACK_FIELD(tagOp, 2) `CHI_PACK_BIT(traceTag)
-    if (cfg.mpamEn) begin `CHI_PACK_FIELD(mpam, CHI_MPAM_W) end
-    if (cfg.mecEn) begin `CHI_PACK_FIELD(mecId, CHI_MECID_W) end
+    if (mpamBusWidth(cfg) > 0) begin `CHI_PACK_FIELD(mpam, mpamBusWidth(cfg)) end
+    if (pbhaBusWidth(cfg) > 0) begin `CHI_PACK_FIELD(pbha, CHI_PBHA_W) end
+    if (reqMecStreamWidth(cfg) > 0) begin
+      if (cfg.mecEn) begin `CHI_PACK_FIELD(mecId, CHI_MECID_W) end
+      else begin `CHI_PACK_FIELD(streamId, CHI_STREAMID_W) end
+    end
+    if (secSid1Width(cfg) > 0) begin `CHI_PACK_BIT(secSid1) end
     `CHI_PACK_FIELD(rsvdc, cfg.rsvdcW)
     return packedFlit;
   endfunction
@@ -418,17 +502,30 @@ package chi_pkg;
     int unsigned bitPos;
     flit = '0; bitPos = 0;
     `CHI_UNPACK_FIELD(qos, 4) `CHI_UNPACK_FIELD(tgtId, cfg.nodeIdW)
-    `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW) `CHI_UNPACK_FIELD(txnId, cfg.txnIdW)
+    `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW) `CHI_UNPACK_FIELD(txnId, CHI_TXNID_FLIT_W)
     `CHI_UNPACK_FIELD(returnNidOrStashNidOrDataTarget, cfg.nodeIdW)
-    `CHI_UNPACK_BIT(controlCommon) `CHI_UNPACK_FIELD(returnTxnIdOrStashLpid, cfg.txnIdW)
-    `CHI_UNPACK_FIELD(opcode, 7) `CHI_UNPACK_FIELD(size, 3) `CHI_UNPACK_FIELD(addr, cfg.addrW)
-    `CHI_UNPACK_BIT(ns) `CHI_UNPACK_BIT(nse) `CHI_UNPACK_BIT(likelyShared)
+    `CHI_UNPACK_BIT(stashNidValidOrEndianOrDeep)
+    `CHI_UNPACK_FIELD(returnTxnIdOrStashLpid, CHI_RTNTXNID_SLOT_W)
+    `CHI_UNPACK_FIELD(opcode, 7) `CHI_UNPACK_BIT(multiReq)
+    if (flit.multiReq) begin
+      `CHI_UNPACK_FIELD(numReq, CHI_NUMREQ_SLOT_W)
+    end else begin
+      `CHI_UNPACK_FIELD(size, 3)
+      bitPos += (CHI_NUMREQ_SLOT_W - 3);
+    end
+    `CHI_UNPACK_FIELD(addr, cfg.addrW)
+    `CHI_UNPACK_FIELD(pas, CHI_PAS_W) `CHI_UNPACK_BIT(likelyShared)
     `CHI_UNPACK_BIT(allowRetry) `CHI_UNPACK_FIELD(order, 2) `CHI_UNPACK_FIELD(pCrdType, 4)
     `CHI_UNPACK_FIELD(memAttr, 4) `CHI_UNPACK_BIT(snpAttrOrDoDwt)
-    `CHI_UNPACK_FIELD(groupIdOrLpid, reqGroupLpidWidth(cfg)) `CHI_UNPACK_BIT(exclOrSnoopMeOrCah)
+    `CHI_UNPACK_FIELD(groupIdOrLpid, CHI_GROUPID_SLOT_W) `CHI_UNPACK_BIT(exclOrSnoopMeOrCah)
     `CHI_UNPACK_BIT(expCompAck) `CHI_UNPACK_FIELD(tagOp, 2) `CHI_UNPACK_BIT(traceTag)
-    if (cfg.mpamEn) begin `CHI_UNPACK_FIELD(mpam, CHI_MPAM_W) end
-    if (cfg.mecEn) begin `CHI_UNPACK_FIELD(mecId, CHI_MECID_W) end
+    if (mpamBusWidth(cfg) > 0) begin `CHI_UNPACK_FIELD(mpam, mpamBusWidth(cfg)) end
+    if (pbhaBusWidth(cfg) > 0) begin `CHI_UNPACK_FIELD(pbha, CHI_PBHA_W) end
+    if (reqMecStreamWidth(cfg) > 0) begin
+      if (cfg.mecEn) begin `CHI_UNPACK_FIELD(mecId, CHI_MECID_W) end
+      else begin `CHI_UNPACK_FIELD(streamId, CHI_STREAMID_W) end
+    end
+    if (secSid1Width(cfg) > 0) begin `CHI_UNPACK_BIT(secSid1) end
     `CHI_UNPACK_FIELD(rsvdc, cfg.rsvdcW)
     return flit;
   endfunction
@@ -438,11 +535,12 @@ package chi_pkg;
     int unsigned bitPos;
     packedFlit = '0; bitPos = 0;
     `CHI_PACK_FIELD(qos, 4) `CHI_PACK_FIELD(tgtId, cfg.nodeIdW)
-    `CHI_PACK_FIELD(srcId, cfg.nodeIdW) `CHI_PACK_FIELD(txnId, cfg.txnIdW)
+    `CHI_PACK_FIELD(srcId, cfg.nodeIdW) `CHI_PACK_FIELD(txnId, CHI_TXNID_FLIT_W)
     `CHI_PACK_FIELD(opcode, 5) `CHI_PACK_FIELD(respErr, 2) `CHI_PACK_FIELD(resp, 3)
     `CHI_PACK_FIELD(fwdState, 3) `CHI_PACK_FIELD(cBusy, 3)
-    `CHI_PACK_FIELD(dbIdOrGroupId, rspDbidGroupWidth(cfg)) `CHI_PACK_FIELD(pCrdType, 4)
+    `CHI_PACK_FIELD(dbIdOrGroupId, CHI_RSP_DBID_SLOT_W) `CHI_PACK_FIELD(pCrdType, 4)
     `CHI_PACK_FIELD(tagOp, 2) `CHI_PACK_BIT(traceTag)
+    `CHI_PACK_FIELD(cacheLineId, CHI_CACHELINEID_W)
     return packedFlit;
   endfunction
 
@@ -451,11 +549,12 @@ package chi_pkg;
     int unsigned bitPos;
     flit = '0; bitPos = 0;
     `CHI_UNPACK_FIELD(qos, 4) `CHI_UNPACK_FIELD(tgtId, cfg.nodeIdW)
-    `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW) `CHI_UNPACK_FIELD(txnId, cfg.txnIdW)
+    `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW) `CHI_UNPACK_FIELD(txnId, CHI_TXNID_FLIT_W)
     `CHI_UNPACK_FIELD(opcode, 5) `CHI_UNPACK_FIELD(respErr, 2) `CHI_UNPACK_FIELD(resp, 3)
     `CHI_UNPACK_FIELD(fwdState, 3) `CHI_UNPACK_FIELD(cBusy, 3)
-    `CHI_UNPACK_FIELD(dbIdOrGroupId, rspDbidGroupWidth(cfg)) `CHI_UNPACK_FIELD(pCrdType, 4)
+    `CHI_UNPACK_FIELD(dbIdOrGroupId, CHI_RSP_DBID_SLOT_W) `CHI_UNPACK_FIELD(pCrdType, 4)
     `CHI_UNPACK_FIELD(tagOp, 2) `CHI_UNPACK_BIT(traceTag)
+    `CHI_UNPACK_FIELD(cacheLineId, CHI_CACHELINEID_W)
     return flit;
   endfunction
 
@@ -464,12 +563,12 @@ package chi_pkg;
     int unsigned bitPos;
     packedFlit = '0; bitPos = 0;
     `CHI_PACK_FIELD(qos, 4) `CHI_PACK_FIELD(srcId, cfg.nodeIdW)
-    `CHI_PACK_FIELD(txnId, cfg.txnIdW) `CHI_PACK_FIELD(fwdNidOrPbha, cfg.nodeIdW)
-    `CHI_PACK_FIELD(fwdTxnIdOrStashLpidOrVmidExt, snpTxnLpidVmidWidth(cfg)) `CHI_PACK_FIELD(opcode, 5)
-    `CHI_PACK_FIELD(addr, cfg.addrW-3) `CHI_PACK_BIT(ns) `CHI_PACK_BIT(nse)
+    `CHI_PACK_FIELD(txnId, CHI_TXNID_FLIT_W) `CHI_PACK_FIELD(fwdNidOrPbha, cfg.nodeIdW)
+    `CHI_PACK_FIELD(fwdTxnIdOrStashLpidOrVmidExt, CHI_RTNTXNID_SLOT_W) `CHI_PACK_FIELD(opcode, 5)
+    `CHI_PACK_FIELD(addr, cfg.addrW-3) `CHI_PACK_FIELD(pas, CHI_PAS_W)
     `CHI_PACK_BIT(doNotGoToSd) `CHI_PACK_BIT(retToSrc) `CHI_PACK_BIT(traceTag)
-    if (cfg.mpamEn) begin `CHI_PACK_FIELD(mpam, CHI_MPAM_W) end
-    if (cfg.mecEn) begin `CHI_PACK_FIELD(mecId, CHI_MECID_W) end
+    if (mpamBusWidth(cfg) > 0) begin `CHI_PACK_FIELD(mpam, mpamBusWidth(cfg)) end
+    if (mecIdBusWidth(cfg) > 0) begin `CHI_PACK_FIELD(mecId, CHI_MECID_W) end
     return packedFlit;
   endfunction
 
@@ -478,12 +577,12 @@ package chi_pkg;
     int unsigned bitPos;
     flit = '0; bitPos = 0;
     `CHI_UNPACK_FIELD(qos, 4) `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW)
-    `CHI_UNPACK_FIELD(txnId, cfg.txnIdW) `CHI_UNPACK_FIELD(fwdNidOrPbha, cfg.nodeIdW)
-    `CHI_UNPACK_FIELD(fwdTxnIdOrStashLpidOrVmidExt, snpTxnLpidVmidWidth(cfg)) `CHI_UNPACK_FIELD(opcode, 5)
-    `CHI_UNPACK_FIELD(addr, cfg.addrW-3) `CHI_UNPACK_BIT(ns) `CHI_UNPACK_BIT(nse)
+    `CHI_UNPACK_FIELD(txnId, CHI_TXNID_FLIT_W) `CHI_UNPACK_FIELD(fwdNidOrPbha, cfg.nodeIdW)
+    `CHI_UNPACK_FIELD(fwdTxnIdOrStashLpidOrVmidExt, CHI_RTNTXNID_SLOT_W) `CHI_UNPACK_FIELD(opcode, 5)
+    `CHI_UNPACK_FIELD(addr, cfg.addrW-3) `CHI_UNPACK_FIELD(pas, CHI_PAS_W)
     `CHI_UNPACK_BIT(doNotGoToSd) `CHI_UNPACK_BIT(retToSrc) `CHI_UNPACK_BIT(traceTag)
-    if (cfg.mpamEn) begin `CHI_UNPACK_FIELD(mpam, CHI_MPAM_W) end
-    if (cfg.mecEn) begin `CHI_UNPACK_FIELD(mecId, CHI_MECID_W) end
+    if (mpamBusWidth(cfg) > 0) begin `CHI_UNPACK_FIELD(mpam, mpamBusWidth(cfg)) end
+    if (mecIdBusWidth(cfg) > 0) begin `CHI_UNPACK_FIELD(mecId, CHI_MECID_W) end
     return flit;
   endfunction
 
@@ -492,12 +591,15 @@ package chi_pkg;
     int unsigned bitPos;
     packedFlit = '0; bitPos = 0;
     `CHI_PACK_FIELD(qos, 4) `CHI_PACK_FIELD(tgtId, cfg.nodeIdW)
-    `CHI_PACK_FIELD(srcId, cfg.nodeIdW) `CHI_PACK_FIELD(txnId, cfg.txnIdW)
+    `CHI_PACK_FIELD(srcId, cfg.nodeIdW) `CHI_PACK_FIELD(txnId, CHI_TXNID_FLIT_W)
     `CHI_PACK_FIELD(homeNidOrPbha, cfg.nodeIdW) `CHI_PACK_FIELD(opcode, 4)
     `CHI_PACK_FIELD(respErr, 2) `CHI_PACK_FIELD(resp, 3)
-    `CHI_PACK_FIELD(dataSourceOrFwdState, 8) `CHI_PACK_BIT(dataPull)
-    `CHI_PACK_FIELD(cBusy, 3) `CHI_PACK_FIELD(dbIdOrMecId, datDbidMecWidth(cfg))
-    `CHI_PACK_FIELD(ccId, cfg.ccidW) `CHI_PACK_FIELD(dataId, 2) `CHI_PACK_FIELD(tagOp, 2)
+    `CHI_PACK_FIELD(dataSourceOrFwdState, CHI_DATASOURCE_W) `CHI_PACK_BIT(dataPull)
+    `CHI_PACK_FIELD(cBusy, 3)
+    if (mecIdBusWidth(cfg) > 0) begin `CHI_PACK_FIELD(mecId, CHI_MECID_W) end
+    `CHI_PACK_FIELD(dbId, CHI_DAT_DBID_SLOT_W)
+    `CHI_PACK_FIELD(ccId, CHI_CCID_SLOT_W) `CHI_PACK_FIELD(dataId, CHI_DATAID_SLOT_W)
+    `CHI_PACK_FIELD(cacheLineId, CHI_CACHELINEID_W) `CHI_PACK_FIELD(tagOp, 2)
     `CHI_PACK_FIELD(tag, cfg.dataW/32) `CHI_PACK_FIELD(tu, cfg.dataW/128)
     `CHI_PACK_BIT(traceTag) `CHI_PACK_BIT(cah)
     `CHI_PACK_FIELD(numDat, 2) `CHI_PACK_BIT(replicate)
@@ -513,12 +615,15 @@ package chi_pkg;
     int unsigned bitPos;
     flit = '0; bitPos = 0;
     `CHI_UNPACK_FIELD(qos, 4) `CHI_UNPACK_FIELD(tgtId, cfg.nodeIdW)
-    `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW) `CHI_UNPACK_FIELD(txnId, cfg.txnIdW)
+    `CHI_UNPACK_FIELD(srcId, cfg.nodeIdW) `CHI_UNPACK_FIELD(txnId, CHI_TXNID_FLIT_W)
     `CHI_UNPACK_FIELD(homeNidOrPbha, cfg.nodeIdW) `CHI_UNPACK_FIELD(opcode, 4)
     `CHI_UNPACK_FIELD(respErr, 2) `CHI_UNPACK_FIELD(resp, 3)
-    `CHI_UNPACK_FIELD(dataSourceOrFwdState, 8) `CHI_UNPACK_BIT(dataPull)
-    `CHI_UNPACK_FIELD(cBusy, 3) `CHI_UNPACK_FIELD(dbIdOrMecId, datDbidMecWidth(cfg))
-    `CHI_UNPACK_FIELD(ccId, cfg.ccidW) `CHI_UNPACK_FIELD(dataId, 2) `CHI_UNPACK_FIELD(tagOp, 2)
+    `CHI_UNPACK_FIELD(dataSourceOrFwdState, CHI_DATASOURCE_W) `CHI_UNPACK_BIT(dataPull)
+    `CHI_UNPACK_FIELD(cBusy, 3)
+    if (mecIdBusWidth(cfg) > 0) begin `CHI_UNPACK_FIELD(mecId, CHI_MECID_W) end
+    `CHI_UNPACK_FIELD(dbId, CHI_DAT_DBID_SLOT_W)
+    `CHI_UNPACK_FIELD(ccId, CHI_CCID_SLOT_W) `CHI_UNPACK_FIELD(dataId, CHI_DATAID_SLOT_W)
+    `CHI_UNPACK_FIELD(cacheLineId, CHI_CACHELINEID_W) `CHI_UNPACK_FIELD(tagOp, 2)
     `CHI_UNPACK_FIELD(tag, cfg.dataW/32) `CHI_UNPACK_FIELD(tu, cfg.dataW/128)
     `CHI_UNPACK_BIT(traceTag) `CHI_UNPACK_BIT(cah)
     `CHI_UNPACK_FIELD(numDat, 2) `CHI_UNPACK_BIT(replicate)
