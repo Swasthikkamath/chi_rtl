@@ -30,7 +30,6 @@ module chi_stage1_compile #(
     + (CFG.poisonEn ? (CFG.dataW / 64) : 0);
 
   chi_if      #(.CFG(CFG)) nodeLink();
-  chi_link_if #(.CFG(CFG)) link();
 
   generate
     begin : chi_cfg_check

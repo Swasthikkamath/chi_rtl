@@ -2,7 +2,6 @@
 pkg/chi_cfg_pkg.sv
 pkg/chi_pkg.sv
 if/chi_if.sv
-if/chi_link_if.sv
 link/chi_lcrd_mgr.sv
 link/chi_link_fsm.sv
 link/chi_link_tx.sv
