@@ -1,0 +1,34 @@
+interface chi_sni_if #(
+  parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT
+);
+  import chi_pkg::*;
+  localparam int unsigned REQ_FLIT_W = reqFlitWidth(CFG);
+  localparam int unsigned RSP_FLIT_W = rspFlitWidth(CFG);
+  localparam int unsigned DAT_FLIT_W = datFlitWidth(CFG);
+  localparam int unsigned REQ_CHK_W = parityWidth(REQ_FLIT_W);
+  localparam int unsigned RSP_CHK_W = parityWidth(RSP_FLIT_W);
+  localparam int unsigned DAT_CHK_W = parityWidth(DAT_FLIT_W);
+
+  logic CLK, RESETn;
+  logic TXLINKACTIVEREQ, TXLINKACTIVEACK, RXLINKACTIVEREQ, RXLINKACTIVEACK;
+  logic TXSACTIVE, RXSACTIVE;
+  logic TXLINKACTIVEREQCHK, TXLINKACTIVEACKCHK, RXLINKACTIVEREQCHK, RXLINKACTIVEACKCHK;
+  logic TXSACTIVECHK, RXSACTIVECHK;
+
+  logic RXREQFLITPEND, RXREQFLITV, RXREQLCRDV;
+  logic [REQ_FLIT_W-1:0] RXREQFLIT;
+  logic RXREQFLITPENDCHK, RXREQFLITVCHK, RXREQLCRDVCHK;
+  logic [REQ_CHK_W-1:0] RXREQFLITCHK;
+  logic TXRSPFLITPEND, TXRSPFLITV, TXRSPLCRDV;
+  logic [RSP_FLIT_W-1:0] TXRSPFLIT;
+  logic TXRSPFLITPENDCHK, TXRSPFLITVCHK, TXRSPLCRDVCHK;
+  logic [RSP_CHK_W-1:0] TXRSPFLITCHK;
+  logic RXDATFLITPEND, RXDATFLITV, RXDATLCRDV;
+  logic [DAT_FLIT_W-1:0] RXDATFLIT;
+  logic RXDATFLITPENDCHK, RXDATFLITVCHK, RXDATLCRDVCHK;
+  logic [DAT_CHK_W-1:0] RXDATFLITCHK;
+  logic TXDATFLITPEND, TXDATFLITV, TXDATLCRDV;
+  logic [DAT_FLIT_W-1:0] TXDATFLIT;
+  logic TXDATFLITPENDCHK, TXDATFLITVCHK, TXDATLCRDVCHK;
+  logic [DAT_CHK_W-1:0] TXDATFLITCHK;
+endinterface
