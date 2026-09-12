@@ -83,7 +83,7 @@ packed flit field by itself is carriage, not implementation.
 | `PAS[2:0]` replacing `NS`/`NSE` | B2.9, B13.10 | Implemented | REQ and SNP carry the three-bit Physical Address Space selector and the SAM decodes its non-secure sense. |
 | One node-facing interface type | B13 | Implemented | `if/chi_if.sv` is the only interface declaration in the repository and is a superset used by all five external node-class arrays. |
 | Top-level interface count and replicated channels | B13.7 | Not implemented | Elaboration requires `numIfPerNode == 1` and `replChannels == 1`. No top-level replication exists. |
-| L-Credit manager, link TX and link RX | B13.11, B14.2 | Implemented | `chi_lcrd_mgr`, `chi_link_tx` and `chi_link_rx` implement finite credit accounting, receive buffering and credit return. |
+| L-Credit manager, link TX and link RX | B13.11, B14.2 | Implemented | `chi_lcrd_mgr`, `chi_link_tx` and `chi_link_rx` implement finite credit accounting, receive buffering, and the `LCrdReturn` exchange in both directions: the transmitter spends its remaining credits on `LCrdReturn` flits when it deactivates, and the receiver recognises a zero `Opcode`, extinguishes the credit and waits for all of them before it releases `LINKACTIVEACK`. |
 | Link layer integrated at every node port | B13.11, B14.2 | Implemented | `chi_link_port` instantiates three receivers and three or four transmitters per port, and `chi_interconnect_top` instantiates one per RN-F, RN-D, RN-I, SN-F and SN-I interface. `*LCRDV` are real credit pulses, not ready echoes. |
 | Link activation and deactivation FSM | B14.5--B14.6 | Implemented | `chi_link_fsm` implements STOP, ACTIVATE, RUN and DEACTIVATE with credit-drain conditions, and is instantiated per channel per direction inside every port. |
 | System coherency interface | B14.4 | Partial | `TXSACTIVE` and `RXSACTIVE` follow reset and `SYSCOACK` echoes `SYSCOREQ`. There is no power-domain or coherency-entry sequencing. |
@@ -251,6 +251,18 @@ SNP asymmetry is the one place where the port types differ in channel count.
 A Requester port has six channel instances, a Subordinate port five.
 Section 4.1 explains why both still use the same `chi_if` type.
 
+One property of the DAT channel is worth stating here because every consumer
+of data in the design depends on it. A data message is not one flit. B2.4.6
+makes `DataID` a count of 16-byte granules within the 64-byte line, so a
+message of `Size` bytes occupies as many packets as the data bus needs to
+carry them: one packet on a 512-bit bus, two on the default 256-bit bus, four
+on a 128-bit bus. `NumDat` is unrelated to that count. It belongs to Limited
+Data Elision (B2.9.5) and says how many packets behind this one have been
+elided. Recognising the end of a message therefore needs the transaction as
+well as the packet, which is what `datLastPacket` in `chi_pkg` takes: the
+`DataID` and `NumDat` of the packet in hand, plus the address and `Size` of
+the request it answers.
+
 ## 2.4 The four layers
 
 Every block in the design belongs to one of four layers. The layer boundaries
@@ -286,6 +298,21 @@ either a receiver or a transmitter:
   generates per-byte flit parity, and will not assert `*FLITV` unless the
   link is in RUN and a credit is available. It also detects pool overflow and
   underflow, which is what raises `linkCreditError`.
+
+Credits are borrowed, not given, and that is what makes deactivation more than
+a handshake. B14.6.3.2 requires a link to stay in DEACTIVATE until every
+credit has come back, and B13.11 gives the transmitter the means to send them
+back: `LCrdReturn`, a flit whose `Opcode` is zero and whose other fields are
+unused. So `chi_link_tx` spends its remaining credits on `LCrdReturn` flits
+once it enters DEACTIVATE and only then drops `LINKACTIVEREQ`, while
+`chi_link_rx` recognises a zero `Opcode`, extinguishes the credit rather than
+replacing it, and keeps `LINKACTIVEACK` asserted until its count of credits
+held by the peer reaches zero. A receiver also has to keep accepting flits in
+DEACTIVATE, both for these returns and for a protocol flit that raced the
+deassertion of `LINKACTIVEREQ`. Because the `Opcode` field sits at a different
+offset in each channel's flit, each `chi_link_rx` instance is given a mask of
+that field, derived in `chi_pkg` from the matching pack function so it cannot
+drift away from the layout.
 
 Two consequences of this structure show up elsewhere in the document. First,
 because the credit pool is per channel per direction, `lcrdDepth` multiplies
@@ -845,9 +872,10 @@ Each channel in each direction has its own credit counter and its own
 activation FSM. On leaving STOP, a receiver advertises `lcrdDepth` credits
 one `LCRDV` pulse at a time and refills a credit every time a buffered flit
 is consumed by the fabric. A transmitter sends a flit only while in RUN and
-holding at least one credit. Deactivation waits until the channel's credits
-are quiescent, which is why the port ORs the per-channel activation signals:
-the OR holds the handshake asserted until the last channel has drained.
+holding at least one credit. Deactivation hands the credits back with
+`LCrdReturn` flits and completes only once the last of them has been returned,
+which is why the port ORs the per-channel activation signals: the OR holds the
+handshake asserted until the last channel has drained.
 
 Receive-buffer overflow, credit overflow and credit underflow are detected
 and reported on `linkCreditError`; they indicate a peer that violated the
@@ -1384,7 +1412,7 @@ or performance guarantees are supplied.
 | File | Assertions | Covers |
 |------------------------------------------------------------|--------------------|--------------------|
 | `chi_link_sva.sv` | `NO_SEND_WITHOUT_RUN_OR_CREDIT`, `NO_CREDIT_OVERFLOW`, `NO_CREDIT_UNDERFLOW`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_CREDITS_DRAINED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
-| `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_WITHOUT_RUN`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
+| `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_OUTSIDE_ACTIVE`, `LCRD_RETURN_NOT_DELIVERED`, `PEER_CREDITS_IN_RANGE`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_proto_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `DAT_INPUT_STABLE_UNDER_BACKPRESSURE`, `REQ_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `DAT_STABLE_UNDER_BACKPRESSURE`, `ACTIVE_RESPONSE_ID_CONSISTENT`, `RETRY_RESPONSE_ID_CONSISTENT`, `ONE_COMPLETION_PATH`, `PCRD_GRANT_FIELDS_UNUSED`, `RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE` | `RETRY_ACK_THEN_PCRD_GRANT_CLASS`, `PCRD_GRANT_SENT`, `DCT_SNOOP_FORWARD_PATH`, `DIRECTORY_BACK_INVALIDATION`, `EXCLUSIVE_SUCCESS`, `BASIC_READ_FLOW`, `BASIC_WRITE_FLOW` |
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
 | `chi_ordering_sva.sv` | pairwise `NO_DUPLICATE_ACTIVE_LINE`, per-entry `ALLOCATION_LINE_NOT_ACTIVE` | none |
@@ -1690,8 +1718,20 @@ the cross-references in the prose stay correct in every output format.
    topology slot.
 10. An unknown fabric destination is back-pressured indefinitely and has no
     error sink.
-11. System coherency and link power sequencing are placeholders.
-12. There is no full protocol testbench, no formal proof closure, no
+11. System coherency and link power sequencing are placeholders. Nothing in
+    the design asserts `deactivate`, so although the link layer now implements
+    the `LCrdReturn` exchange in both directions, the deactivation path has
+    never been walked.
+12. A granted P-Credit reserves nothing. `chi_retry` grants a credit only
+    while a Home resource exists, but the resource is not held for the
+    credited request, so by the time that request arrives the Home can be busy
+    with another one. It is then back-pressured rather than retried a second
+    time, which satisfies B2.10, but it satisfies it only because the Home is
+    serial and the REQ channel is in order: the credited request blocks
+    everything behind it until the Home is free. Pipelining the Home without
+    adding a real reservation would break the guarantee that the second
+    attempt is accepted.
+13. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
     performance characterization. The smoke run in Section 12.7 drives no
     traffic at all: it brings the links up and then asserts that no flit is
