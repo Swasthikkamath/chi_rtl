@@ -31,9 +31,11 @@ module chi_proto_sva #(
   input chi_pkg::chi_rsp_flit_t responseFlit,
   input logic retryHandshake,
   input logic retryAck,
-  input logic [1:0] retryClass,
+  input logic [3:0] retryClass,
   input logic retryGrantValid,
-  input logic [1:0] retryGrantClass,
+  input logic retryGrantSend,
+  input logic [3:0] retryGrantClass,
+  input chi_pkg::chi_rsp_flit_t grantFlit,
   input logic dctEligible,
   input logic sfBackInvDone,
   input logic activeExclOkay,
@@ -97,7 +99,7 @@ module chi_proto_sva #(
 
   ACTIVE_RESPONSE_ID_CONSISTENT: assert property (
     @(posedge clk) disable iff (!resetn)
-    rspOutValid && !retryHandshake
+    rspOutValid && !retryHandshake && !retryGrantSend
       |-> ((responseFlit.tgtId == activeReq.srcId)
            && (responseFlit.txnId == activeReq.txnId)));
 
@@ -118,10 +120,27 @@ module chi_proto_sva #(
           && (incomingDat.opcode == DAT_COMP_DATA)
           && (incomingDat.dataId == incomingDat.numDat))));
 
+  // PCrdGrant must not carry a TxnID or a DBID (IHI 0050H B2.5.5).
+  PCRD_GRANT_FIELDS_UNUSED: assert property (
+    @(posedge clk) disable iff (!resetn)
+    retryGrantSend
+      |-> ((grantFlit.opcode == RSP_PCRD_GRANT)
+           && (grantFlit.txnId == '0)
+           && (grantFlit.dbIdOrGroupId == '0)));
+
+  // A RetryAck and a PCrdGrant must never contend for the response channel.
+  RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE: assert property (
+    @(posedge clk) disable iff (!resetn)
+    !(retryHandshake && retryGrantSend));
+
   RETRY_ACK_THEN_PCRD_GRANT_CLASS: cover property (
     @(posedge clk) disable iff (!resetn)
     retryGrantValid && $past(retryAck)
       && (retryGrantClass == $past(retryClass)));
+
+  PCRD_GRANT_SENT: cover property (
+    @(posedge clk) disable iff (!resetn)
+    retryGrantSend && rspOutReady);
 
   DCT_SNOOP_FORWARD_PATH: cover property (
     @(posedge clk) disable iff (!resetn)
@@ -181,7 +200,9 @@ bind chi_hnf_top chi_proto_sva #(
   .retryAck(retryAck),
   .retryClass(retryClass),
   .retryGrantValid(retryGrantValid),
+  .retryGrantSend(retryGrantSend),
   .retryGrantClass(retryGrantClass),
+  .grantFlit(grantFlit),
   .dctEligible(dctEligible),
   .sfBackInvDone(sfBackInvDone),
   .activeExclOkay(activeExclOkay),

@@ -36,6 +36,8 @@ module chi_hnf_top #(
   import chi_pkg::*;
 
   localparam int unsigned POS_DEPTH = (CFG.posEntries > 0) ? CFG.posEntries : 1;
+  localparam int unsigned RETRY_RECORDS =
+    (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
   localparam int unsigned DAT_BYTES = CFG.dataW / 8;
   localparam int unsigned DAT_OFF_W = clog2Min1(DAT_BYTES);
 
@@ -120,11 +122,20 @@ module chi_hnf_top #(
 
   logic retryAccept;
   logic retryAck;
-  logic [1:0] retryClass;
+  logic [3:0] retryClass;
+  logic [1:0] retryCategory;
+  logic retryRecordFull;
   logic retryGrantValid;
-  logic [1:0] retryGrantClass;
-  logic [7:0] retryPending [4];
+  logic retryGrantReady;
+  logic retryGrantSend;
+  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] retryGrantTgtId;
+  logic [3:0] retryGrantClass;
+  logic retryCreditsPending;
+  logic [7:0] retryPending [CHI_CREDIT_TYPES];
+  logic [7:0] retryOutstanding [CHI_CREDIT_TYPES];
+  chi_rsp_flit_t grantFlit;
   logic resourcesAvailable;
+  logic rspOutBusy;
   logic hazardBlocked;
   logic hazardLine;
   logic hazardOrder;
@@ -284,12 +295,19 @@ module chi_hnf_top #(
     resourcesAvailable = (incomingReq.opcode == REQ_PCRD_RETURN)
                          || ((state == HNF_IDLE) && posAllocReady
                              && !hazardBlocked && !sfBackInvValid);
+    // The response channel belongs to the active transaction in these states,
+    // so neither a RetryAck nor a PCrdGrant can use it.
+    rspOutBusy = (state == HNF_WAIT_RESPONSE) || (state == HNF_ORDER_RECEIPT)
+                 || (state == HNF_DMT_RESP) || (state == HNF_ATOMIC_DBID)
+                 || (state == HNF_ATOMIC_RETURN);
+    // RetryAck is optional: when the retry record table is full the request is
+    // held with back-pressure instead, which keeps the credit accounting exact.
     reqInReady = resourcesAvailable
-                 || (!resourcesAvailable && incomingReq.allowRetry
-                     && rspOutReady
-                     && (state != HNF_WAIT_RESPONSE));
+                 || (retryAck && rspOutReady && !rspOutBusy);
     requestHandshake = reqInValid && reqInReady && resourcesAvailable;
     retryHandshake = reqInValid && reqInReady && !resourcesAvailable;
+    retryGrantSend = retryGrantValid && !retryHandshake && !rspOutBusy;
+    retryGrantReady = retryGrantSend && rspOutReady;
     idle = (state == HNF_IDLE) && !sfBackInvValid;
 
     downstreamReq = activeReq;
@@ -379,11 +397,17 @@ module chi_hnf_top #(
       responseFlit.srcId = HN_NODE_ID;
       responseFlit.txnId = incomingReq.txnId;
       responseFlit.opcode = RSP_RETRY_ACK;
-      responseFlit.pCrdType = {2'b00, retryClass};
+      responseFlit.pCrdType = retryClass;
       rspOutFlit.targetNodeId = incomingReq.srcId;
       rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
         packRspFlit(CFG, responseFlit);
       rspOutValid = reqInValid && !resourcesAvailable;
+    end
+
+    if (retryGrantSend) begin
+      rspOutValid = 1'b1;
+      rspOutFlit.targetNodeId = retryGrantTgtId;
+      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] = packRspFlit(CFG, grantFlit);
     end
 
     if (atomicStateActive) begin
@@ -514,6 +538,19 @@ module chi_hnf_top #(
                            ? RSP_READ_RECEIPT : RSP_RESP_SEP_DATA;
     orderResponse.resp = RESP_I;
     orderResponse.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(activePosIndex);
+  end
+
+  // PCrdGrant names the recorded Requester and carries no TxnID or DBID
+  // (IHI 0050H B2.5.5).
+  always_comb begin
+    grantFlit = '0;
+    grantFlit.tgtId = retryGrantTgtId;
+    grantFlit.srcId = HN_NODE_ID;
+    grantFlit.txnId = '0;
+    grantFlit.dbIdOrGroupId = '0;
+    grantFlit.opcode = RSP_PCRD_GRANT;
+    grantFlit.pCrdType = retryGrantClass;
+    grantFlit.resp = RESP_I;
   end
 
   always_comb begin
@@ -687,18 +724,42 @@ module chi_hnf_top #(
     .busy(snpBusy), .done(snpDone)
   );
 
-  chi_retry retry (
-    .clk, .resetn, .requestValid(retryHandshake),
-    .resourcesAvailable(1'b0), .allowRetry(incomingReq.allowRetry),
-    .requestClass(incomingReq.pCrdType[1:0]), .acceptRequest(retryAccept),
-    .sendRetryAck(retryAck), .retryClass,
+  // The Home Node partitions its P-Credits by request category so that a
+  // stalled write cannot hold back a read (IHI 0050H B2.10).
+  always_comb begin
+    if (atomicRequest)
+      retryCategory = 2'd3;
+    else if (isWrite(incomingReq.opcode))
+      retryCategory = 2'd1;
+    else if (isCoherent(incomingReq.opcode))
+      retryCategory = 2'd2;
+    else
+      retryCategory = 2'd0;
+  end
+
+  chi_retry #(
+    .NODEID_W(chi_cfg_pkg::CHI_NODEID_SLOT_W), .ENTRIES(RETRY_RECORDS),
+    .CREDIT_TYPES(CHI_CREDIT_TYPES)
+  ) retry (
+    .clk, .resetn, .requestValid(reqInValid),
+    .resourcesAvailable, .allowRetry(incomingReq.allowRetry),
+    .requestCategory(retryCategory), .requestSrcId(incomingReq.srcId),
+    .requestQos(incomingReq.qos), .acceptRequest(retryAccept),
+    .sendRetryAck(retryAck), .retryClass, .recordFull(retryRecordFull),
+    .creditUseValid(requestHandshake && !incomingReq.allowRetry
+                    && (incomingReq.opcode != REQ_PCRD_RETURN)),
+    .creditUseClass(incomingReq.pCrdType),
     .creditReturnValid(reqInValid && reqInReady
                        && (incomingReq.opcode == REQ_PCRD_RETURN)),
-    .creditReturnClass(incomingReq.pCrdType[1:0]),
-    .cancelValid(datInValid && datInReady
-                 && (incomingDat.opcode == DAT_WRITE_DATA_CANCEL)),
-    .cancelClass(incomingReq.pCrdType[1:0]), .grantValid(retryGrantValid),
-    .grantReady(1'b0), .grantClass(retryGrantClass), .pendingCount(retryPending)
+    .creditReturnClass(incomingReq.pCrdType),
+    // Only one credit is outstanding at a time, so the resource the grant
+    // promises is still free when the credited request arrives.
+    .grantAllowed((state == HNF_IDLE) && posAllocReady && !sfBackInvValid
+                  && !retryCreditsPending),
+    .grantValid(retryGrantValid), .grantReady(retryGrantReady),
+    .grantTgtId(retryGrantTgtId), .grantClass(retryGrantClass),
+    .pendingCount(retryPending), .creditsOutstanding(retryOutstanding),
+    .creditsPending(retryCreditsPending)
   );
 
   always_ff @(posedge clk) begin

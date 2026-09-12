@@ -35,6 +35,11 @@ package chi_cfg_pkg;
   localparam int unsigned CHI_RSP_DBID_SLOT_W = 12;
   localparam int unsigned CHI_DAT_DBID_SLOT_W = 16;
 
+  // Request Retry supports up to 16 P-Credit types (IHI 0050H B2.10). The
+  // Home Node partitions its credits by request category, so it uses four.
+  localparam int unsigned CHI_MAX_CREDIT_TYPES = 16;
+  localparam int unsigned CHI_CREDIT_TYPES     = 4;
+
   typedef enum logic [1:0] {
     CROSSBAR = 2'b00,
     RING     = 2'b01,
@@ -93,6 +98,7 @@ package chi_cfg_pkg;
     int unsigned        snpFilterEntries;
     int unsigned        snpFilterWays;
     int unsigned        posEntries;
+    int unsigned        retryRecords;
     int unsigned        lcrdDepth;
     int unsigned        exclMonitors;
     int unsigned        interleaveGranule;
@@ -124,7 +130,7 @@ package chi_cfg_pkg;
     numIfPerNode: 1, replChannels: 1,
     topology: MESH_2D, meshX: 3, meshY: 3, numDevPortsPerXp: 2,
     snpFilterEntries: 1024, snpFilterWays: 4,
-    posEntries: 32, lcrdDepth: 8, exclMonitors: 32,
+    posEntries: 32, retryRecords: 16, lcrdDepth: 8, exclMonitors: 32,
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,
     mpamEn: 1'b0, mteEn: 1'b0, mecEn: 1'b0,
