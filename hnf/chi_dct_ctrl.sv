@@ -31,7 +31,12 @@ module chi_dct_ctrl #(
                    || (requestOpcode == REQ_READ_UNIQUE)
                    || (requestOpcode == REQ_READ_NOT_SHARED_DIRTY)
                    || (requestOpcode == REQ_READ_PREFER_UNIQUE);
+    // A Requester cannot forward a line to itself, so it is not a candidate
+    // forwarder even when it is the owner the snoop filter names. This term
+    // belongs here rather than after the opcode selection below, because the
+    // snoop opcode and RetToSrc both have to follow the decision.
     eligible = CFG.dctEn && coherentRead && forwarderKnown
+               && (forwarder != requester)
                && forwarderClean && dataPresent && dataFullLine
                && !dataPoison && !dataError && responseCompatible
                && (requestOrder != ORDER_ENDPOINT)
@@ -49,8 +54,6 @@ module chi_dct_ctrl #(
         snoopOpcode = eligible ? SNP_PREFER_UNIQUE_FWD : SNP_PREFER_UNIQUE;
       default: snoopOpcode = SNP_SHARED;
     endcase
-    if (forwarder == requester)
-      eligible = 1'b0;
     fallbackToHome = coherentRead && !eligible;
   end
 endmodule
