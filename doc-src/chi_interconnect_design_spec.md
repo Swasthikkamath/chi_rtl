@@ -234,7 +234,8 @@ combinational logic, which Section 12.6 records as a passing lint result.
 
 All count fields are unsigned. "No explicit maximum" means the elaboration
 checker has no direct bound; array size, NodeID capacity and tool resources
-still apply.
+still apply. This table states what each field does; Section 3.2 states why
+it is a parameter at all and what choosing it wrong costs.
 
 | Field | Default | Accepted by `chi_cfg_check` | Effect |
 |---|---:|---|---|
@@ -297,7 +298,188 @@ SNP 106 and DAT 437 bits. The formulas are `reqFlitWidth`, `rspFlitWidth`,
 field list so that a field added to a record cannot silently bypass the width
 helper.
 
-## 3.2 Top parameters and illegal combinations
+## 3.2 Why the design is configurable
+
+Configuration here answers two different questions, and it matters a great
+deal which one a given parameter answers.
+
+Some parameters exist because **CHI itself declares them configurable and
+both ends of a link must agree**. Getting one of those wrong is an
+interoperability failure, and no amount of verification inside the
+interconnect will find it, because the mismatch is at the boundary.
+
+The rest exist because **CHI is deliberately silent about
+microarchitecture**. Those are area, power and performance trade-offs.
+Getting one wrong costs throughput or area, not correctness.
+
+A third, smaller group is accepted by the elaboration checker but carries no
+behaviour yet. Those are listed separately at the end so they are not
+mistaken for working features.
+
+### 3.2.1 Parameters fixed by a declared CHI property
+
+CHI Chapter **B16.1, Interface properties and parameters**, defines the
+properties an implementation declares for an interface. Every one of them
+must match at both ends, because flit length and field position are derived
+from them. There is no negotiation on the wire and no self-describing header,
+so a mismatch is not an error that gets reported — it is a silent misparse of
+every flit on that channel, and the symptom appears as corrupted addresses or
+impossible opcodes far from the cause.
+
+| `chi_cfg_t` field | Declared CHI property | What a mismatch between the two ends produces |
+|---|---|---|
+| `dataW` | B16.1.13 `Data_Width` | Every DAT flit is the wrong length; data, byte enables and check bits all shift. |
+| `addrW` | B16.1.11 `Req_Addr_Width` | REQ and SNP lengths differ; addresses decode to the wrong region and the SAM targets the wrong node. |
+| `nodeIdW` | B16.1.12 `NodeID_Width` | `TgtID` and `SrcID` misalign on all four channels; responses return to the wrong Requester. |
+| `rsvdcW` | B16.1.28 `Req_RSVDC_Width`, B16.1.29 `Dat_RSVDC_Width` | REQ and DAT lengths differ. The field itself is user-defined, but its width is not. |
+| `mpamEn`, `mpamW` | B16.1.9 `MPAM_Support` | REQ and SNP lengths differ. A receiver that does not expect MPAM misreads every field above it. |
+| `dataCheckEn` | B16.1.6 `Data_Check` | DAT length differs, and end-to-end data integrity is silently unprotected. |
+| `poisonEn` | B16.1.4 `Data_Poison` | DAT length differs, and a poisoned line is delivered as valid data. |
+| `parityEn` | B16.1.7 `Check_Type` | Check signals are driven but ignored, or expected and undriven. |
+| `atomicEn` | B16.1.1 `Atomic_Transactions` | A Requester issues an atomic opcode the Home cannot decode. |
+| `stashEn` | B16.1.2 `Cache_Stash_Transactions` | Stash requests and stash snoops are not understood. |
+| `dmtEn` | B16.1.3 `Direct_Memory_Transfer` | The Subordinate does not know it must respond directly to the Requester. |
+| `dctEn` | B16.1.5 `Direct_Cache_Transfer` | A peer receives a forwarding snoop it cannot service. |
+| `dvmEn` | B16.1.22 `DVM_Support` | DVM operations are issued to a node that cannot complete them. |
+| `mteEn` | B16.1.23 `MTE_Support` | Memory tagging fields are misinterpreted. |
+| `mecEn` | B16.1.25 `MEC_Support`, B16.1.26 `MECID_Width` | REQ, SNP and DAT lengths differ, and realm isolation is lost. |
+| `cdaEn` | B16.1.16 `RME_Support` | `StreamID` and `SecSID1` are absent or misplaced in REQ. |
+| `pbhaEn` | B16.1.19 `PBHA_Support` | REQ length differs. |
+| `multiReqEn` | B16.1.39 `MultiReq_Support` | A multi-request transaction is treated as a single request. |
+| `retryRecords` | B16.1.38 `Retry_Support`, with B16.1.34 `Num_RP_REQ` and B16.1.35 `Shared_Credits_REQ` | The P-Credit pool the Requester believes exists does not match what the Home can track. |
+
+`dwtEn` has no row, and the reason is instructive. There is no declared
+property for Direct Write Transfer. It is requested per transaction through
+the `DoDWT` field of the REQ flit (B13.10.24), so a Home that does not
+implement it simply never sets the bit and no agreement is needed in advance.
+That is exactly why `dmtEn` mirrors a B16.1 property while `dwtEn` is a
+purely local choice.
+
+Because these properties set flit length, each one has a measurable price.
+The following are exact deltas against the default configuration, whose
+packed widths are REQ 153, RSP 79, SNP 106 and DAT 437 bits:
+
+| Change from the default | REQ | RSP | SNP | DAT | Total |
+|---|---:|---:|---:|---:|---:|
+| `nodeIdW` 11 to 16 | +15 | +10 | +10 | +15 | +50 |
+| `nodeIdW` 11 to 7 | -12 | -8 | -8 | -12 | -40 |
+| `addrW` 48 to 52 | +4 | 0 | +4 | 0 | +8 |
+| `dataW` 256 to 512 | 0 | 0 | 0 | +334 | +334 |
+| `dataW` 256 to 128 | 0 | 0 | 0 | -167 | -167 |
+| `rsvdcW` 0 to 32 | +32 | 0 | 0 | +32 | +64 |
+| `mpamEn` with `mpamW` 12 | +12 | 0 | +12 | 0 | +24 |
+| `mpamEn` with `mpamW` 15 | +15 | 0 | +15 | 0 | +30 |
+| `mecEn` | +16 | 0 | +16 | +16 | +48 |
+| `cdaEn` | +17 | 0 | 0 | 0 | +17 |
+| `pbhaEn` | +4 | 0 | 0 | 0 | +4 |
+| `dataCheckEn` off | 0 | 0 | 0 | -32 | -32 |
+| `poisonEn` off | 0 | 0 | 0 | -4 | -4 |
+
+Those totals are per flit, and every flit width is replicated across every
+port, every crosspoint and every receive buffer, so the cost multiplies by
+the fabric size. `nodeIdW` is the parameter to watch: it appears three times
+in REQ, twice in RSP, twice in SNP and three times in DAT, so a width chosen
+for future expansion is paid for on all four channels at once. The default of
+11 is the narrowest value that still encodes the default mesh placement, as
+Section 3.2.3 explains.
+
+`parityEn` behaves differently from the rest of the table: it does not change
+flit length, it adds a separate check bus alongside each channel, one bit per
+eight payload bits. At the default widths that is 20, 10, 14 and 55 wires for
+REQ, RSP, SNP and DAT respectively, per direction, per port.
+
+### 3.2.2 Parameters the specification leaves to the implementation
+
+For this group CHI states a requirement and then explicitly declines to
+constrain how it is met. B3.1 does this for the address map — "The exact
+format and structure of the SAM is IMPLEMENTATION DEFINED and is outside the
+scope of this specification" — and B3.2 does it for node identity: "Defining
+and assigning a node ID for each node in a system is IMPLEMENTATION DEFINED".
+Everything below is configurable because the specification left the choice
+open, not because interoperability demands it.
+
+| Field | Why it is a parameter | What you trade |
+|---|---|---|
+| `numRnf`, `numRnd`, `numRni`, `numSnf`, `numSni` | The system population is not a protocol property. | Port count, and for `numRnf` the Home sharer-vector width and snoop walk length. |
+| `numHnf`, `numHni`, `numMn` | Home count sets coherent throughput and interleaving. | More Homes means more parallelism and more directory area. |
+| `topology` | CHI specifies no transport. Any network that delivers flits is legal. | See Section 5: crossbar for latency, ring for area, mesh for scale. |
+| `meshX`, `meshY`, `numDevPortsPerXp` | Mesh shape is microarchitecture. | Hop count against crosspoint count; also consumes NodeID bits. |
+| `snpFilterEntries`, `snpFilterWays` | CHI requires a Home to track sharers but not how. | Directory area against back-invalidation traffic. See Section 3.2.3. |
+| `posEntries` | Transaction tracking depth is unspecified. | Hazard visibility. It does not currently buy throughput. |
+| `retryRecords` | The Home decides how many retried Requesters it will remember. | Retry table area against how often the Home must back-pressure instead of retrying. |
+| `lcrdDepth` | CHI fixes the credit protocol, not the pool size. | Receive-buffer area against sustainable throughput. See Section 3.2.3. |
+| `exclMonitors` | Monitor count is unspecified; the architecture permits spurious failure. | Monitor area against the spurious exclusive-failure rate. |
+| `interleaveGranule`, `hnHashShift` | Address-to-Home mapping is part of the SAM, so it is implementation defined. | Stripe size against locality and hot-spotting. |
+| `txnIdW` | The flit slot is a fixed 12 bits; how many a node uses is its own business. | Outstanding transactions per Requester against tracking area. |
+| `lpidW`, `ccidW`, `groupIdW` | These occupy fixed flit slots. The parameter sets how many bits are significant. | Only internal comparator and storage width. Flit length is unaffected. |
+| `cfgAccess` | CHI defines no register map, as Section 7 explains. | No runtime writes, a second bus protocol, or CHI-MMIO traffic. |
+| `NUM_REGIONS` | SAM depth follows the system memory map. | Region table area against map flexibility. |
+| `AGE_LIMIT` | Arbitration policy is unspecified. | Starvation bound against fairness overhead. |
+| `NODE_IDS`, `PLACEMENTS` | B3.2 assigns this to the implementation. | Physical placement against route length. Must be collision-free. |
+
+### 3.2.3 Choosing the resource depths
+
+Four of these parameters need real reasoning rather than a default, and two
+of the defaults are deliberately unrealistic.
+
+**`lcrdDepth` is set by the round trip, not by burst size.** A credit is
+returned only after the receiver pops the flit, so the sustainable rate is
+`lcrdDepth` flits per credit round-trip latency. If the round trip is eight
+cycles, `lcrdDepth` of 8 sustains one flit per cycle and anything less
+stalls the channel even when the receiver is completely idle. This is why the
+elaboration checker enforces a minimum of 2 rather than 1: a single credit
+serialises the channel to one flit per round trip. The default of 8 matches
+the internal crosspoint latency of the default mesh.
+
+**`snpFilterEntries` must cover the aggregate of the caches it tracks.** A
+directory smaller than the sum of the RN-F caches cannot hold every live
+line, so it evicts lines that are still cached, and every such eviction
+becomes a back-invalidation snoop — real traffic caused purely by directory
+capacity. The default of 1024 entries across 4 ways, tracking 4 RN-F, is
+sized for simulation speed and is far too small for a real system; four
+Requesters with even a 512-line cache each need 2048 entries before capacity
+back-invalidations stop. Size this from the actual cache sizes, not from the
+default.
+
+**`posEntries` does not currently buy throughput.** The Home has one globally
+serial FSM, so although the POS holds `posEntries` entries and `chi_hazard`
+checks a new request against all of them, only one transaction advances at a
+time. Increasing it improves hazard visibility and nothing else. It becomes a
+throughput parameter only once the FSM is pipelined, which Section 9.1 lists
+as a known limitation.
+
+**`retryRecords` bounds how many Requesters can be waiting for a P-Credit.**
+When the table is full this design back-pressures the request rather than
+issuing another `RetryAck`, which keeps credit accounting exact at the cost of
+holding the channel. Section 9.3 covers why that choice was made. Sizing it
+below the number of Requesters guarantees back-pressure under load.
+
+**`nodeIdW` has a floor set by the mesh geometry, not by the node count.**
+The NodeID encodes the routing fields, so
+`deviceIdWidth = nodeIdW - clog2(meshY) - clog2(meshX) - clog2(numDevPortsPerXp)`
+must stay positive. At the default 3 by 3 mesh with 2 device ports that is
+`11 - 2 - 2 - 1 = 6` bits left for the device identifier. Widening the mesh
+therefore consumes NodeID bits, and elaboration rejects a combination where
+nothing is left. This is the one parameter in Section 3.2.1 whose value is
+constrained by a Section 3.2.2 choice, which is why it cannot simply be set
+to the minimum the node count would allow.
+
+### 3.2.4 Parameters accepted but not yet honoured
+
+These are validated by `chi_cfg_check` so that an illegal value is rejected
+early, but no RTL consumes them as behaviour. They are configuration surface
+reserved for later work, not features.
+
+| Field | Current status |
+|---|---|
+| `numIfPerNode` | Must be exactly 1. Multiple interfaces per node are rejected, consistent with the single-`chi_if` decision in Section 4.1. |
+| `replChannels` | Must be exactly 1. Channel replication is rejected. |
+| `multiReqEn` | Checked only. `MultiReq` and `CacheLineID` are carried in the flit but no multi-request behaviour exists. |
+| `mteEn` | Affects DCT eligibility only. No MTE tag semantics are implemented. |
+| `pbhaEn` | Adds the field to REQ. The attributes are carried, never acted on. |
+| `mpamEn`, `mpamW` | The MPAM bus is carried end to end but no partition is enforced. |
+
+## 3.3 Top parameters and illegal combinations
 
 | Parameter | Default and legal rule | Effect |
 |---|---|---|
@@ -318,7 +500,7 @@ collide. Default placement is valid only for the default 14-node population.
 HN-F to SN-F and HN-I to SN-I striping uses modulo, so the nonzero
 subordinate checks are essential.
 
-## 3.3 Top-level ports beyond the interfaces
+## 3.4 Top-level ports beyond the interfaces
 
 | Port | Direction | Width | Purpose |
 |---|---|---:|---|
@@ -1041,7 +1223,7 @@ The harnesses `chi_hnf_compile`, `chi_link_compile`, `chi_mesh_compile`,
 ## 12.7 Reset, link bring-up and idle smoke run
 
 Lint elaborates the design but never executes it, so neither the
-`chi_cfg_check` elaboration checks of Section 3.2 nor any bound assertion
+`chi_cfg_check` elaboration checks of Section 3.3 nor any bound assertion
 actually runs during a lint pass. `tb/chi_smoke_tb.sv` closes that gap:
 
 ```sh
