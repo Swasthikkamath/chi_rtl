@@ -38,7 +38,12 @@ module chi_interconnect_top #(
   input  logic [2:0] PPROT,
   output logic [31:0] PRDATA,
   output logic PREADY,
-  output logic PSLVERR
+  output logic PSLVERR,
+  // Link status per node ordinal. Bits for the internal HN-F, HN-I and MN
+  // endpoints read zero because those have no external link.
+  output logic [NUM_NODES-1:0] linkUp,
+  output logic [NUM_NODES-1:0] linkParityError,
+  output logic [NUM_NODES-1:0] linkCreditError
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -626,6 +631,9 @@ module chi_interconnect_top #(
                   portDatRxFlit}); \
       assign rspOutReady[OFFSET+i] = portRspTxReady; \
       assign datOutReady[OFFSET+i] = portDatTxReady; \
+      assign linkUp[OFFSET+i] = portLinkUp; \
+      assign linkParityError[OFFSET+i] = portParityError; \
+      assign linkCreditError[OFFSET+i] = portCreditError; \
     end \
   end
 
@@ -635,6 +643,12 @@ module chi_interconnect_top #(
   `CHI_CONNECT_PORT(snf, CFG.numSnf, OFF_SNF, 1'b0)
   `CHI_CONNECT_PORT(sni, CFG.numSni, OFF_SNI, 1'b0)
 `undef CHI_CONNECT_PORT
+
+  for (genvar i = OFF_HNF; i < NUM_NODES; i++) begin : internal_node_status
+    assign linkUp[i] = 1'b0;
+    assign linkParityError[i] = 1'b0;
+    assign linkCreditError[i] = 1'b0;
+  end
 
   for (genvar i = 0; i < CFG.numHnf; i++) begin : hnf_nodes
     chi_hnf_top #(
