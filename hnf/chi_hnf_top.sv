@@ -414,9 +414,15 @@ module chi_hnf_top #(
     datOutFlit.payload = packDatFlit(CFG, requesterDat);
     datOutValid = 1'b0;
 
+    // A ReadReceipt from the Subordinate is not forwarded: the Requester has
+    // already had the Home's own ReadReceipt from HNF_ORDER_RECEIPT and must
+    // see only one (IHI 0050H B2.7.3). It is drained in the ready block below,
+    // so forwarding it would also drop a presented response flit whenever the
+    // Requester is not ready.
     if ((state == HNF_WAIT_RESPONSE) && rspInValid
         && (incomingRsp.opcode != RSP_SNP_RESP)
-        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED))
+        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED)
+        && (incomingRsp.opcode != RSP_READ_RECEIPT))
       rspOutValid = 1'b1;
     if ((state == HNF_WAIT_RESPONSE) && datInValid)
       datOutValid = 1'b1;
@@ -508,7 +514,8 @@ module chi_hnf_top #(
 
     if ((state == HNF_WAIT_RESPONSE) && rspInValid
         && (incomingRsp.opcode != RSP_SNP_RESP)
-        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED))
+        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED)
+        && (incomingRsp.opcode != RSP_READ_RECEIPT))
       rspInReady = rspOutReady;
     if ((state == HNF_WAIT_RESPONSE) && datInValid)
       datInReady = datOutReady;
