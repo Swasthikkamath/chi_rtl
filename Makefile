@@ -21,8 +21,11 @@ SIM_SRC = tb/chi_node_link_bfm.sv tb/chi_sim_harness.sv tb/chi_smoke_tb.sv
 SIM_BIN = obj_dir/chi_smoke
 
 DOT       ?= dot
+PYTHON    ?= python3
 DOC_SRC    = doc-src/chi_interconnect_design_spec.md
 DOC_OUT    = docs/chi_interconnect_design_spec.docx
+DOC_REF    = doc-src/reference.docx
+DOC_FILTER = doc-src/house_style.lua
 FIG_DIR    = doc-src/figures
 FIG_DOT    = $(wildcard $(FIG_DIR)/*.dot)
 FIG_PNG    = $(FIG_DOT:.dot=.png)
@@ -73,9 +76,16 @@ figures: $(FIG_PNG)
 $(FIG_DIR)/%.png: $(FIG_DIR)/%.dot
 	$(DOT) -Tpng -Gdpi=150 -o $@ $<
 
-$(DOC_OUT): $(DOC_SRC) $(FIG_PNG)
+# The Word template carries the house style of the document series: page
+# geometry, fonts, table rules, caption placement and the footer. It is built
+# from a script so the styles are reviewable as text rather than as a binary.
+$(DOC_REF): doc-src/build_reference_docx.py
+	$(PYTHON) doc-src/build_reference_docx.py $@
+
+$(DOC_OUT): $(DOC_SRC) $(FIG_PNG) $(DOC_REF) $(DOC_FILTER)
 	@mkdir -p docs
 	$(PANDOC) $(DOC_SRC) --toc --toc-depth=2 \
+	  --lua-filter=$(DOC_FILTER) --reference-doc=$(DOC_REF) \
 	  --resource-path=doc-src -o $@
 
 clean:
