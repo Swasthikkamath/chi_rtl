@@ -25,6 +25,7 @@ module chi_hnf_compile (
   logic rspOutValid;
   logic snpOutValid;
   logic datOutValid;
+  logic hnfIdle;
   chi_noc_flit_t reqOutFlit;
   chi_noc_flit_t rspOutFlit;
   chi_noc_flit_t snpOutFlit;
@@ -42,7 +43,8 @@ module chi_hnf_compile (
     .reqOutValid, .reqOutReady(1'b1), .reqOutFlit,
     .rspOutValid, .rspOutReady(1'b1), .rspOutFlit,
     .snpOutValid, .snpOutReady(1'b1), .snpOutFlit,
-    .datOutValid, .datOutReady(1'b1), .datOutFlit
+    .datOutValid, .datOutReady(1'b1), .datOutFlit,
+    .idle(hnfIdle)
   );
 
   generate

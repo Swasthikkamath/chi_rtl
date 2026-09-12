@@ -50,8 +50,7 @@ module chi_router #(
     for (int unsigned outputIndex = 0;
          outputIndex < NUM_PORTS; outputIndex++) begin
       selectedFlit[outputIndex] = '0;
-      outputBufferReady[outputIndex] =
-        !outputBufferValid[outputIndex] || outReady[outputIndex];
+      outputBufferReady[outputIndex] = !outputBufferValid[outputIndex];
       outValid[outputIndex] = outputBufferValid[outputIndex];
       outFlit[outputIndex] = outputBufferFlit[outputIndex];
       for (int unsigned inputIndex = 0;
@@ -79,13 +78,14 @@ module chi_router #(
     end else begin
       for (int unsigned outputIndex = 0;
            outputIndex < NUM_PORTS; outputIndex++) begin
-        if (outputBufferReady[outputIndex]) begin
-          outputBufferValid[outputIndex] <= routeGrantValid[outputIndex];
-          if (routeGrantValid[outputIndex]) begin
-            outputBufferFlit[outputIndex] <= selectedFlit[outputIndex];
-          end else begin
+        if (outputBufferValid[outputIndex]) begin
+          if (outReady[outputIndex]) begin
+            outputBufferValid[outputIndex] <= 1'b0;
             outputBufferFlit[outputIndex] <= '0;
           end
+        end else if (routeGrantValid[outputIndex]) begin
+          outputBufferValid[outputIndex] <= routeGrantValid[outputIndex];
+          outputBufferFlit[outputIndex] <= selectedFlit[outputIndex];
         end
       end
     end

@@ -29,3 +29,12 @@ hnf/chi_cmo.sv
 hnf/chi_excl_mon.sv
 hnf/chi_hnf_top.sv
 top/chi_interconnect_top.sv
+top/chi_link_compile.sv
+top/chi_hnf_compile.sv
+sva/chi_link_sva.sv
+sva/chi_link_rx_sva.sv
+sva/chi_proto_sva.sv
+sva/chi_mn_sva.sv
+sva/chi_ordering_sva.sv
+sva/chi_hnf_ordering_sva.sv
+top/chi_sva_compile.sv
