@@ -29,16 +29,19 @@ verilator --lint-only --sv -Wall -Wno-fatal \
   -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN \
   -f filelist.f --top-module chi_interconnect_top
 
-verilator --lint-only --sv -Wall -Wno-fatal \
+verilator --lint-only --assert --sv -Wall -Wno-fatal \
   -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN \
+  -Wno-BLKLOOPINIT \
   -f filelist.f --top-module chi_sva_compile
 ```
 
 The unused-signal/parameter suppressions cover superset protocol records,
 optional ports, and harness-only fields. `UNDRIVEN` covers external `chi_if`
 inputs that have no node model in lint tops. `Wno-fatal` preserves warning
-visibility without treating warnings as errors. Icarus Verilog was not
-available in the verified environment.
+visibility without treating warnings as errors. `BLKLOOPINIT` is suppressed
+for Verilator 5.020's limitation on nonblocking initialization of unpacked
+directory arrays; the syntax remains accepted by synthesis tools. Icarus
+Verilog was not available in the verified environment.
 
 ## Directory map
 

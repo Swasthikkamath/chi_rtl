@@ -779,8 +779,9 @@ verilator --lint-only --sv -Wall -Wno-fatal \
   -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN \
   -f filelist.f --top-module chi_interconnect_top
 
-verilator --lint-only --sv -Wall -Wno-fatal \
+verilator --lint-only --assert --sv -Wall -Wno-fatal \
   -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN \
+  -Wno-BLKLOOPINIT \
   -f filelist.f --top-module chi_sva_compile
 ```
 
@@ -789,8 +790,10 @@ records, optional ports, and compile harnesses intentionally expose fields not
 consumed in every generated configuration. `UNDRIVEN` is suppressed because
 the lint tops do not instantiate external node drivers for `chi_if`.
 `Wno-fatal` allows other warnings to be reported without converting them to
-failure. Supplemental harnesses can be checked by appending the harness file
-and selecting it as top, for example:
+failure. `BLKLOOPINIT` is suppressed for Verilator 5.020's limitation on
+nonblocking initialization loops over the unpacked snoop-filter arrays.
+Supplemental harnesses can be checked by appending the harness file and
+selecting it as top, for example:
 
 ```sh
 verilator --lint-only --sv -Wall -Wno-fatal \
