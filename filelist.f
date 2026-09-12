@@ -9,7 +9,13 @@ link/chi_link_rx.sv
 noc/chi_vc_arb.sv
 noc/chi_xbar.sv
 noc/chi_ring.sv
+noc/chi_route_compute.sv
+noc/chi_router.sv
+noc/chi_mesh_xp.sv
+noc/chi_mesh.sv
+noc/chi_noc_top.sv
 top/chi_stage1_compile.sv
 top/chi_link_compile.sv
 top/chi_xbar_compile.sv
 top/chi_ring_compile.sv
+top/chi_mesh_compile.sv
