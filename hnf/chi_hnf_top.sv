@@ -39,12 +39,13 @@ module chi_hnf_top #(
   localparam int unsigned DAT_BYTES = CFG.dataW / 8;
   localparam int unsigned DAT_OFF_W = clog2Min1(DAT_BYTES);
 
-  typedef enum logic [3:0] {
+  typedef enum logic [4:0] {
     HNF_IDLE, HNF_SNOOP_START, HNF_SNOOP_WAIT, HNF_REQ_SEND,
     HNF_WAIT_RESPONSE, HNF_WAIT_COMP_ACK, HNF_BACKINV_START,
     HNF_BACKINV_WAIT, HNF_ATOMIC_DBID, HNF_ATOMIC_OPERAND,
     HNF_ATOMIC_READ, HNF_ATOMIC_INITIAL, HNF_ATOMIC_WRITE,
-    HNF_ATOMIC_WDATA, HNF_ATOMIC_WCOMP, HNF_ATOMIC_RETURN
+    HNF_ATOMIC_WDATA, HNF_ATOMIC_WCOMP, HNF_ATOMIC_RETURN,
+    HNF_ORDER_RECEIPT, HNF_DMT_RESP
   } hnf_state_e;
   hnf_state_e state;
 
@@ -137,6 +138,20 @@ module chi_hnf_top #(
   logic activeNeedPersist;
   logic activeGotComp;
   logic activeGotPersist;
+
+  logic dmtEligible;
+  logic dmtSeparateResponse;
+  logic [CHI_NODEID_SLOT_W-1:0] dmtReturnNid;
+  logic [CHI_TXNID_FLIT_W-1:0] dmtReturnTxnId;
+  logic dwtEligible;
+  logic dwtDoDwt;
+  logic [CHI_NODEID_SLOT_W-1:0] dwtReturnNid;
+  logic [CHI_TXNID_FLIT_W-1:0] dwtReturnTxnId;
+  logic activeDmt;
+  logic activeDmtSeparate;
+  logic activeDwt;
+  logic orderedReceiptRequired;
+  chi_rsp_flit_t orderResponse;
 
   logic atomicRequest;
   logic activeAtomic;
@@ -280,6 +295,14 @@ module chi_hnf_top #(
     downstreamReq = activeReq;
     downstreamReq.tgtId = SN_NODE_ID;
     downstreamReq.srcId = HN_NODE_ID;
+    // A direct transfer names the Requester in the downstream request and
+    // uses a Home-unique TxnID that the Subordinate reflects as DBID.
+    if (activeDmt || activeDwt) begin
+      downstreamReq.txnId = CHI_TXNID_FLIT_W'(activePosIndex);
+      downstreamReq.returnNidOrStashNidOrDataTarget = activeReq.srcId;
+      downstreamReq.returnTxnIdOrStashLpid = activeReq.txnId;
+      downstreamReq.snpAttrOrDoDwt = activeDwt;
+    end
     reqOutFlit = '0;
     reqOutFlit.channel = CHI_CHANNEL_REQ;
     reqOutFlit.targetNodeId = SN_NODE_ID;
@@ -291,7 +314,9 @@ module chi_hnf_top #(
     responseFlit.tgtId = activeReq.srcId;
     responseFlit.srcId = HN_NODE_ID;
     responseFlit.txnId = activeReq.txnId;
-    if (COMBINED_COMP_DBID && activeWrite
+    // With DWT the Subordinate has already sent DBIDResp to the Requester, so
+    // the Home must forward only the completion.
+    if (COMBINED_COMP_DBID && activeWrite && !activeDwt
         && (incomingRsp.opcode == RSP_COMP))
       responseFlit.opcode = RSP_COMP_DBID_RESP;
     if (activeReq.exclOrSnoopMeOrCah && activeExclOkay)
@@ -332,6 +357,18 @@ module chi_hnf_top #(
     // atomic operates on, which removes the downstream read.
     if ((state == HNF_SNOOP_WAIT) && activeAtomic)
       datInReady = 1'b1;
+
+    if ((state == HNF_ORDER_RECEIPT) || (state == HNF_DMT_RESP)) begin
+      rspOutValid = 1'b1;
+      rspOutFlit.targetNodeId = activeReq.srcId;
+      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
+        packRspFlit(CFG, orderResponse);
+    end
+
+    // A ReadReceipt from the Subordinate is optional and carries no state the
+    // Home needs once the read has been forwarded, so it is always drained.
+    if (rspInValid && (incomingRsp.opcode == RSP_READ_RECEIPT))
+      rspInReady = 1'b1;
     if (state == HNF_WAIT_COMP_ACK)
       rspInReady = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
                    && (incomingRsp.srcId == activeReq.srcId);
@@ -438,6 +475,46 @@ module chi_hnf_top #(
     .fallbackToHome(dctFallback), .snoopOpcode(dctOpcode),
     .fwdNid(dctFwdNid), .fwdTxnId(dctFwdTxn), .retToSrc(dctRetToSrc)
   );
+
+  chi_dmt_ctrl #(.CFG(CFG)) dmt_ctrl (
+    .requestOpcode(incomingReq.opcode), .requestOrder(incomingReq.order),
+    .requester(incomingReq.srcId), .requesterTxnId(incomingReq.txnId),
+    .snoopRequired(sfHit && (sfSharers != '0)), .errorDetected(1'b0),
+    .exclusiveAccess(incomingReq.exclOrSnoopMeOrCah),
+    .atomicAccess(atomicRequest), .eligible(dmtEligible),
+    .separateResponse(dmtSeparateResponse), .returnNid(dmtReturnNid),
+    .returnTxnId(dmtReturnTxnId)
+  );
+
+  chi_dwt_ctrl #(.CFG(CFG)) dwt_ctrl (
+    .requestOpcode(incomingReq.opcode), .requestOrder(incomingReq.order),
+    .requester(incomingReq.srcId), .requesterTxnId(incomingReq.txnId),
+    .snoopRequired(sfHit && (sfSharers != '0)), .errorDetected(1'b0),
+    .exclusiveAccess(incomingReq.exclOrSnoopMeOrCah),
+    .atomicAccess(atomicRequest),
+    .tagOperation(incomingReq.tagOp != TAG_OP_INVALID),
+    .eligible(dwtEligible), .doDwt(dwtDoDwt), .returnNid(dwtReturnNid),
+    .returnTxnId(dwtReturnTxnId)
+  );
+
+  // ReadReceipt tells the Requester its request has been accepted and will
+  // not be retried, which is what Order = Request accepted asks for
+  // (IHI 0050H B2.7).
+  always_comb begin
+    orderedReceiptRequired = (incomingReq.order == ORDER_REQUEST_ACCEPTED)
+                             && ((incomingReq.opcode == REQ_READ_NO_SNP)
+                                 || (incomingReq.opcode == REQ_READ_NO_SNP_SEP)
+                                 || (incomingReq.opcode == REQ_READ_ONCE));
+    orderResponse = '0;
+    orderResponse.qos = activeReq.qos;
+    orderResponse.tgtId = activeReq.srcId;
+    orderResponse.srcId = HN_NODE_ID;
+    orderResponse.txnId = activeReq.txnId;
+    orderResponse.opcode = (state == HNF_ORDER_RECEIPT)
+                           ? RSP_READ_RECEIPT : RSP_RESP_SEP_DATA;
+    orderResponse.resp = RESP_I;
+    orderResponse.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(activePosIndex);
+  end
 
   always_comb begin
     atomicByteOffset = activeReq.addr[DAT_OFF_W-1:0];
@@ -637,6 +714,9 @@ module chi_hnf_top #(
       activeGotComp <= 1'b0;
       activeGotPersist <= 1'b0;
       activeAtomic <= 1'b0;
+      activeDmt <= 1'b0;
+      activeDmtSeparate <= 1'b0;
+      activeDwt <= 1'b0;
       atomicOperandBuffer <= '0;
       atomicInitialBuffer <= '0;
       atomicInitialFromSnoop <= 1'b0;
@@ -660,6 +740,9 @@ module chi_hnf_top #(
             activePosIndex <= posAllocIndex;
             activeCoherent <= coherentRequest;
             activeAtomic <= atomicRequest;
+            activeDmt <= dmtEligible;
+            activeDmtSeparate <= dmtEligible && dmtSeparateResponse;
+            activeDwt <= dwtEligible && dwtDoDwt;
             atomicInitialFromSnoop <= 1'b0;
             atomicDbidSeen <= 1'b0;
             atomicCompSeen <= 1'b0;
@@ -674,8 +757,10 @@ module chi_hnf_top #(
             activeNeedPersist <= cmoPersist;
             activeGotComp <= 1'b0;
             activeGotPersist <= !cmoPersist;
-            if ((coherentRequest || activeCmo || atomicRequest) && sfHit
-                && (sfSharers != '0))
+            if (orderedReceiptRequired)
+              state <= HNF_ORDER_RECEIPT;
+            else if ((coherentRequest || activeCmo || atomicRequest) && sfHit
+                     && (sfSharers != '0))
               state <= HNF_SNOOP_START;
             else if (atomicRequest)
               state <= HNF_ATOMIC_DBID;
@@ -748,9 +833,40 @@ module chi_hnf_top #(
             state <= activeReq.expCompAck ? HNF_WAIT_COMP_ACK : HNF_IDLE;
           end
         end
+        HNF_ORDER_RECEIPT:
+          if (rspOutValid && rspOutReady) begin
+            if (activeAtomic)
+              state <= HNF_ATOMIC_DBID;
+            else if (activeNeedsSnoop)
+              state <= HNF_SNOOP_START;
+            else
+              state <= HNF_REQ_SEND;
+          end
         HNF_REQ_SEND:
-          if (reqOutValid && reqOutReady)
-            state <= HNF_WAIT_RESPONSE;
+          if (reqOutValid && reqOutReady) begin
+            // With DMT the read data goes straight from the Subordinate to
+            // the Requester, so the Home leaves the data path entirely.
+            if (activeDmt && activeDmtSeparate)
+              state <= HNF_DMT_RESP;
+            else if (activeDmt) begin
+              if (activeReq.expCompAck)
+                state <= HNF_WAIT_COMP_ACK;
+              else begin
+                state <= HNF_IDLE;
+                posFree <= 1'b1;
+              end
+            end else
+              state <= HNF_WAIT_RESPONSE;
+          end
+        HNF_DMT_RESP:
+          if (rspOutValid && rspOutReady) begin
+            if (activeReq.expCompAck)
+              state <= HNF_WAIT_COMP_ACK;
+            else begin
+              state <= HNF_IDLE;
+              posFree <= 1'b1;
+            end
+          end
         HNF_WAIT_RESPONSE: begin
           if (rspInValid && rspInReady) begin
             if ((incomingRsp.opcode == RSP_COMP)

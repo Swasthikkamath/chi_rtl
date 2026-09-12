@@ -26,6 +26,8 @@ hnf/chi_snp_gen.sv
 hnf/chi_retry.sv
 hnf/chi_dct_ctrl.sv
 hnf/chi_atomic_alu.sv
+hnf/chi_dmt_ctrl.sv
+hnf/chi_dwt_ctrl.sv
 hnf/chi_cmo.sv
 hnf/chi_excl_mon.sv
 hnf/chi_hnf_top.sv
