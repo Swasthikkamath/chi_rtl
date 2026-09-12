@@ -695,6 +695,69 @@ package chi_pkg;
     return flit;
   endfunction
 
+  // An LCrdReturn is identified by a zero Opcode, and every other field except
+  // TxnID is unused and can carry any value (IHI 0050H B13.11). The Link layer
+  // therefore has to look at the Opcode field alone, without unpacking the
+  // flit, so each channel exports a mask of the bits that field occupies. The
+  // mask is built by packing the field set to each of its bit positions in
+  // turn, which keeps it tied to the pack function rather than to a hand
+  // written offset.
+  function automatic logic [CHI_MAX_REQ_FLIT_W-1:0] reqOpcodeMask(
+    input chi_cfg_t cfg
+  );
+    chi_req_flit_t probe;
+    logic [CHI_MAX_REQ_FLIT_W-1:0] mask;
+    mask = '0;
+    for (int unsigned b = 0; b < 7; b++) begin
+      probe = '0;
+      probe.opcode = chi_req_opcode_e'(7'(32'd1 << b));
+      mask = mask | packReqFlit(cfg, probe);
+    end
+    return mask;
+  endfunction
+
+  function automatic logic [CHI_MAX_RSP_FLIT_W-1:0] rspOpcodeMask(
+    input chi_cfg_t cfg
+  );
+    chi_rsp_flit_t probe;
+    logic [CHI_MAX_RSP_FLIT_W-1:0] mask;
+    mask = '0;
+    for (int unsigned b = 0; b < 5; b++) begin
+      probe = '0;
+      probe.opcode = chi_rsp_opcode_e'(5'(32'd1 << b));
+      mask = mask | packRspFlit(cfg, probe);
+    end
+    return mask;
+  endfunction
+
+  function automatic logic [CHI_MAX_SNP_FLIT_W-1:0] snpOpcodeMask(
+    input chi_cfg_t cfg
+  );
+    chi_snp_flit_t probe;
+    logic [CHI_MAX_SNP_FLIT_W-1:0] mask;
+    mask = '0;
+    for (int unsigned b = 0; b < 5; b++) begin
+      probe = '0;
+      probe.opcode = chi_snp_opcode_e'(5'(32'd1 << b));
+      mask = mask | packSnpFlit(cfg, probe);
+    end
+    return mask;
+  endfunction
+
+  function automatic logic [CHI_MAX_DAT_FLIT_W-1:0] datOpcodeMask(
+    input chi_cfg_t cfg
+  );
+    chi_dat_flit_t probe;
+    logic [CHI_MAX_DAT_FLIT_W-1:0] mask;
+    mask = '0;
+    for (int unsigned b = 0; b < 4; b++) begin
+      probe = '0;
+      probe.opcode = chi_dat_opcode_e'(4'(32'd1 << b));
+      mask = mask | packDatFlit(cfg, probe);
+    end
+    return mask;
+  endfunction
+
 `undef CHI_PACK_FIELD
 `undef CHI_UNPACK_FIELD
 `undef CHI_PACK_BIT

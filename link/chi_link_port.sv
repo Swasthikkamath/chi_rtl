@@ -65,6 +65,18 @@ module chi_link_port #(
   localparam int unsigned SNP_CHK_W = parityWidth(SNP_FLIT_W);
   localparam int unsigned DAT_CHK_W = parityWidth(DAT_FLIT_W);
   localparam logic [1:0] LINK_RUN = 2'b10;
+  localparam logic [CHI_MAX_REQ_FLIT_W-1:0] REQ_OPCODE_MASK_FULL =
+    reqOpcodeMask(CFG);
+  localparam logic [CHI_MAX_RSP_FLIT_W-1:0] RSP_OPCODE_MASK_FULL =
+    rspOpcodeMask(CFG);
+  localparam logic [CHI_MAX_DAT_FLIT_W-1:0] DAT_OPCODE_MASK_FULL =
+    datOpcodeMask(CFG);
+  localparam logic [REQ_FLIT_W-1:0] REQ_OPCODE_MASK =
+    REQ_OPCODE_MASK_FULL[REQ_FLIT_W-1:0];
+  localparam logic [RSP_FLIT_W-1:0] RSP_OPCODE_MASK =
+    RSP_OPCODE_MASK_FULL[RSP_FLIT_W-1:0];
+  localparam logic [DAT_FLIT_W-1:0] DAT_OPCODE_MASK =
+    DAT_OPCODE_MASK_FULL[DAT_FLIT_W-1:0];
 
   logic txLinkActiveReq;
   logic txLinkActiveAck;
@@ -251,7 +263,8 @@ module chi_link_port #(
   if (REQUESTER_PORT) begin : req_receiver
     chi_link_rx #(
       .CFG(CFG), .FLIT_W(REQ_FLIT_W), .LCRD_DEPTH(LCRD_DEPTH),
-      .PARITY_EN(CFG.parityEn), .COUNT_W(COUNT_W)
+      .PARITY_EN(CFG.parityEn), .COUNT_W(COUNT_W),
+      .OPCODE_MASK(REQ_OPCODE_MASK)
     ) req_rx (
       .clk, .resetn, .LINKACTIVEREQ(txLinkActiveReq),
       .LINKACTIVEACK(reqRxActive), .FLITV(nodeReqFlitV),
@@ -277,7 +290,8 @@ module chi_link_port #(
 
   chi_link_rx #(
     .CFG(CFG), .FLIT_W(RSP_FLIT_W), .LCRD_DEPTH(LCRD_DEPTH),
-    .PARITY_EN(CFG.parityEn), .COUNT_W(COUNT_W)
+    .PARITY_EN(CFG.parityEn), .COUNT_W(COUNT_W),
+    .OPCODE_MASK(RSP_OPCODE_MASK)
   ) rsp_rx (
     .clk, .resetn, .LINKACTIVEREQ(txLinkActiveReq),
     .LINKACTIVEACK(rspRxActive), .FLITV(nodeRspFlitV),
@@ -291,7 +305,8 @@ module chi_link_port #(
 
   chi_link_rx #(
     .CFG(CFG), .FLIT_W(DAT_FLIT_W), .LCRD_DEPTH(LCRD_DEPTH),
-    .PARITY_EN(CFG.parityEn), .COUNT_W(COUNT_W)
+    .PARITY_EN(CFG.parityEn), .COUNT_W(COUNT_W),
+    .OPCODE_MASK(DAT_OPCODE_MASK)
   ) dat_rx (
     .clk, .resetn, .LINKACTIVEREQ(txLinkActiveReq),
     .LINKACTIVEACK(datRxActive), .FLITV(nodeDatFlitV),

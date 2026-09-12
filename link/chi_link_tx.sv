@@ -31,12 +31,16 @@ module chi_link_tx #(
   output logic                  creditUnderflow,
   output logic [1:0]            linkState
 );
+  localparam logic [1:0] LINK_DEACTIVATE = 2'b11;
+
   logic creditAvailable;
   logic creditsFull;
   logic linkRun;
   logic laneSelected;
   int unsigned laneIndex;
   logic flitTransfer;
+  logic lcrdReturnSend;
+  logic [FLIT_W-1:0] outboundFlit;
   logic deactivateSafe;
 
   always_comb begin
@@ -48,8 +52,17 @@ module chi_link_tx #(
     end
     internalReady = linkRun && creditAvailable && laneSelected;
     flitTransfer = internalValid && internalReady;
-    deactivateSafe = deactivate && creditsFull
-                   && !(internalValid && laneSelected);
+    // Every credit still held when the link deactivates has to be handed back
+    // with an LCrdReturn flit, and the link stays in DEACTIVATE until the last
+    // one has gone (IHI 0050H B13.11, B14.6.3.2). An LCrdReturn is a zero
+    // Opcode and a zero TxnID with every other field unused, so an all-zero
+    // flit is one.
+    lcrdReturnSend = (linkState == LINK_DEACTIVATE) && creditAvailable;
+    outboundFlit = lcrdReturnSend ? '0 : internalFlit;
+    // Deactivation only waits for the protocol side to go quiet; the credits
+    // are returned from the DEACTIVATE state itself rather than collected
+    // before entering it.
+    deactivateSafe = deactivate && !(internalValid && laneSelected);
   end
 
   chi_lcrd_mgr #(
@@ -60,7 +73,7 @@ module chi_link_tx #(
     .resetn(resetn),
     .creditGrant(LCRDV),
     .creditReturn(creditReturn),
-    .creditConsume(flitTransfer),
+    .creditConsume(flitTransfer || lcrdReturnSend),
     .creditCount(creditCount),
     .creditAvailable(creditAvailable),
     .creditsFull(creditsFull),
@@ -76,7 +89,7 @@ module chi_link_tx #(
     .activate(activate),
     .deactivate(deactivateSafe),
     .peerLinkActive(LINKACTIVEACK),
-    .creditsQuiescent(creditsFull),
+    .creditsQuiescent(!creditAvailable),
     .linkActive(LINKACTIVEREQ),
     .linkRun(linkRun),
     .state(linkState)
@@ -85,16 +98,16 @@ module chi_link_tx #(
   integer byteIndex;
   integer bitIndex;
   always_comb begin
-    FLITV = flitTransfer;
-    FLITPEND = internalValid && laneSelected;
-    FLIT = internalFlit;
+    FLITV = flitTransfer || lcrdReturnSend;
+    FLITPEND = (internalValid && laneSelected) || lcrdReturnSend;
+    FLIT = outboundFlit;
     FLITP = '0;
     if (PARITY_EN) begin
       for (byteIndex = 0; byteIndex < PARITY_W; byteIndex = byteIndex + 1) begin
         for (bitIndex = 0; bitIndex < 8; bitIndex = bitIndex + 1) begin
           if (((byteIndex * 8) + bitIndex) < FLIT_W) begin
             FLITP[byteIndex] =
-              FLITP[byteIndex] ^ internalFlit[(byteIndex * 8) + bitIndex];
+              FLITP[byteIndex] ^ outboundFlit[(byteIndex * 8) + bitIndex];
           end
         end
       end

@@ -7,7 +7,8 @@ module chi_link_rx #(
   parameter int unsigned PTR_W =
     (LCRD_DEPTH < 2) ? 1 : $clog2(LCRD_DEPTH),
   parameter int unsigned COUNT_W =
-    (LCRD_DEPTH < 2) ? 1 : $clog2(LCRD_DEPTH + 1)
+    (LCRD_DEPTH < 2) ? 1 : $clog2(LCRD_DEPTH + 1),
+  parameter logic [FLIT_W-1:0] OPCODE_MASK = '0
 ) (
   input  logic                clk,
   input  logic                resetn,
@@ -38,21 +39,35 @@ module chi_link_rx #(
   logic [PTR_W-1:0] readPointer;
   logic [COUNT_W-1:0] pendingCredits;
   logic [COUNT_W:0] pendingCreditsNext;
+  logic [COUNT_W-1:0] peerCredits;
+  logic [COUNT_W:0] peerCreditsNext;
   logic linkRun;
   logic linkRunDelayed;
+  logic linkAccept;
+  logic lcrdReturnFlit;
   logic pushFlit;
   logic popFlit;
   logic parityMismatch;
 
   always_comb begin
+    // Flits are accepted in the DEACTIVATE state as well as in RUN, both
+    // because the Transmitter can still have a protocol flit in flight when it
+    // deasserts LINKACTIVEREQ and because the L-Credit return flits arrive
+    // only after that point (IHI 0050H B14.5).
+    linkAccept = LINKACTIVEACK;
+    // A zero Opcode identifies an LCrdReturn. It returns a credit instead of
+    // carrying a message, so it is neither delivered upstream nor replaced by
+    // a fresh credit (IHI 0050H B13.11).
+    lcrdReturnFlit = (OPCODE_MASK != '0) && ((FLIT & OPCODE_MASK) == '0);
     internalValid = (bufferCount != '0);
     if (internalValid) begin
       internalFlit = flitBuffer[readPointer];
     end else begin
       internalFlit = '0;
     end
-    pushFlit = linkRun && FLITV && (bufferCount < LCRD_DEPTH_COUNT);
-    bufferOverflow = linkRun && FLITV
+    pushFlit = linkAccept && FLITV && !lcrdReturnFlit
+             && (bufferCount < LCRD_DEPTH_COUNT);
+    bufferOverflow = linkAccept && FLITV && !lcrdReturnFlit
                    && (bufferCount == LCRD_DEPTH_COUNT);
   end
 
@@ -83,8 +98,12 @@ module chi_link_rx #(
     end
   end
 
+  // Credits are only issued while the link is running. The Receiver is
+  // permitted to keep issuing them on entry to DEACTIVATE but must have
+  // stopped before leaving it, and stopping at once meets that rule
+  // (IHI 0050H B14.5.1).
   always_comb begin
-    LCRDV = LINKACTIVEACK && (pendingCredits != '0);
+    LCRDV = linkRun && (pendingCredits != '0);
     pendingCreditsNext = {{1{1'b0}}, pendingCredits};
     if (linkRun && !linkRunDelayed) begin
       pendingCreditsNext = LCRD_DEPTH_EXT;
@@ -100,17 +119,37 @@ module chi_link_rx #(
     end
   end
 
+  // Credits the peer Transmitter is holding. Each flit it sends spends one, and
+  // a protocol flit earns a replacement once its buffer slot frees while an
+  // LCrdReturn does not. The link must not return to STOP until every credit
+  // has come back, which is what this count reaching zero means
+  // (IHI 0050H B14.6.3.2).
+  always_comb begin
+    peerCreditsNext = {{1{1'b0}}, peerCredits};
+    if (LCRDV) begin
+      peerCreditsNext = peerCreditsNext + 1'b1;
+    end
+    if (linkAccept && FLITV && (peerCreditsNext != '0)) begin
+      peerCreditsNext = peerCreditsNext - 1'b1;
+    end
+    if (!LINKACTIVEACK && !linkRun) begin
+      peerCreditsNext = '0;
+    end
+  end
+
   always_ff @(posedge clk) begin
     if (!resetn) begin
       writePointer <= '0;
       readPointer <= '0;
       bufferCount <= '0;
       pendingCredits <= '0;
+      peerCredits <= '0;
       linkRunDelayed <= 1'b0;
       parityError <= 1'b0;
     end else begin
       linkRunDelayed <= linkRun;
       pendingCredits <= pendingCreditsNext[COUNT_W-1:0];
+      peerCredits <= peerCreditsNext[COUNT_W-1:0];
       parityError <= pushFlit && parityMismatch;
 
       if (pushFlit) begin
@@ -146,7 +185,7 @@ module chi_link_rx #(
     .activate(1'b0),
     .deactivate(1'b0),
     .peerLinkActive(LINKACTIVEREQ),
-    .creditsQuiescent((bufferCount == '0) && (pendingCredits == '0)),
+    .creditsQuiescent((bufferCount == '0) && (peerCredits == '0)),
     .linkActive(LINKACTIVEACK),
     .linkRun(linkRun),
     .state(linkState)

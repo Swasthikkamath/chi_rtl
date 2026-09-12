@@ -11,6 +11,8 @@ module chi_link_rx_sva #(
   input logic bufferOverflow,
   input logic [COUNT_W-1:0] bufferCount,
   input logic [COUNT_W-1:0] pendingCredits,
+  input logic [COUNT_W-1:0] peerCredits,
+  input logic lcrdReturnFlit,
   input logic pushFlit,
   input logic parityMismatch,
   input logic [1:0] linkState
@@ -30,9 +32,22 @@ module chi_link_rx_sva #(
     @(posedge clk) disable iff (!resetn)
     !bufferOverflow);
 
-  NO_RECEIVE_WITHOUT_RUN: assert property (
+  // A flit is legal in DEACTIVATE as well as in RUN: the Transmitter can race
+  // its last protocol flit against the deassertion of LINKACTIVEREQ, and the
+  // L-Credit return flits are only sent once in DEACTIVATE (IHI 0050H B14.5).
+  NO_RECEIVE_OUTSIDE_ACTIVE: assert property (
     @(posedge clk) disable iff (!resetn)
-    FLITV |-> (linkState == RUN));
+    FLITV |-> ((linkState == RUN) || (linkState == DEACTIVATE)));
+
+  // An LCrdReturn returns a credit and carries no message, so it must never
+  // reach the protocol layer (IHI 0050H B13.11).
+  LCRD_RETURN_NOT_DELIVERED: assert property (
+    @(posedge clk) disable iff (!resetn)
+    (FLITV && lcrdReturnFlit) |-> !pushFlit);
+
+  PEER_CREDITS_IN_RANGE: assert property (
+    @(posedge clk) disable iff (!resetn)
+    peerCredits <= LCRD_DEPTH_COUNT);
 
   STOP_TRANSITION_VALID: assert property (
     @(posedge clk) disable iff (!resetn)
@@ -55,11 +70,13 @@ module chi_link_rx_sva #(
     ($past(linkState) == DEACTIVATE)
       |-> ((linkState == DEACTIVATE) || (linkState == STOP)));
 
+  // The link may only go back to STOP once the buffer is empty and every
+  // credit issued to the peer has been returned (IHI 0050H B14.6.3.2).
   DEACTIVATION_BUFFER_DRAINED: assert property (
     @(posedge clk) disable iff (!resetn)
     ($past(linkState) == DEACTIVATE) && (linkState == STOP)
       |-> (($past(bufferCount) == '0)
-           && ($past(pendingCredits) == '0)));
+           && ($past(peerCredits) == '0)));
 
   PARITY_ERROR_OBSERVED: assert property (
     @(posedge clk) disable iff (!resetn)
@@ -92,6 +109,8 @@ bind chi_link_rx chi_link_rx_sva #(
   .bufferOverflow(bufferOverflow),
   .bufferCount(bufferCount),
   .pendingCredits(pendingCredits),
+  .peerCredits(peerCredits),
+  .lcrdReturnFlit(lcrdReturnFlit),
   .pushFlit(pushFlit),
   .parityMismatch(parityMismatch),
   .linkState(linkState)
