@@ -29,11 +29,7 @@ module chi_stage1_compile #(
     + (CFG.dataCheckEn ? (CFG.dataW / 8) : 0)
     + (CFG.poisonEn ? (CFG.dataW / 64) : 0);
 
-  chi_rnf_if  #(.CFG(CFG)) rnf();
-  chi_rnd_if  #(.CFG(CFG)) rnd();
-  chi_rni_if  #(.CFG(CFG)) rni();
-  chi_snf_if  #(.CFG(CFG)) snf();
-  chi_sni_if  #(.CFG(CFG)) sni();
+  chi_if      #(.CFG(CFG)) nodeLink();
   chi_link_if #(.CFG(CFG)) link();
 
   generate
