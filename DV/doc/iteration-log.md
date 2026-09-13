@@ -2,7 +2,7 @@
 
 Each entry is a failure observed in simulation, what it turned out to be, and
 the change that fixed it. Failures are split into testbench bugs and DUT bugs;
-the DUT fixes are all in `hnf/` and each carries a comment at the change site.
+the DUT fixes are all in `rtl/hnf/` and each carries a comment at the change site.
 
 ## Compile and elaborate
 
@@ -77,7 +77,7 @@ the DUT fixes are all in `hnf/` and each carries a comment at the change site.
 
 All are in the HN-F. Each fix is small and commented in place.
 
-15. **POS entries leaked** (`hnf/chi_pos.sv`). `freeValid` and `progressValid`
+15. **POS entries leaked** (`rtl/hnf/chi_pos.sv`). `freeValid` and `progressValid`
     are handled in the same `always_ff`, and the progress branch wrote
     `POS_ALLOCATED` over the `POS_FREE` that the free branch had just written
     when both targeted the same index. Entries were never reclaimed, the
@@ -161,5 +161,9 @@ All five tests run clean, and a 120-run sweep of the three traffic tests over
 | `chiRetryStressTest` | 0 | 0 |
 | `chiPassiveAgentTest` | 0 | 0 |
 
-`chiCoherentTrafficTest` exercises 120 requests, 71 completions, 49 retries
-with matching grants, 49 snoops and 54 checked read-data comparisons.
+`chiCoherentTrafficTest` at seed 7 exercises 118 requests, 70 completions, 48
+retries with 48 matching grants, 39 snoops and 58 checked read-data
+comparisons, with 3 comparisons skipped for a concurrent write.
+
+`chi_dv_specification.md` is the specification of the environment those runs
+exercise.
