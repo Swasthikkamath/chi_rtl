@@ -47,7 +47,7 @@ lint:
 	done
 	@for top in $(EXTRA_TOPS); do \
 	  echo "== $$top =="; \
-	  $(VERILATOR) $(LINT_FLAGS) top/$$top.sv --top-module $$top || exit 1; \
+	  $(VERILATOR) $(LINT_FLAGS) rtl/top/$$top.sv --top-module $$top || exit 1; \
 	done
 
 # The smoke run is what executes the elaboration self-checks in

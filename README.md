@@ -21,7 +21,7 @@ behaviour. The feature matrix in the design specification states the exact
 boundary of every function.
 
 There is exactly one node-facing SystemVerilog interface type,
-[`if/chi_if.sv`](if/chi_if.sv). It is a superset used for the RN-F, RN-D,
+[`rtl/if/chi_if.sv`](rtl/if/chi_if.sv). It is a superset used for the RN-F, RN-D,
 RN-I, SN-F and SN-I arrays. Signal applicability varies by node class, and
 unused node-driven signals must be tied low. HN-F, HN-I and MN are internal
 fabric endpoints with no external link.
@@ -128,18 +128,37 @@ simulator would check that this flow cannot.
 
 | Path | Contents |
 |---|---|
-| `pkg/` | Configuration types, opcodes, flit records, pack and unpack, NodeID helpers |
-| `if/` | The single superset node-facing `chi_if` |
-| `link/` | L-Credit manager, activation FSM, link TX and RX, and the per-port link wrapper |
-| `noc/` | Crossbar, bidirectional ring, 2D mesh, route compute, router and arbitration |
-| `sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
-| `hnf/` | HN-F POS, hazards, directory, snoops, retry credits, DCT, DMT, DWT, stash, atomics, CMO, exclusives |
-| `hni/` | HN-I forwarding and the project-defined configuration access |
-| `mn/` | Sequential DVM distribution |
-| `sva/` | Bound local safety, stability and protocol-field assertions with covers |
-| `top/` | Product top and the compile and elaboration harnesses |
+| `rtl/pkg/` | Configuration types, opcodes, flit records, pack and unpack, NodeID helpers |
+| `rtl/if/` | The single superset node-facing `chi_if` |
+| `rtl/link/` | L-Credit manager, activation FSM, link TX and RX, and the per-port link wrapper |
+| `rtl/noc/` | Crossbar, bidirectional ring, 2D mesh, route compute, router and arbitration |
+| `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
+| `rtl/hnf/` | HN-F POS, hazards, directory, snoops, retry credits, DCT, DMT, DWT, stash, atomics, CMO, exclusives |
+| `rtl/hni/` | HN-I forwarding and the project-defined configuration access |
+| `rtl/mn/` | Sequential DVM distribution |
+| `rtl/sva/` | Bound local safety, stability and protocol-field assertions with covers |
+| `rtl/top/` | Product top and the compile and elaboration harnesses |
 | `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |
+| `DV/` | UVM verification environment, its documentation and the Xcelium run area |
 | `doc-src/` | Design specification source, Graphviz figure sources, Word template |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |
 | `Makefile` | `make lint`, `make sim`, `make simrand` and `make doc` |
+
+## Verification environment
+
+`DV/` holds a protocol-checking UVM environment that drives the fabric through
+`chi_if` with configurable Requester and Subordinate agents, checks it against
+independent address-map, directory and memory models, and collects functional
+coverage. It runs under Xcelium:
+
+```sh
+cd DV/sim/xcelium
+make compile
+make run TEST=chiCoherentTrafficTest
+```
+
+`DV/doc/chi_dv_specification.md` is the verification specification: environment
+architecture, agent and checker behaviour, the test and coverage plan, and the
+traceability rules. `DV/doc/iteration-log.md` records the bring-up, including
+the RTL bugs the environment found.

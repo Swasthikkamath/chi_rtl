@@ -81,7 +81,7 @@ packed flit field by itself is carriage, not implementation.
 | REQ/RSP/SNP/DAT records and pack/unpack | B13.9, B13.10 | Implemented | Configurable packed records match the Issue H field lists and slot widths, including every documented field overlay. Opcode-dependent field legality is not policed. |
 | Fixed flit slot widths and overlays | B13.9.1--B13.9.4 | Implemented | `TxnID` 12, `ReturnTxnID`/`StashLPID` 12, `NumReq`/`Size` 6, `GroupID` 8, RSP `DBID` 12, DAT `DBID` 16, `DataSource` 8, `CCID` 2, `DataID` 2, `CacheLineID` 6, `PAS` 3 are slot widths independent of the node-side field widths. |
 | `PAS[2:0]` replacing `NS`/`NSE` | B2.9, B13.10 | Implemented | REQ and SNP carry the three-bit Physical Address Space selector and the SAM decodes its non-secure sense. |
-| One node-facing interface type | B13 | Implemented | `if/chi_if.sv` is the only interface declaration in the repository and is a superset used by all five external node-class arrays. |
+| One node-facing interface type | B13 | Implemented | `rtl/if/chi_if.sv` is the only interface declaration in the repository and is a superset used by all five external node-class arrays. |
 | Top-level interface count and replicated channels | B13.7 | Not implemented | Elaboration requires `numIfPerNode == 1` and `replChannels == 1`. No top-level replication exists. |
 | L-Credit manager, link TX and link RX | B13.11, B14.2 | Implemented | `chi_lcrd_mgr`, `chi_link_tx` and `chi_link_rx` implement finite credit accounting, receive buffering, and the `LCrdReturn` exchange in both directions: the transmitter spends its remaining credits on `LCrdReturn` flits when it deactivates, and the receiver recognises a zero `Opcode`, extinguishes the credit and waits for all of them before it releases `LINKACTIVEACK`. |
 | Link layer integrated at every node port | B13.11, B14.2 | Implemented | `chi_link_port` instantiates three receivers and three or four transmitters per port, and `chi_interconnect_top` instantiates one per RN-F, RN-D, RN-I, SN-F and SN-I interface. `*LCRDV` are real credit pulses, not ready echoes. |
@@ -576,7 +576,7 @@ both being enabled.
 Derived packed widths at the default configuration are REQ 153, RSP 79,
 SNP 106 and DAT 437 bits. The formulas are `reqFlitWidth`, `rspFlitWidth`,
 `snpFlitWidth` and `datFlitWidth` in `chi_pkg`, and
-`top/chi_stage1_compile.sv` checks each one against an independent sum of the
+`rtl/top/chi_stage1_compile.sv` checks each one against an independent sum of the
 field list so that a field added to a record cannot silently bypass the width
 helper.
 
@@ -813,7 +813,7 @@ and MN ordinals read zero, because those endpoints have no external link.
 ## 4.1 Superset rule
 
 There is exactly one SystemVerilog interface declaration in the repository:
-`if/chi_if.sv`. Every external RN-F, RN-D, RN-I, SN-F and SN-I port is an
+`rtl/if/chi_if.sv`. Every external RN-F, RN-D, RN-I, SN-F and SN-I port is an
 array of this superset interface. There are no class-specific interfaces and
 no separate internal transport interface.
 
@@ -1481,57 +1481,57 @@ eventual legal response.
 `filelist.f` is the authoritative compile order:
 
 ```
-pkg/chi_cfg_pkg.sv
-pkg/chi_pkg.sv
-if/chi_if.sv
-link/chi_lcrd_mgr.sv
-link/chi_link_fsm.sv
-link/chi_link_tx.sv
-link/chi_link_rx.sv
-link/chi_link_port.sv
-noc/chi_vc_arb.sv
-noc/chi_xbar.sv
-noc/chi_ring.sv
-noc/chi_route_compute.sv
-noc/chi_router.sv
-noc/chi_mesh_xp.sv
-noc/chi_mesh.sv
-noc/chi_noc_top.sv
-sam/chi_hn_hash.sv
-sam/chi_sam.sv
-sam/chi_prefetch_map.sv
-hni/chi_cfg_slave.sv
-hni/chi_hni_top.sv
-mn/chi_mn_dvm.sv
-hnf/chi_pos.sv
-hnf/chi_hazard.sv
-hnf/chi_snoop_filter.sv
-hnf/chi_snp_gen.sv
-hnf/chi_retry.sv
-hnf/chi_dct_ctrl.sv
-hnf/chi_atomic_alu.sv
-hnf/chi_dmt_ctrl.sv
-hnf/chi_dwt_ctrl.sv
-hnf/chi_stash_ctrl.sv
-hnf/chi_cmo.sv
-hnf/chi_excl_mon.sv
-hnf/chi_hnf_top.sv
-top/chi_interconnect_top.sv
-top/chi_interconnect_compile.sv
-top/chi_link_compile.sv
-top/chi_hnf_compile.sv
-sva/chi_link_sva.sv
-sva/chi_link_rx_sva.sv
-sva/chi_proto_sva.sv
-sva/chi_mn_sva.sv
-sva/chi_ordering_sva.sv
-sva/chi_hnf_ordering_sva.sv
-top/chi_sva_compile.sv
+rtl/pkg/chi_cfg_pkg.sv
+rtl/pkg/chi_pkg.sv
+rtl/if/chi_if.sv
+rtl/link/chi_lcrd_mgr.sv
+rtl/link/chi_link_fsm.sv
+rtl/link/chi_link_tx.sv
+rtl/link/chi_link_rx.sv
+rtl/link/chi_link_port.sv
+rtl/noc/chi_vc_arb.sv
+rtl/noc/chi_xbar.sv
+rtl/noc/chi_ring.sv
+rtl/noc/chi_route_compute.sv
+rtl/noc/chi_router.sv
+rtl/noc/chi_mesh_xp.sv
+rtl/noc/chi_mesh.sv
+rtl/noc/chi_noc_top.sv
+rtl/sam/chi_hn_hash.sv
+rtl/sam/chi_sam.sv
+rtl/sam/chi_prefetch_map.sv
+rtl/hni/chi_cfg_slave.sv
+rtl/hni/chi_hni_top.sv
+rtl/mn/chi_mn_dvm.sv
+rtl/hnf/chi_pos.sv
+rtl/hnf/chi_hazard.sv
+rtl/hnf/chi_snoop_filter.sv
+rtl/hnf/chi_snp_gen.sv
+rtl/hnf/chi_retry.sv
+rtl/hnf/chi_dct_ctrl.sv
+rtl/hnf/chi_atomic_alu.sv
+rtl/hnf/chi_dmt_ctrl.sv
+rtl/hnf/chi_dwt_ctrl.sv
+rtl/hnf/chi_stash_ctrl.sv
+rtl/hnf/chi_cmo.sv
+rtl/hnf/chi_excl_mon.sv
+rtl/hnf/chi_hnf_top.sv
+rtl/top/chi_interconnect_top.sv
+rtl/top/chi_interconnect_compile.sv
+rtl/top/chi_link_compile.sv
+rtl/top/chi_hnf_compile.sv
+rtl/sva/chi_link_sva.sv
+rtl/sva/chi_link_rx_sva.sv
+rtl/sva/chi_proto_sva.sv
+rtl/sva/chi_mn_sva.sv
+rtl/sva/chi_ordering_sva.sv
+rtl/sva/chi_hnf_ordering_sva.sv
+rtl/top/chi_sva_compile.sv
 ```
 
-`top/chi_stage1_compile.sv`, `top/chi_sam_compile.sv`,
-`top/chi_xbar_compile.sv`, `top/chi_ring_compile.sv` and
-`top/chi_mesh_compile.sv` are supplemental elaboration harnesses. They are
+`rtl/top/chi_stage1_compile.sv`, `rtl/top/chi_sam_compile.sv`,
+`rtl/top/chi_xbar_compile.sv`, `rtl/top/chi_ring_compile.sv` and
+`rtl/top/chi_mesh_compile.sv` are supplemental elaboration harnesses. They are
 not entries in `filelist.f` and are not product hierarchy.
 
 `tb/chi_node_link_bfm.sv`, `tb/chi_sim_harness.sv` and `tb/chi_smoke_tb.sv`
@@ -1572,7 +1572,7 @@ the top, for example:
 ```sh
 verilator --lint-only --assert --sv -Wall -Wno-fatal \
   -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN -Wno-BLKLOOPINIT \
-  -f filelist.f top/chi_ring_compile.sv --top-module chi_ring_compile
+  -f filelist.f rtl/top/chi_ring_compile.sv --top-module chi_ring_compile
 ```
 
 The harnesses `chi_hnf_compile`, `chi_link_compile`, `chi_mesh_compile`,

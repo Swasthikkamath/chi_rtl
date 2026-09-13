@@ -7,7 +7,7 @@ marked `See OPEN QUESTIONS` at the corresponding place in the source.
 ## 1. TXSACTIVE is driven by the fabric, not by the node
 
 `[SPEC:IHI0050H B14.4]` makes TXSACTIVE an output of the transmitting node, so
-each agent BFM would own its own. In this DUT `link/chi_link_port.sv` drives
+each agent BFM would own its own. In this DUT `rtl/link/chi_link_port.sv` drives
 both TXSACTIVE and RXSACTIVE on every port, so the BFM cannot drive TXSACTIVE
 without creating a second driver. The BFM therefore leaves both alone and only
 observes them.

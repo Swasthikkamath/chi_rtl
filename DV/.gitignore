@@ -5,3 +5,4 @@ sim/xcelium/*.shm/
 sim/xcelium/*.log
 sim/xcelium/*.history
 sim/xcelium/*.key
+doc/__pycache__/
