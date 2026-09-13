@@ -87,7 +87,15 @@ module chi_pos #(
         needComp[freeIndex] <= 1'b0;
         needCompAck[freeIndex] <= 1'b0;
       end
-      if (progressValid && (state[progressIndex] != POS_FREE)) begin
+      // A free and a progress report name the same entry in the same cycle on
+      // the last step of a transaction, because the Home Node drives both from
+      // one signal. The progress arm has to stand aside there: it assigns state
+      // below, later in this block than the free above, so its POS_ALLOCATED
+      // would win and leave the entry allocated with every need bit clear. The
+      // entry would then never be reallocated and would hold an address hazard
+      // against its line for the rest of the run.
+      if (progressValid && (state[progressIndex] != POS_FREE)
+          && !(freeValid && (freeIndex == progressIndex))) begin
         if (progressSnoopDone) needSnoop[progressIndex] <= 1'b0;
         if (progressDataDone) needData[progressIndex] <= 1'b0;
         if (progressCompDone) needComp[progressIndex] <= 1'b0;

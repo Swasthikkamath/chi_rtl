@@ -41,6 +41,10 @@ module chi_hnf_top #(
     (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
   localparam int unsigned DAT_BYTES = CFG.dataW / 8;
   localparam int unsigned DAT_OFF_W = clog2Min1(DAT_BYTES);
+  // A snoop response always carries a whole 64-byte line, however wide the
+  // data bus is (IHI 0050H B4.9.1).
+  localparam int unsigned LINE_BEATS =
+    (512 / CFG.dataW > 0) ? (512 / CFG.dataW) : 1;
 
   typedef enum logic [4:0] {
     HNF_IDLE, HNF_SNOOP_START, HNF_SNOOP_WAIT, HNF_REQ_SEND,
@@ -49,7 +53,8 @@ module chi_hnf_top #(
     HNF_ATOMIC_READ, HNF_ATOMIC_INITIAL, HNF_ATOMIC_WRITE,
     HNF_ATOMIC_WDATA, HNF_ATOMIC_WCOMP, HNF_ATOMIC_RETURN,
     HNF_ORDER_RECEIPT, HNF_DMT_RESP, HNF_STASH_COMP, HNF_STASH_DONE,
-    HNF_PULL_REQ, HNF_PULL_DATA
+    HNF_PULL_REQ, HNF_PULL_DATA, HNF_DATALESS_COMP, HNF_SNOOP_DATA_SEND,
+    HNF_SNOOP_WB_REQ, HNF_SNOOP_WB_DATA, HNF_SNOOP_WB_COMP
   } hnf_state_e;
   hnf_state_e state;
 
@@ -116,6 +121,38 @@ module chi_hnf_top #(
   logic snpBusy;
   logic snpDone;
   logic snpRspReady;
+
+  // A snoop with RetToSrc set asks the snooped Requester for the line, and it
+  // answers on the data channel with SnpRespData rather than on the response
+  // channel (IHI 0050H B4.9.1). That reply is both the snoop response the
+  // generator is waiting for and the data the requesting Requester needs, so it
+  // is counted as a response here and streamed straight through to the
+  // Requester. Without this the line would be read from memory, which is stale
+  // whenever the snooped copy was dirty.
+  logic snpRspDataValid;
+  logic snpRspDataLast;
+  logic snpRspDataAccept;
+  logic snoopSuppliedData;
+  logic snoopDataSupplied;
+  logic snoopDataDropped;
+  // A line returned by a snoop cannot be passed straight through to the
+  // Requester: the remaining peers have not been snooped yet, and CompData is
+  // the completion, which must not overtake those invalidations
+  // (IHI 0050H B2.3.1). The line is held here until the snoop burst is done.
+  chi_dat_flit_t snoopDatBuf [LINE_BEATS];
+  logic [$clog2(LINE_BEATS+1)-1:0] snoopDatFill;
+  logic [$clog2(LINE_BEATS+1)-1:0] snoopDatSend;
+  logic snoopDatCapture;
+  logic snoopDataWanted;
+  // A dataless request takes the dirty copy away from its holder without
+  // giving it to anybody, so the Home owes that line to memory before it can
+  // complete (IHI 0050H B2.11.2).
+  chi_dat_flit_t writeBackDat;
+  chi_req_flit_t writeBackReq;
+  logic [CFG.txnIdW-1:0] writeBackDbid;
+  logic writeBackDbidSeen;
+  logic writeBackCompSeen;
+  chi_dat_flit_t snoopDat;
 
   logic dctEligible;
   logic dctFallback;
@@ -200,6 +237,7 @@ module chi_hnf_top #(
   chi_req_flit_t pullReq;
   chi_dat_flit_t pullDat;
   chi_rsp_flit_t stashResponse;
+  chi_rsp_flit_t datalessResponse;
 
   logic atomicRequest;
   logic activeAtomic;
@@ -284,6 +322,27 @@ module chi_hnf_top #(
            || (op == REQ_CLEAN_UNIQUE) || (op == REQ_MAKE_UNIQUE);
   endfunction
 
+  // ReadOnce leaves the Requester with no cached copy, so it never changes the
+  // directory, but it still has to be snooped: a peer may hold the line dirty
+  // and memory would answer with a stale value (IHI 0050H B4.4.2).
+  function automatic logic isSnoopable(input chi_req_opcode_e op);
+    return isCoherent(op) || isSnoopableWrite(op) || (op == REQ_READ_ONCE)
+           || (op == REQ_READ_ONCE_CLEAN_INVALID)
+           || (op == REQ_READ_ONCE_MAKE_INVALID);
+  endfunction
+
+  // WriteUnique comes from a Requester that holds no copy of the line, so the
+  // Home has to invalidate every cached copy before the value reaches memory,
+  // or a stale cached copy outlives the write. The other writes come from a
+  // Requester that already owns the line and need no snoop
+  // (IHI 0050H B4.5.1).
+  function automatic logic isSnoopableWrite(input chi_req_opcode_e op);
+    return (op inside {REQ_WRITE_UNIQUE_FULL, REQ_WRITE_UNIQUE_PTL,
+                       REQ_WRITE_UNIQUE_ZERO,
+                       REQ_WRITE_UNIQUE_FULL_STASH,
+                       REQ_WRITE_UNIQUE_PTL_STASH});
+  endfunction
+
   function automatic logic isAtomicOpcode(input chi_req_opcode_e op);
     return ((op >= REQ_ATOMIC_STORE_ADD) && (op <= REQ_ATOMIC_LOAD_UMIN))
            || (op == REQ_ATOMIC_SWAP) || (op == REQ_ATOMIC_COMPARE);
@@ -297,6 +356,63 @@ module chi_hnf_top #(
                        REQ_WRITE_UNIQUE_ZERO, REQ_WRITE_NO_SNP_ZERO,
                        REQ_WRITE_UNIQUE_FULL_STASH,
                        REQ_WRITE_UNIQUE_PTL_STASH});
+  endfunction
+
+  // The cache state a coherent read is granted. A Subordinate knows nothing of
+  // coherence and answers every read with the same Resp, so the Home has to
+  // replace it with the state its own directory justifies before the line
+  // reaches the Requester: Unique only when no other Requester keeps a copy
+  // (IHI 0050H B4.4.1, Table B4-5).
+  function automatic chi_resp_e grantedReadResp(
+    input chi_req_opcode_e op,
+    input logic [NUM_RNF-1:0] otherSharers
+  );
+    if ((op == REQ_READ_UNIQUE) || (op == REQ_MAKE_UNIQUE)
+        || (op == REQ_CLEAN_UNIQUE))
+      return RESP_UC_UD;
+    if ((op == REQ_READ_SHARED) || (op == REQ_READ_CLEAN)
+        || (op == REQ_READ_NOT_SHARED_DIRTY) || (op == REQ_READ_PREFER_UNIQUE))
+      return (otherSharers != '0) ? RESP_SC : RESP_UC_UD;
+    // ReadOnce and the non-coherent reads leave the Requester without a
+    // cached copy, so the line arrives Invalid.
+    return RESP_I;
+  endfunction
+
+  // Requests the Home answers out of the snoop phase alone: they change who
+  // may hold the line but move no data to the Requester, so there is nothing
+  // to fetch from memory and the completion is a bare Comp
+  // (IHI 0050H B2.3.2).
+  function automatic logic isDatalessRequest(input chi_req_opcode_e op);
+    return (op inside {REQ_CLEAN_UNIQUE, REQ_MAKE_UNIQUE, REQ_MAKE_INVALID,
+                       REQ_CLEAN_SHARED, REQ_CLEAN_INVALID, REQ_EVICT});
+  endfunction
+
+  // The snoop that makes a request's target state reachable. A request that
+  // asks for Unique has to take every other copy away, so it snoops with an
+  // invalidating opcode; a shared read only has to downgrade the peers
+  // (IHI 0050H Table B4-6).
+  function automatic chi_snp_opcode_e snoopForRequest(
+    input chi_req_opcode_e op
+  );
+    case (op)
+      REQ_READ_UNIQUE, REQ_CLEAN_UNIQUE: return SNP_UNIQUE;
+      REQ_MAKE_UNIQUE, REQ_MAKE_INVALID: return SNP_MAKE_INVALID;
+      REQ_CLEAN_INVALID:                 return SNP_CLEAN_INVALID;
+      REQ_CLEAN_SHARED:                  return SNP_CLEAN_SHARED;
+      REQ_READ_NOT_SHARED_DIRTY:         return SNP_NOT_SHARED_DIRTY;
+      REQ_READ_CLEAN:                    return SNP_CLEAN;
+      REQ_READ_PREFER_UNIQUE:            return SNP_PREFER_UNIQUE;
+      REQ_READ_ONCE:                     return SNP_ONCE;
+      default:                           return SNP_SHARED;
+    endcase
+  endfunction
+
+  // The data-channel opcodes a Requester uses to push a line towards memory,
+  // as opposed to the ones a Subordinate or a snooped peer uses to return one
+  // (IHI 0050H Table B13.8).
+  function automatic logic isWriteData(input chi_dat_opcode_e op);
+    return (op inside {DAT_COPY_BACK_WR_DATA, DAT_NON_COPY_BACK_WR_DATA,
+                       DAT_NCB_WR_DATA_COMP_ACK, DAT_WRITE_DATA_CANCEL});
   endfunction
 
   function automatic logic [NUM_RNF-1:0] requesterBit(
@@ -354,7 +470,10 @@ module chi_hnf_top #(
     rspOutBusy = (state == HNF_WAIT_RESPONSE) || (state == HNF_ORDER_RECEIPT)
                  || (state == HNF_DMT_RESP) || (state == HNF_ATOMIC_DBID)
                  || (state == HNF_ATOMIC_RETURN) || (state == HNF_STASH_COMP)
-                 || (state == HNF_STASH_DONE);
+                 || (state == HNF_STASH_DONE)
+                 || (state == HNF_DATALESS_COMP)
+                 || (state == HNF_SNOOP_WB_DATA)
+                 || (state == HNF_SNOOP_WB_COMP);
   end
 
   // Everything this block drives is a flit or a valid, so none of it may look
@@ -403,11 +522,70 @@ module chi_hnf_top #(
       packRspFlit(CFG, responseFlit);
     rspOutValid = 1'b0;
 
+    // Write data travels towards memory and read data towards the Requester.
+    // The two are told apart by the opcode the flit carries rather than by
+    // comparing its SrcID against the active request: a Requester can only send
+    // its write data once the DBID has reached it, by which time this Home may
+    // have moved on to another transaction, and a SrcID comparison would then
+    // deliver that write data to an unrelated Requester as its read data
+    // (IHI 0050H B2.9.1).
     requesterDat = incomingDat;
-    requesterDat.tgtId = (incomingDat.srcId == activeReq.srcId)
+    requesterDat.tgtId = isWriteData(incomingDat.opcode)
                          ? SN_NODE_ID : activeReq.srcId;
     requesterDat.srcId = HN_NODE_ID;
     requesterDat.txnId = activeReq.txnId;
+    if (!activeAtomic && (incomingDat.opcode == DAT_COMP_DATA))
+      requesterDat.resp = grantedReadResp(
+        activeReq.opcode, sfSharers & ~requesterBit(activeReq.srcId));
+
+    // A snoop response carrying data is retargeted at the Requester that asked
+    // for the line and presented as its CompData.
+    snpRspDataValid = datInValid
+                      && ((incomingDat.opcode == DAT_SNP_RESP_DATA)
+                          || (incomingDat.opcode == DAT_SNP_RESP_DATA_PTL));
+    // A snoop response always carries a whole line, whatever Size the original
+    // request used, so the end of the message is measured over a full line.
+    snpRspDataLast = snpRspDataValid && pullDatLast;
+    // The line is kept when the Requester asked for data, and also when a
+    // dataless request has pulled a dirty copy out of a peer, because that
+    // copy is now the Home's to write back. Once a whole line is held any
+    // further copy is drained and dropped: every copy of a line holds the
+    // same value, a Shared Dirty holder differing from a Shared Clean one
+    // only in who owes the writeback.
+    // A snoopable write overwrites the line, so a dirty copy pulled out of a
+    // peer is of no use to anyone and is dropped rather than buffered.
+    snoopDataWanted = !snoopSuppliedData && !activeWrite
+                      && ((snoopDatFill != '0)
+                          || !isDatalessRequest(activeReq.opcode)
+                          || incomingDat.resp[2]);
+    snoopDataDropped = !snoopDataWanted;
+    snoopDatCapture = (state == HNF_SNOOP_WAIT) && !activeAtomic
+                      && snpRspDataValid && snoopDataWanted
+                      && (snoopDatFill < LINE_BEATS);
+    // The snoop generator only retires the snoop it currently has outstanding,
+    // so the last beat is not taken until that generator agrees the flit came
+    // from the node it is waiting on.
+    snpRspDataAccept = (state == HNF_SNOOP_WAIT) && !activeAtomic
+                       && snpRspDataLast && snpRspReady;
+    snoopDataSupplied = snoopSuppliedData
+                        || (snoopDatCapture
+                            && (snoopDatFill == (LINE_BEATS - 1)));
+
+    snoopDat = snoopDatBuf[snoopDatSend];
+    snoopDat.tgtId = activeReq.srcId;
+    snoopDat.srcId = HN_NODE_ID;
+    snoopDat.txnId = activeReq.txnId;
+    snoopDat.opcode = DAT_COMP_DATA;
+    // The state the Requester is granted follows what it asked for, and a
+    // sharer supplying the line generally keeps its own copy, so a shared read
+    // lands Shared. PassDirty in the snoop response says the snooped Requester
+    // has given up the dirty responsibility, so it moves to this Requester
+    // rather than to memory, but only where the Requester ends up with a copy
+    // to hold it in (IHI 0050H B2.11.2).
+    snoopDat.resp = grantedReadResp(activeReq.opcode,
+                                    sfSharers & ~requesterBit(activeReq.srcId));
+    if (snoopDatBuf[snoopDatSend].resp[2] && (snoopDat.resp != RESP_I))
+      snoopDat.resp = chi_resp_e'({1'b1, snoopDat.resp[1:0]});
     datOutFlit = '0;
     datOutFlit.channel = CHI_CHANNEL_DAT;
     datOutFlit.targetNodeId = requesterDat.tgtId;
@@ -427,6 +605,14 @@ module chi_hnf_top #(
     if ((state == HNF_WAIT_RESPONSE) && datInValid)
       datOutValid = 1'b1;
 
+    // The captured line is replayed to the Requester as its CompData once
+    // every peer has answered its snoop.
+    if (state == HNF_SNOOP_DATA_SEND) begin
+      datOutValid = 1'b1;
+      datOutFlit.targetNodeId = activeReq.srcId;
+      datOutFlit.payload = packDatFlit(CFG, snoopDat);
+    end
+
     if ((state == HNF_ORDER_RECEIPT) || (state == HNF_DMT_RESP)) begin
       rspOutValid = 1'b1;
       rspOutFlit.targetNodeId = activeReq.srcId;
@@ -439,6 +625,26 @@ module chi_hnf_top #(
       rspOutFlit.targetNodeId = activeReq.srcId;
       rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
         packRspFlit(CFG, stashResponse);
+    end
+
+    if (state == HNF_SNOOP_WB_REQ) begin
+      reqOutValid = 1'b1;
+      reqOutFlit.targetNodeId = SN_NODE_ID;
+      reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] =
+        packReqFlit(CFG, writeBackReq);
+    end
+
+    if ((state == HNF_SNOOP_WB_DATA) && writeBackDbidSeen) begin
+      datOutValid = 1'b1;
+      datOutFlit.targetNodeId = SN_NODE_ID;
+      datOutFlit.payload = packDatFlit(CFG, writeBackDat);
+    end
+
+    if (state == HNF_DATALESS_COMP) begin
+      rspOutValid = 1'b1;
+      rspOutFlit.targetNodeId = activeReq.srcId;
+      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
+        packRspFlit(CFG, datalessResponse);
     end
 
     if (state == HNF_PULL_REQ) begin
@@ -519,14 +725,25 @@ module chi_hnf_top #(
       rspInReady = rspOutReady;
     if ((state == HNF_WAIT_RESPONSE) && datInValid)
       datInReady = datOutReady;
+    // snpRspReady is qualified by the SrcID presented to the generator, which
+    // a concurrent data-channel snoop response takes over, so the response
+    // channel must not read it as an acceptance of its own flit.
     if ((state == HNF_SNOOP_WAIT) || (state == HNF_BACKINV_WAIT))
-      rspInReady = snpRspReady;
+      rspInReady = snpRspReady && !snpRspDataValid;
     // A snoop that invalidates a dirty peer copy supplies the value the
     // atomic operates on, which removes the downstream read.
     if ((state == HNF_SNOOP_WAIT) && activeAtomic)
       datInReady = 1'b1;
+    // Otherwise a data-bearing snoop response is taken straight into the line
+    // buffer, or drained and dropped when a copy is already held.
+    if ((state == HNF_SNOOP_WAIT) && !activeAtomic && snpRspDataValid)
+      datInReady = 1'b1;
     if (state == HNF_PULL_DATA)
       datInReady = datOutReady;
+    // The Subordinate's DBID and Comp for the Home's own writeback are
+    // consumed here; neither is forwarded to the Requester.
+    if ((state == HNF_SNOOP_WB_DATA) || (state == HNF_SNOOP_WB_COMP))
+      rspInReady = 1'b1;
     // A ReadReceipt from the Subordinate is optional and carries no state the
     // Home needs once the read has been forwarded, so it is always drained.
     if (rspInValid && (incomingRsp.opcode == RSP_READ_RECEIPT))
@@ -680,6 +897,40 @@ module chi_hnf_top #(
       stashResponse.opcode = RSP_COMP_STASH_DONE;
     else
       stashResponse.opcode = RSP_COMP;
+
+    writeBackReq = '0;
+    writeBackReq.qos = activeReq.qos;
+    writeBackReq.tgtId = SN_NODE_ID;
+    writeBackReq.srcId = HN_NODE_ID;
+    writeBackReq.txnId = CHI_TXNID_FLIT_W'(activePosIndex);
+    writeBackReq.addr = activeReq.addr;
+    writeBackReq.pas = activeReq.pas;
+    writeBackReq.memAttr = activeReq.memAttr;
+    writeBackReq.size = 3'd6;
+    writeBackReq.opcode = REQ_WRITE_NO_SNP_FULL;
+
+    writeBackDat = snoopDatBuf[snoopDatSend];
+    writeBackDat.tgtId = SN_NODE_ID;
+    writeBackDat.srcId = HN_NODE_ID;
+    writeBackDat.txnId = writeBackDbid;
+    writeBackDat.opcode = DAT_NON_COPY_BACK_WR_DATA;
+    writeBackDat.resp = RESP_I;
+    writeBackDat.respErr = RESP_ERR_OK;
+    writeBackDat.be = {64{1'b1}};
+
+    datalessResponse = '0;
+    datalessResponse.qos = activeReq.qos;
+    datalessResponse.tgtId = activeReq.srcId;
+    datalessResponse.srcId = HN_NODE_ID;
+    datalessResponse.txnId = activeReq.txnId;
+    datalessResponse.opcode = RSP_COMP;
+    // CleanUnique and MakeUnique leave the Requester holding the line alone;
+    // the CMOs leave it without a copy (IHI 0050H Table B4-7).
+    datalessResponse.resp = ((activeReq.opcode == REQ_CLEAN_UNIQUE)
+                             || (activeReq.opcode == REQ_MAKE_UNIQUE))
+                            ? RESP_UC_UD : RESP_I;
+    if (activeReq.exclOrSnoopMeOrCah && activeExclOkay)
+      datalessResponse.respErr = RESP_ERR_EXOK;
 
     pullReq = '0;
     pullReq.qos = activeReq.qos;
@@ -864,9 +1115,13 @@ module chi_hnf_top #(
     // An independent stash request only hints the target; a write with stash
     // hint invalidates the peers as well (IHI 0050H B7.2, B7.3). The target is
     // snooped whether or not the directory records it as a sharer.
+    // The Requester of the transaction is never snooped for it: a CleanUnique
+    // or ReadUnique from a current sharer would otherwise invalidate the very
+    // copy it is asking to upgrade (IHI 0050H B4.2.1).
     snpStartSharers = (state == HNF_BACKINV_START) ? sfBackInvSharers
                       : (activeStashIndependent ? activeStashTargetMask
-                         : (sfSharers | activeStashTargetMask));
+                         : ((sfSharers | activeStashTargetMask)
+                            & ~requesterBit(activeReq.srcId)));
     snpStartLine = (state == HNF_BACKINV_START)
                    ? sfBackInvLine : activeReq.addr[CFG.addrW-1:6];
     // An atomic must leave every peer copy Invalid, and CleanInvalid also
@@ -874,11 +1129,19 @@ module chi_hnf_top #(
     snpStartOpcode = (state == HNF_BACKINV_START) ? SNP_MAKE_INVALID :
                      (activeAtomic ? SNP_CLEAN_INVALID :
                       (dctEligible ? dctOpcode :
-                       (activeWrite ? SNP_UNIQUE : SNP_SHARED)));
+                       // A full-line write replaces the line outright, so the
+                       // peers are invalidated without being asked for it.
+                       (activeWrite
+                        ? ((activeReq.opcode == REQ_WRITE_UNIQUE_PTL)
+                           || (activeReq.opcode == REQ_WRITE_UNIQUE_PTL_STASH)
+                           ? SNP_UNIQUE : SNP_MAKE_INVALID)
+                        : snoopForRequest(activeReq.opcode))));
     snpStartTxn = (state == HNF_BACKINV_START) ? '0 : activeReq.txnId;
     snpFwdNid = dctEligible ? dctFwdNid : '0;
     snpFwdTxn = dctEligible ? dctFwdTxn : '0;
-    snpRetToSrc = (dctEligible && !activeAtomic) ? dctRetToSrc : 1'b1;
+    // A write has no use for the line it is displacing, so its snoops do not
+    // ask for it back.
+    snpRetToSrc = (dctEligible && !activeAtomic) ? dctRetToSrc : !activeWrite;
     sfBackInvReady = state == HNF_BACKINV_START && snpStartReady;
     sfBackInvDone = state == HNF_BACKINV_WAIT && snpDone;
   end
@@ -897,10 +1160,16 @@ module chi_hnf_top #(
     .startStashLpidValid(activeStashLpidValid),
     .startStashLpid(activeStashLpid),
     .snpValid(snpOutValid), .snpReady(snpOutReady), .snpFlit(snpOutFlit),
-    .responseValid(rspInValid
+    // A snooped Requester answers either on the response channel or, when it
+    // is returning the line, on the data channel. Both retire the snoop.
+    .responseValid((rspInValid
       && ((incomingRsp.opcode == RSP_SNP_RESP)
-          || (incomingRsp.opcode == RSP_SNP_RESP_FWDED))),
-    .responseReady(snpRspReady), .responseSource(incomingRsp.srcId),
+          || (incomingRsp.opcode == RSP_SNP_RESP_FWDED)))
+      || snpRspDataAccept),
+    // and the generator matches the responder against the node it snooped, so
+    // the SrcID has to be taken from whichever channel carries the answer.
+    .responseReady(snpRspReady),
+    .responseSource(snpRspDataValid ? incomingDat.srcId : incomingRsp.srcId),
     // DataPull occupies the low bit of the shared FwdState slot and the TxnID
     // for the implied read arrives in DBID (IHI 0050H Table B13.7).
     .responseDataPull(incomingRsp.fwdState[0]),
@@ -984,6 +1253,12 @@ module chi_hnf_top #(
       sfUpdateSharers <= '0;
       sfInvalidate <= 1'b0;
       stashDirUpdate <= 1'b0;
+      snoopSuppliedData <= 1'b0;
+      snoopDatFill <= '0;
+      snoopDatSend <= '0;
+      writeBackDbid <= '0;
+      writeBackDbidSeen <= 1'b0;
+      writeBackCompSeen <= 1'b0;
     end else begin
       posFree <= 1'b0;
       sfUpdate <= 1'b0;
@@ -995,6 +1270,9 @@ module chi_hnf_top #(
           else if (requestHandshake && !droppedRequest) begin
             activeReq <= incomingReq;
             activePosIndex <= posAllocIndex;
+            snoopSuppliedData <= 1'b0;
+            snoopDatFill <= '0;
+            snoopDatSend <= '0;
             activeCoherent <= coherentRequest;
             activeAtomic <= atomicRequest;
             activeStash <= stashIsStash;
@@ -1027,8 +1305,11 @@ module chi_hnf_top #(
             if (orderedReceiptRequired)
               state <= HNF_ORDER_RECEIPT;
             else if (stashTargetValid
-                     || (((coherentRequest || activeCmo || atomicRequest)
-                          && sfHit && (sfSharers != '0))))
+                     || (((isSnoopable(incomingReq.opcode) || activeCmo
+                           || atomicRequest)
+                          && sfHit
+                          && ((sfSharers
+                               & ~requesterBit(incomingReq.srcId)) != '0))))
               state <= HNF_SNOOP_START;
             else if (atomicRequest)
               state <= HNF_ATOMIC_DBID;
@@ -1036,6 +1317,8 @@ module chi_hnf_top #(
             // Home completes it immediately (IHI 0050H B7.4.2).
             else if (stashIndependent)
               state <= HNF_STASH_COMP;
+            else if (isDatalessRequest(incomingReq.opcode))
+              state <= HNF_DATALESS_COMP;
             else
               state <= HNF_REQ_SEND;
           end
@@ -1050,11 +1333,111 @@ module chi_hnf_top #(
             atomicInitialBuffer <= incomingDat.data[CFG.dataW-1:0];
             atomicInitialFromSnoop <= 1'b1;
           end
-          if (snpDone)
-            state <= activeAtomic ? HNF_ATOMIC_DBID
-                     : (activeStashIndependent ? HNF_STASH_COMP
-                        : HNF_REQ_SEND);
+          if (snoopDatCapture && datInReady) begin
+            snoopDatBuf[snoopDatFill] <= incomingDat;
+            snoopDatFill <= snoopDatFill + 1'b1;
+            if (snoopDatFill == (LINE_BEATS - 1))
+              snoopSuppliedData <= 1'b1;
+          end
+          if (snpDone) begin
+            if (activeAtomic)
+              state <= HNF_ATOMIC_DBID;
+            else if (activeStashIndependent)
+              state <= HNF_STASH_COMP;
+            // A dataless request is finished by the snoop: the peers have
+            // been moved to the state it asked for and only the Comp is left.
+            // If the snoop took a dirty copy away, that line has to reach
+            // memory first or the write it holds is lost.
+            else if (isDatalessRequest(activeReq.opcode))
+              state <= snoopDataSupplied ? HNF_SNOOP_WB_REQ
+                                         : HNF_DATALESS_COMP;
+            // A snoop returned the line, so there is nothing to read
+            // downstream and the buffered copy becomes the CompData.
+            else if (snoopDataSupplied)
+              state <= HNF_SNOOP_DATA_SEND;
+            else
+              state <= HNF_REQ_SEND;
+          end
         end
+        HNF_SNOOP_DATA_SEND:
+          if (datOutValid && datOutReady) begin
+            snoopDatSend <= snoopDatSend + 1'b1;
+            if (snoopDatSend == (snoopDatFill - 1'b1)) begin
+              if (activeReq.expCompAck)
+                state <= HNF_WAIT_COMP_ACK;
+              else begin
+                state <= HNF_IDLE;
+                posFree <= 1'b1;
+              end
+              if (activeCoherent) begin
+                sfUpdate <= 1'b1;
+                sfInvalidate <= 1'b0;
+                if ((activeReq.opcode == REQ_READ_UNIQUE)
+                    || (activeReq.opcode == REQ_MAKE_UNIQUE))
+                  sfUpdateSharers <= requesterBit(activeReq.srcId);
+                else
+                  sfUpdateSharers <= sfSharers | requesterBit(activeReq.srcId);
+              end
+            end
+          end
+        HNF_SNOOP_WB_REQ:
+          if (reqOutValid && reqOutReady) begin
+            writeBackDbidSeen <= 1'b0;
+            writeBackCompSeen <= 1'b0;
+            snoopDatSend <= '0;
+            state <= HNF_SNOOP_WB_DATA;
+          end
+        HNF_SNOOP_WB_DATA: begin
+          if (rspInValid && rspInReady) begin
+            if ((incomingRsp.opcode == RSP_DBID_RESP)
+                || (incomingRsp.opcode == RSP_DBID_RESP_ORD)
+                || (incomingRsp.opcode == RSP_COMP_DBID_RESP)) begin
+              writeBackDbid <= incomingRsp.dbIdOrGroupId[CFG.txnIdW-1:0];
+              writeBackDbidSeen <= 1'b1;
+            end
+            if ((incomingRsp.opcode == RSP_COMP)
+                || (incomingRsp.opcode == RSP_COMP_DBID_RESP))
+              writeBackCompSeen <= 1'b1;
+          end
+          if (datOutValid && datOutReady) begin
+            snoopDatSend <= snoopDatSend + 1'b1;
+            if (snoopDatSend == (snoopDatFill - 1'b1))
+              state <= HNF_SNOOP_WB_COMP;
+          end
+        end
+        HNF_SNOOP_WB_COMP: begin
+          if (rspInValid && rspInReady
+              && ((incomingRsp.opcode == RSP_COMP)
+                  || (incomingRsp.opcode == RSP_COMP_DBID_RESP)))
+            writeBackCompSeen <= 1'b1;
+          if (writeBackCompSeen)
+            state <= HNF_DATALESS_COMP;
+        end
+        HNF_DATALESS_COMP:
+          if (rspOutValid && rspOutReady) begin
+            if (activeReq.expCompAck)
+              state <= HNF_WAIT_COMP_ACK;
+            else begin
+              state <= HNF_IDLE;
+              posFree <= 1'b1;
+            end
+            if (activeCoherent) begin
+              sfUpdate <= 1'b1;
+              // CleanShared leaves the sharers where they are; everything else
+              // dataless either takes the line for the Requester alone or
+              // clears every copy.
+              sfInvalidate <= (activeReq.opcode == REQ_MAKE_INVALID)
+                              || (activeReq.opcode == REQ_CLEAN_INVALID);
+              if ((activeReq.opcode == REQ_CLEAN_UNIQUE)
+                  || (activeReq.opcode == REQ_MAKE_UNIQUE))
+                sfUpdateSharers <= requesterBit(activeReq.srcId);
+              else if ((activeReq.opcode == REQ_MAKE_INVALID)
+                       || (activeReq.opcode == REQ_CLEAN_INVALID))
+                sfUpdateSharers <= '0;
+              else
+                sfUpdateSharers <= sfSharers;
+            end
+          end
         HNF_STASH_COMP:
           if (rspOutValid && rspOutReady) begin
             if (activeStashSeparate && !COMBINED_COMP_STASH_DONE)
@@ -1199,7 +1582,7 @@ module chi_hnf_top #(
                 // still owes that target the cache line.
                 state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
                 posFree <= !stashPullPending;
-                if (activeCoherent) begin
+                if (activeCoherent || isSnoopableWrite(activeReq.opcode)) begin
                   sfUpdate <= 1'b1;
                   if (activeWrite)
                     sfUpdateSharers <= '0;
@@ -1222,7 +1605,7 @@ module chi_hnf_top #(
               state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
               posFree <= !stashPullPending;
             end
-            if (activeCoherent) begin
+            if (activeCoherent || isSnoopableWrite(activeReq.opcode)) begin
               sfUpdate <= 1'b1;
               if (activeWrite)
                 sfUpdateSharers <= '0;
