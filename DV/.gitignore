@@ -1,0 +1,7 @@
+sim/xcelium/xcelium.d/
+sim/xcelium/INCA_libs/
+sim/xcelium/worklib/
+sim/xcelium/*.shm/
+sim/xcelium/*.log
+sim/xcelium/*.history
+sim/xcelium/*.key
