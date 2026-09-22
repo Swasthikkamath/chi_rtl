@@ -46,7 +46,7 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
     fork
       chiWatchFlits();
       chiWatchLink();
-    join_none
+    join
   endtask
 
   task automatic chiWatchFlits();
