@@ -15,6 +15,11 @@ in this snapshot yet.
 - `DV/src/hvlTop/chiRequester` is the RN-F, RN-D, and RN-I agent.
 - `DV/sim/xcelium` is the Xcelium flow. `make check` elaborates it with slang.
 - `DV/doc/open-questions.md` records the confirmed Stage 0 answers.
+- `DV/doc/iteration-log.md` is the findings register and the bring-up log.
+- `DV/doc/spec/fetchSpec.sh` fetches the CHI specification the flit model and
+  every `[SPEC:IHI0050H ...]` citation were checked against. The document is
+  Arm copyright and free to download but not ours to redistribute, so the
+  script is here and the PDF is not.
 
 ## Elaborate
 
@@ -33,6 +38,16 @@ make -C DV/sim/xcelium check SLANG=/path/to/slang UVM_HOME=/path/to/uvm-core-202
 
 `check` elaborates `hdlTop` and type-checks `chiRequesterPkg`. The DUT
 list is generated from `chi_rtl/filelist.f` on each build.
+
+```
+make -C DV/sim/xcelium check-sweep
+```
+
+repeats that over nine configurations, which is what keeps the flit widths
+formulas rather than constants fitted to the default. Port connections are
+compiled with `-Wport-width-trunc` and `-Wport-width-expand` promoted to
+errors, so a flit model that disagrees with the DUT's bus fails the build
+instead of silently resizing.
 
 The `chi_rtl` checkout is expected at the workspace root, next to `DV/`.
 Clone it with `gh repo clone Swasthikkamath/chi_rtl` if it is not there.

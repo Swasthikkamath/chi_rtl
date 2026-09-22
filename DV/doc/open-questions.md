@@ -39,7 +39,21 @@ constraints), **Q11** (`unmappedError` is unconnected → finding **F-7**),
 Q18, Q18a, Q19 and Q20 were decisions rather than facts and are recorded with
 the choice made. Compiling the RTL at swept configurations, which Q20 allows,
 added findings **F-8** (`numMn = 0` indexes out of range), **F-9** (`mpamW`
-sizes nothing) and **F-10** (18 flit bits the model cannot name).
+sizes nothing) and **F-10** (18 flit bits the model could not name).
+
+**2026-09-22 — the specification is now a file, not a memory.** Acting on the
+Q19 recommendation, ARM IHI 0050 Issue H was fetched into `DV/doc/spec/` (by
+a committed script; the Arm-copyright PDF itself is not committed). Reading
+the real tables settled three things that were being carried on recollection:
+**F-10 is closed** — all eighteen bits were fields the testbench had missed,
+not bits the DUT adds, and every channel's field list now sums exactly to its
+measured bus width; **F-1 is confirmed**, B9.3.1 requires odd parity where the
+DUT generates even; and **F-6 is confirmed**, B8.2.1 and B8.2.2 both require
+the DBIDResp and write-data phase the MN skips, so a specification-compliant
+Requester really does stall and the tolerant mode is mandatory rather than
+lenient. One new deviation came out of the same reading: **F-11**, the DUT
+drives the node-side single-bit `*CHK` companions that Table B9.18 assigns to
+the node.
 
 **2026-09-22 — Stage 0 closure update.** All 21 items are resolved: the user
 supplied answers read from the RTL for the twelve-question Stage 0 register
@@ -74,6 +88,24 @@ numeric encoding lives exactly once in `chiGlobalsPkg` with one
 `traceability.md` row per constant, and citations use the part-prefixed form
 (`B13.9.1`) matching the DUT's own comment style. Status: **CLOSED**.
 
+**Second round (2026-09-22): the PDF is in the workspace.** The user's first
+preference was to drop the Issue H PDF in if possible, because citing
+encodings from recollection is riskiest exactly where it matters. It was
+possible: Arm's documentation service serves IHI 0050 Issue H as a free
+non-confidential download, and `DV/doc/spec/fetchSpec.sh` retrieves it and
+renders it to text. The PDF itself is not committed — it is Arm copyright and
+free to download but not ours to redistribute — so the script is committed
+instead and the artefacts are ignored, which keeps the input reproducible
+without republishing it.
+
+This is not a formality. Reading the real B13.6 to B13.9 tables closed
+finding F-10 outright (Q7), confirmed the parity polarity behind F-1 (Q17),
+and confirmed the DVM DBIDResp requirement behind F-6 (Q14) — three things
+that were being carried on recollection. The fallback plan still applies to
+what has not been diffed yet: every numeric encoding lives once in
+`chiGlobalsPkg`, flagged `Q19`, and the opcode and Resp tables get a line-by-
+line diff against B13.8 and B13.10 before Stage 5.
+
 ### Q20. There is no simulator in this environment. What counts as "must elaborate" and "must pass"?
 
 **Why it matters.** Stage 1 is required to elaborate and Stage 5 is required to
@@ -95,6 +127,21 @@ repository. No stand-in packages are built: the real `chi_cfg_pkg` and `chi_if`
 are compiled from the DUT filelist without being opened. Each stage states
 which checks ran and which are pending Xcelium. Status: **CLOSED** (process
 adopted; Xcelium sign-off pending).
+
+**Second round (2026-09-22): confirmed, and this is where most of the round's
+findings came from.** The decision not to build stand-in `chi_cfg_pkg` and
+`chi_if` files is the right one for the reason given — a wrong stand-in hides
+the mismatches the exercise is meant to find — and no stand-in exists.
+Verilator is not installed in this image, so slang is the local elaborator;
+the RTL's Verilator-cleanliness carries over, with one waiver
+(`--relax-enum-conversions`, a tool strictness difference rather than a DUT
+defect) recorded in `iteration-log.md`.
+
+Compiling rather than reading turned out to be the most productive input of
+the round. Sweeping configurations and reading the resulting bus widths gave
+every flit-width coefficient (Q7); sweeping node counts found F-8; sweeping
+`mpamW` found F-9. None of that is visible in the port list, and none of it
+required opening a DUT source file.
 
 ---
 
@@ -383,17 +430,37 @@ StreamID share one slot. Every coefficient is confirmed over 41 random
 configurations, and `make check` re-checks the formulas against the real buses
 on every build.
 
-**What is still not known is the field order**, and it is the one part of the
-model carrying real risk. The named fields total 151 REQ, 78 RSP, 106 SNP and
-422 DAT bits, so 2, 1, 0 and 15 bits respectively are carried and unnamed —
-the same at every configuration, so a fixed field set rather than a formula
-error. Those bits are now an explicit reserved region at the top of each flit,
-preserved bit-exact through unpack and repack and printed by `hdlTop` at time
-0, rather than a silent gap. This is finding **F-10**. Per the user's advice
-the DUT's field order is *not* being requested yet, because taking it would
-defeat the independent-model check; the request stands in reserve for the
-moment bring-up stalls, and the Q19 encoding table gets a spec diff before
-Stage 5 either way.
+**Third round (2026-09-22): the field list is now the specification's, and
+there is nothing left unnamed.** With the Issue H PDF in the workspace (Q19)
+the B13.6 to B13.9 tables were diffed against the model, and the eighteen
+"unnamed" bits turned out to be testbench omissions rather than DUT bits, so
+finding **F-10 is closed, not waived**:
+
+| channel | what the model was missing |
+|---|---|
+| REQ | MultiReq, and PAS at two bits instead of three |
+| RSP | the FwdState slot modelled eight bits wide instead of three, the GroupIDs put in it rather than in the twelve-bit DBID slot they actually share, and CacheLineID absent |
+| SNP | a StashLPIDValid bit of its own, when it lives inside the FwdTxnID slot, offset by PAS again being one bit short |
+| DAT | the DataSource slot four bits instead of eight, and DataPull, CacheLineID, CAH, NumDat and Replicate all absent |
+
+PAS was the common thread on three of the four: Issue H replaced the NS and
+NSE bits of earlier issues with a three-bit field naming one of six Physical
+Address Spaces [SPEC:IHI0050H B13.10.68]. The other recurring trap is the
+merged width cell: several rows of each table share one slot, and reading them
+as separate fields inflates the model.
+
+Two checks now hold this in place. Each channel's field list sums exactly to
+the width measured at the boundary, at every configuration in the sweep, and
+`hdlTop` fails elaboration if one ever stops matching — verified by
+temporarily narrowing a field and watching it fire. The value of that check is
+that the two sides are independent: the field list comes off the
+specification, the width off the DUT's bus, and neither was fitted to the
+other. The field ORDER within each channel is still the specification's order
+rather than a measured one, so it remains the residual risk, but every field
+is now present and every bit accounted for.
+
+NumDat is the field with consequences beyond the width: the DUT honours it
+(Q8), so a receiver may not assume a DAT message carries a full transfer.
 
 ### Q8. Data flit granularity, `DataID`, `BE` width, and cache line size
 
@@ -465,6 +532,34 @@ states being RUN — the node→fabric direction only — level, and zero on the
 HN-F/HN-I/MN ordinals (finding **F-3**); the link reference model checks it
 against the TB's TX-link RUN state and checks the fabric→node direction
 separately via observed flit flow. Status: **CONFIRMED** → `[ASSUMPTION:17]`.
+
+**Second round (2026-09-22): the parity polarity is verified, and F-1
+stands.** The user asked for the spec side to be checked before the DUT's even
+parity is called a bug. B9.3.1 is unambiguous: "Odd parity is used. Odd parity
+means that check signals are added to groups of signals on the interface and
+driven such that there is always an odd number of bits set to 1 in that
+group." Table B9.18 gives `REQFLITCHK` a width of `ceil(R/8)` with a check
+granularity of 1 to 8 and a check enable of `REQFLITV == 1`, matching the
+per-byte checking the DUT does. So the DUT's byte width and enable are right
+and only its polarity is inverted, which is exactly the shape finding **F-1**
+describes, and the two-part parity test — spec-odd to demonstrate the
+deviation, DUT-even with a single-bit flip to prove the detection path — is
+the right pair.
+
+Two details for the test to respect. Parity needs `parityEn = 1`, which is not
+the default (Q12), so the test carries its own configuration. And both error
+outputs are pulses rather than sticky bits, so the monitor latches them; the
+credit error is reachable either by returning more than `lcrdDepth` credits or
+by sending a flit with no credit at all, and the credit manager's overflow
+path is what raises it (Q9).
+
+One more deviation of the same family, found while reading B9.3.1: Table B9.18
+assigns the single-bit check companions to whichever side drives the signal
+they cover, so `TXLINKACTIVEREQCHK`, `SYSCOREQCHK` and the `TX<x>FLITPEND` and
+`FLITV` check bits are node outputs. The DUT drives all of them itself, which
+is why the testbench must leave them alone or create a second driver. Logged
+as finding **F-11**, and waived on the same grounds as F-2: it removes a check
+the testbench could otherwise make, but it does not block traffic.
 
 ---
 
@@ -594,6 +689,35 @@ For the local slang pass, the equivalent (`slang -F`) is verified against the
 built binary before use and recorded in `iteration-log.md`. Status:
 **CONFIRMED** → `[ASSUMPTION:21]`.
 
+**Second round (2026-09-22): the design's list is now sanitised rather than
+read raw.** Four points from the user, and what each one changed.
+
+No `-incdir` lines are needed, because the RTL uses no `` `include ``, and the
+relative paths resolve correctly under `-F`. Confirmed locally — the earlier
+slang run already relied on it.
+
+The `#` comment on the first line is the risk the user flagged and is the
+reason the raw list is no longer handed to the compiler. Argument files are
+not standardised on a comment character, so rather than find out on a
+licensed machine whether `xrun` accepts `#`, the Makefile derives a clean copy
+each build: `#` rewritten to `//`, paths made absolute so the list can be read
+from any directory, and the result written to `gen/` and named by
+`CHI_DUT_FILELIST`. `make dutlist` regenerates it alone;
+`CHI_DUT_FILELIST=<path>` on the command line bypasses the whole mechanism
+and supplies an explicit list.
+
+The `rtl/top/*_compile.sv` lint harnesses are dropped unconditionally. They
+are extra elaboration roots that `-top hdlTop` makes dead weight.
+
+The `rtl/sva/*` binds are **kept by default**, dropped by `SVA=0`. A firing
+internal assertion is worth knowing about even though it is reported against a
+hierarchy this testbench may not reason about; the black-box answer is to
+treat it as a pointer for the DUT owner rather than as a testbench failure,
+and `+chiSvaOff` switches them off at run time for the DUT instance only when
+they get in the way of a debug session. Keeping them cost nothing so far: the
+current elaboration reports only two of them as trivially unmatchable, because
+`parityEn` is 0 in the default configuration.
+
 ---
 
 ## Protocol scope per node class
@@ -615,6 +739,16 @@ occurrence; 0 = strict, UVM_ERROR). All three requester agent classes advertise
 SNP credits and answer `SnpDVMOp`; coherent (non-DVM) snoops to RN-D/RN-I
 remain hard errors. Status: **CONFIRMED** → `[ASSUMPTION:13]`.
 
+**Second round (2026-09-22): answering `SnpDVMOp` is mandatory, not polite.**
+The MN sends the two snoop parts to each Requester in sequence and waits for
+a SnpResp from each before it moves on, so a single agent that treats an
+unexpected snoop as a finding and stays silent hangs every DVMOp in the test.
+"RN-I records any snoop as a finding" is therefore not a usable rule: all
+three requester agent classes keep their SNP link credited and answer
+`SnpDVMOp`, and the RN-I case is counted as finding F-5 rather than refused.
+Coherent snoops to RN-D or RN-I remain hard errors, because the Home is only
+ever given the RN-F NodeIDs and so cannot legitimately produce one.
+
 ### Q14. Which nodes are in the DVM node set?
 
 **What the top module gives.** `makeDvmIds` fills `DVM_NODE_IDS` with the first
@@ -634,6 +768,30 @@ checks. The MN's SnpDVMOp payload bit layout is a local choice, so the TB
 checks only spec-mandated SnpDVMOp properties (two parts, same TxnID on both —
 B8.2.3.2) and never the payload encoding. Status: **CONFIRMED** →
 `[ASSUMPTION:14]`.
+
+**Second round (2026-09-22): F-6 verified against the document, and it does
+block a compliant Requester.** The user asked for the B8 flow to be confirmed
+before the DVM Sync test is built. It now is, from the PDF rather than from
+recollection. Both flows require the same first three steps: the Requester
+sends the DVMOp, *the MN returns a DBIDResp*, and the Requester sends an
+eight-byte NonCopyBackWriteData — B8.2.1 steps 1 to 3 for Non-sync, B8.2.2
+steps 1 to 3 for Sync, and both figures show all three. The MN's IDLE → snoop
+→ Comp path omits steps 2 and 3 entirely.
+
+So the user's concern is right: a Requester written to the specification waits
+for a DBIDResp that never arrives and stalls before it ever sends its write
+data. That makes `expectDvmDbidResp = 0` the only setting under which a DVM
+test can run at all against this DUT, rather than a tolerance. In that mode
+the Requester sends no NonCopyBackWriteData either — the MN has no write data
+phase to receive it, so sending one would be an unsolicited DAT flit to a node
+with no matching credit reservation. Strict mode (1) is kept so the deviation
+can be demonstrated on demand, and it is expected to time out.
+
+The specification also settles two smaller points the same way. Sending the
+snoop to the originating Requester is explicitly "permitted, but not required"
+(B8.2.1 step 4), so it is not a finding. The same sentence says the MN
+broadcasts "to the remaining RN-F and RN-D nodes", which is the text RN-I is
+absent from, confirming F-5.
 
 ### Q15. Features with no `chi_cfg_t` enable field among those the top module references
 
@@ -662,6 +820,23 @@ references it, so the DUT neither implements nor rejects multi-request
 transactions → finding **F-4**; the TB always drives MultiReq=0 and
 chiMultiReqTest stays gated and reports SKIP. Status: **CONFIRMED** →
 `[ASSUMPTION:15]`.
+
+**Second round (2026-09-22): isolation widened, which is what unblocked the
+flit model.** The recommendation to allow the `chi_cfg_t` declaration and
+`CHI_CFG_DEFAULT` is adopted and recorded at the top of this file. They are
+types and values rather than behaviour, and without them the four fields the
+top module never references but that change the DAT width — `dataCheckEn` and
+`poisonEn`, both on by default, plus `parityEn` and `mteEn` — would have to be
+guessed. The full default table is now under Q12.
+
+Two corrections to the entry above. The lone `+ 1` in the REQ width bound is
+SecSID1, from `cdaEn`, not a tag field; the model sizes it that way and the
+measured `cdaEn` coefficient of 17 (StreamID 16 plus SecSID1 1) confirms it.
+And `mteEn` moves no bus bit, because Tag and TU are carried unconditionally —
+so the model packs them always, as zero when MTE is unused, and an `mteEn`
+sweep is a behaviour sweep rather than a width sweep. `multiReqEn` stays
+inert (F-4), but MultiReq itself is now modelled as a REQ field, because a
+flit the DUT sends still has to unpack; it is simply never driven to 1.
 
 ### Q16. Reset and bring-up requirements
 
@@ -740,14 +915,20 @@ to this register; each is also marked `See OPEN QUESTIONS`.
   `deviceIdWidth = nodeIdW − yW − xW − portW`; TB-owned `tbEncodeNodeId` with
   `deviceId = ordinal`; placements built from `chi_cfg_pkg` types and
   `chi_node_class_e` literals; DUT elaboration checks verify the table. (Q5)
-- `[ASSUMPTION:7]` Flit field presence/order per IHI0050H B13.9 as extracted by
-  this run; DataCheck/Poison present by default; Tag/TU always present in DAT;
-  PBHA when `pbhaEn`; MECID in REQ/SNP/DAT when `mecEn`; StreamID+SecSID1 when
-  `cdaEn`; TB widths self-checked at elaboration. (Q7)
-- `[ASSUMPTION:8]` 64-byte line; `512/dataW` flits per line; `BE = dataW/8`;
-  `DataID` steps by `dataW/128`. (Q8)
-- `[ASSUMPTION:9]` `lcrdDepth` = per-channel RX buffer depth; TB advertises
-  exactly `lcrdDepth` credits per received channel at RUN. (Q9)
+- `[ASSUMPTION:7]` Flit field list and order per the IHI0050H B13.6–B13.9
+  tables, read from the PDF in `DV/doc/spec/`; PAS is 3 bits; the merged-cell
+  rows are single shared slots; DataCheck/Poison present by default; Tag/TU
+  always present in DAT; PBHA when `pbhaEn`; MECID in REQ/SNP/DAT when
+  `mecEn`; StreamID+SecSID1 when `cdaEn`. Each channel's field sum equals its
+  measured bus width and `hdlTop` enforces that at elaboration. Only the
+  order within a channel remains unverified against the DUT. (Q7)
+- `[ASSUMPTION:8]` 64-byte line; `BE = dataW/8`; `DataID` steps by
+  `dataW/128`; a transfer is only the packets covering `Addr`/`Size`, and a
+  receiver must accept a message shortened by `NumDat`. (Q8)
+- `[ASSUMPTION:9]` `lcrdDepth` = per-channel RX buffer depth; the DUT
+  advertises `max(lcrdDepth, 2)`; over-advertising raises `linkCreditError`,
+  so the ceiling is a requirement and the TB respects it except in the
+  directed credit-error test. (Q9)
 - `[ASSUMPTION:10]` Region attributes `{kind[3:2], secureOnly[1], valid[0]}`,
   kinds HNF_HASH=00/DIRECT=01/MMIO=10; `REGION_TARGET` = Home NodeID (16-bit
   slot); inclusive limit; first match wins; secure-only + NS → unmapped. (Q10)
@@ -766,14 +947,17 @@ to this register; each is also marked `See OPEN QUESTIONS`.
   activity before `resetn` high. (Q16)
 - `[ASSUMPTION:17]` Parity and credit errors are injectable black-box;
   `linkParityError`/`linkCreditError` are single-cycle pulses latched by the
-  monitor; `linkUp[i]` = DUT receive-direction RUN, level (F-3). (Q17)
+  monitor; `linkUp[i]` = DUT receive-direction RUN, level (F-3); spec parity
+  is odd per B9.3.1 against the DUT's even (F-1), and the DUT drives the
+  node-side single-bit `*CHK` companions (F-11). (Q17)
 - `[ASSUMPTION:18]` Four reference models live in separate files
   `topEnv/topLinkModel.sv`, `topLifecycleModel.sv`, `topDirectoryModel.sv`,
   `topMemoryModel.sv`. (Q18)
 - `[ASSUMPTION:18a]` APB tied off; runtime region programming out of scope. (Q18a)
-- `[ASSUMPTION:21]` `chiFileList.f` pulls in the DUT via
-  `-F $(CHI_RTL_ROOT)/filelist.f` (paths resolve relative to the filelist's own
-  directory). (Q21)
+- `[ASSUMPTION:21]` `chiFileList.f` pulls in the DUT through a sanitised copy
+  of the design's own `filelist.f`, regenerated each build: `#` comments
+  rewritten, paths absolute, lint harnesses dropped, SVA binds kept unless
+  `SVA=0`. (Q21)
 
 Q6 (TgtID) and Q12 (`CHI_CFG_DEFAULT` contents) are **CLOSED** — facts, not
 assumptions. Q19 (spec issue) and Q20 (simulator process) are **CLOSED**.
