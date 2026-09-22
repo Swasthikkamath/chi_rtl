@@ -1,740 +1,147 @@
-# CHI Interconnect DV - Open Questions and Assumptions Log
-
-This file is the single register of everything the testbench could not read from
-its two permitted inputs. Every entry has a number, the reason it matters, the
-default the testbench will take if the question is not answered, and a status.
-
-Permitted inputs (INPUT ISOLATION):
-
-1. `chi_rtl/rtl/top/chi_interconnect_top.sv` - port list, parameters, the
-   `chi_cfg_pkg::chi_cfg_t` type and only those `chi_cfg_t` fields the top
-   module itself references.
-2. The AMBA 5 CHI Architecture Specification, ARM IHI 0050. See Q19 for the
-   issue actually available to this run.
-
-Nothing else in the DUT repository has been opened. `rtl/if/`, `rtl/pkg/`,
-`rtl/link/`, `rtl/noc/`, `rtl/sam/`, `rtl/hnf/`, `rtl/hni/`, `rtl/mn/`,
-`rtl/sva/`, the other files under `rtl/top/`, `filelist.f`, `DV/`, `tb/`,
-`doc-src/` and `docs/` are unread. `filelist.f` is referenced by path only.
-
-Status values: `OPEN` (blocking, default in use), `CONFIRMED` (answered, now an
-`[ASSUMPTION:n]` tag in source), `CLOSED` (answered and no longer an
-assumption, replaced by a `[TOP:...]` or `[SPEC:...]` tag).
-
-**2026-09-22 — Stage 0 closure update.** All 21 items are resolved: the user
-supplied answers read from the RTL for the twelve-question Stage 0 register
-this run originally posted (mapping table at the bottom), and the
-register-specific items are resolved from the Issue H specification text
-obtained by this run (Q19) or adopted as stated (marked ADOPTED). DUT-side
-problems uncovered by the answers are tracked as findings F-1…F-6 in
-`iteration-log.md`. Per-question `Status` lines were updated in place.
-
----
-
-## Process blockers
-
-These two decide whether the deliverable can be demonstrated rather than only
-reviewed, and what a protocol citation is allowed to look like. They are listed
-first because every later stage inherits the answer.
-
-### Q19. Which CHI specification issue is actually available, and is citation from knowledge acceptable?
-
-**Why it matters.** Every flit field order, opcode encoding, response encoding
-and cache-state encoding in `chiGlobalsPkg` is a numeric constant that must be
-bit-exact with the DUT for any traffic at all to flow. The rules require a
-`[SPEC:IHI0050H <section>]` tag on each one.
-
-**Resolution (2026-09-22).** A full text rendering of the official document is
-in hand: **ARM IHI 0050, Issue H, date of issue 17 Sep 2025** (eleventh public
-release, non-confidential), including the B13.9 flit tables, the B13.10 field
-definitions, the B9 error/parity sections, the B8 DVM flows and the B14 link
-handshake. All `[SPEC:IHI0050H …]` citations are from the document, not from
-trained knowledge. The original default's precautions are still adopted: every
-numeric encoding lives exactly once in `chiGlobalsPkg` with one
-`traceability.md` row per constant, and citations use the part-prefixed form
-(`B13.9.1`) matching the DUT's own comment style. Status: **CLOSED**.
-
-### Q20. There is no simulator in this environment. What counts as "must elaborate" and "must pass"?
-
-**Why it matters.** Stage 1 is required to elaborate and Stage 5 is required to
-pass `chiLinkBringUpTest` and `chiCoherentTrafficTest`.
-
-**What this run has.** No `xrun`, `xmvlog`, `xmelab`, `vcs`, `vlog`,
-`verilator` or `iverilog` on `PATH`, no `/opt/cadence` or equivalent tool tree,
-and no licence server. Xcelium cannot be installed here.
-
-**Resolution (2026-09-22).** No simulator is installed and Xcelium cannot be
-installed here, so the Xcelium flow in `DV/sim/xcelium/` remains the sign-off
-flow, with its results pending a licensed machine. Local checking uses `slang`,
-built from source in this environment (cmake/g++ available), in two passes that
-never read the DUT sources: (a) full elaboration of `hdlTop` + the DUT,
-compiled exactly as the Xcelium flow compiles it — by referencing the
-repository's `filelist.f` from `chiFileList.f` (Q21); (b) parse/compile of the
-HVL side against the Accellera UVM sources fetched from their public
-repository. No stand-in packages are built: the real `chi_cfg_pkg` and `chi_if`
-are compiled from the DUT filelist without being opened. Each stage states
-which checks ran and which are pending Xcelium. Status: **CLOSED** (process
-adopted; Xcelium sign-off pending).
-
----
-
-## Node interface and link layer
-
-### Q1. `chi_if` member names, parameterization, and TX/RX orientation on each port class
-
-**Why it matters.** Every BFM task references these signals directly. Nothing
-in the testbench can be written without them.
-
-**What the top module gives.** The ports are declared `chi_if rnf [...]`,
-`chi_if rnd [...]`, `chi_if rni [...]`, `chi_if snf [...]`, `chi_if sni [...]`,
-so all five classes use the same interface type. Each element is handed whole to
-`chi_link_port` as `.chiPort(PORT[i])`, and `chi_link_port` is parameterized
-`#(.CFG(CFG), .REQUESTER_PORT(IS_REQUESTER))` with `IS_REQUESTER` set to 1 for
-`rnf`, `rnd`, `rni` and 0 for `snf`, `sni`. On a requester port the DUT consumes
-REQ and produces SNP, RSP and DAT; on a subordinate port the DUT produces REQ
-and consumes RSP and DAT, and the SNP direction is unused
-(`snpOutReady = 1'b1`, `snpInValid = 1'b0`). The DUT never accepts an SNP flit
-from any external port. The interface declaration itself is in `rtl/if/`, which
-is unread.
-
-**Default.** `chi_if` is parameterized `#(parameter chi_cfg_pkg::chi_cfg_t CFG =
-chi_cfg_pkg::CHI_CFG_DEFAULT)` and `hdlTop` instantiates every array with the
-same `CHI_CFG` it passes to the DUT. Members carry the IHI 0050 pin names from
-the **node's** point of view on every port class, so `TX*` is node-to-
-interconnect and `RX*` is interconnect-to-node on subordinate ports as well as
-requester ports, and the port class only changes which bundles are in use:
-
-| bundle | requester port | subordinate port |
-| --- | --- | --- |
-| `TXREQFLITPEND`, `TXREQFLITV`, `TXREQFLIT`, `TXREQLCRDV` | node sends REQ | unused |
-| `RXREQFLITPEND`, `RXREQFLITV`, `RXREQFLIT`, `RXREQLCRDV` | unused | node receives REQ |
-| `TXRSPFLITPEND`, `TXRSPFLITV`, `TXRSPFLIT`, `TXRSPLCRDV` | node sends RSP | node sends RSP |
-| `RXRSPFLITPEND`, `RXRSPFLITV`, `RXRSPFLIT`, `RXRSPLCRDV` | node receives RSP | node receives RSP |
-| `TXDATFLITPEND`, `TXDATFLITV`, `TXDATFLIT`, `TXDATLCRDV` | node sends DAT | node sends DAT |
-| `RXDATFLITPEND`, `RXDATFLITV`, `RXDATFLIT`, `RXDATLCRDV` | node receives DAT | node receives DAT |
-| `RXSNPFLITPEND`, `RXSNPFLITV`, `RXSNPFLIT`, `RXSNPLCRDV` | node receives SNP | unused |
-| `TXSNPFLITPEND`, `TXSNPFLITV`, `TXSNPFLIT`, `TXSNPLCRDV` | unused | unused |
-
-In each bundle `*LCRDV` is driven by the receiver of that bundle, so the
-testbench drives `RXREQLCRDV` on a subordinate port and `RXRSPLCRDV`,
-`RXDATLCRDV`, `RXSNPLCRDV` on a requester port, and observes `TX*LCRDV`.
-Activation uses `TXLINKACTIVEREQ`, `TXLINKACTIVEACK`, `RXLINKACTIVEREQ`,
-`RXLINKACTIVEACK`.
-
-**Fallback if wrong.** The alternative encoding is that the names are fixed from
-the interconnect's point of view, which swaps every `TX`/`RX` prefix on the two
-subordinate arrays. The BFMs therefore reach the interface through one macro pair
-per channel so that the orientation is a single edit, not a rewrite.
-
-**Resolution (2026-09-22, user from `rtl/if/chi_if.sv` and `chi_link_port.sv`).**
-The default held, with additions. Every listed signal exists under its spec
-name; `CLK`/`RESETn` are also members (Q2); **every signal has a `*CHK`
-companion** — `TX/RX<x>FLITCHK` is `ceil(FLIT_W/8)` bits, one per byte — and
-there are no `*SHAREDCRD`/`*LCRDSHV` pins. The TB drives only
-`TX<x>FLITPEND/FLITV/FLIT`, `TX<x>FLITCHK` (only when `parityEn=1`),
-`TXLINKACTIVEREQ`, `RXLINKACTIVEACK`, `RX<x>LCRDV` and `SYSCOREQ`; the DUT
-drives every single-bit `*CHK` pin to 0, so the TB must not drive those (double
-driver). `TXSNPFLIT*` is unread on every port and is tied to 0; `TXSNPLCRDV` is
-driven to 0 by the DUT. Orientation is the node's perspective on all five port
-classes: on requester ports the DUT receives REQ/RSP/DAT on `TX*` and transmits
-RSP/SNP/DAT on `RX*` with `RXREQ*` tied off; on subordinate ports the DUT
-receives RSP/DAT on `TX*` and transmits REQ/RSP/DAT on `RX*`, with the TB
-holding `TXREQFLITV=0` and `RXSNP*` tied off. The DUT's parity is **even** per
-byte; IHI 0050H B9.3.1 requires **odd** → finding **F-1**. The
-macro-pair-per-channel fallback is kept anyway so any residual naming surprise
-is a single edit. Status: **CONFIRMED** → `[ASSUMPTION:1]`.
-
-### Q2. Does `chi_if` carry `CLK`/`RESETn`, and who drives them?
-
-**Why it matters.** Two drivers on a clock is an X; no driver is no clock.
-
-**What the top module gives.** `clk` and `resetn` are scalar module inputs and
-are passed to `chi_link_port` separately from `.chiPort`, so the DUT does not
-need a clock from inside `chi_if`.
-
-**Default.** `chi_if` may contain `CLK` and `RESETn` members but the DUT does
-not drive them. `chiClkRstBfm` is the only clock and reset source: it drives the
-DUT's `clk`/`resetn` ports, and if the interface has `CLK`/`RESETn` members
-`hdlTop` drives them from the same source. All BFMs sample and drive on the same
-`clk`.
-
-**Resolution (2026-09-22, user from `chi_link_port.sv`).** The default is
-corrected: `chi_if` **does** contain `CLK` and `RESETn`, and the **DUT drives
-both** from the top-level `clk`/`resetn`. `chiClkRstBfm` still owns only the
-top-level `clk`/`resetn` ports; the TB never drives the interface members, and
-every BFM samples `chiPort.CLK` / qualifies on `chiPort.RESETn`. Status:
-**CONFIRMED** → `[ASSUMPTION:2]`.
-
-### Q3. `TXSACTIVE` / `RXSACTIVE` ownership per port class
-
-**Resolution (2026-09-22, user from `chi_link_port.sv`).** The default is
-corrected: the **DUT drives both `TXSACTIVE` and `RXSACTIVE` to `resetn`** on
-every port, so the TB must not drive `TXSACTIVE` at all. IHI 0050H B14.7.2 makes
-TXSACTIVE a node output indicating node protocol activity, so the DUT driving
-the node-side signal is a deviation — logged as finding **F-2** and waived: the
-link reference model checks `RXSACTIVE` only as a static out-of-reset
-indication and never waits on SACTIVE for progress. Status: **CONFIRMED** →
-`[ASSUMPTION:3]`.
-
-### Q4. `SYSCOREQ` / `SYSCOACK` presence and ownership per port class
-
-**Resolution (2026-09-22, user from `chi_link_port.sv`).** `SYSCOACK` is a
-**combinational copy of `SYSCOREQ` on every port class**. The TB drives
-`SYSCOREQ` on RN-F ports (RN-D optional, config-controlled) and ties it to 0 on
-RN-I, SN-F and SN-I. Because the ACK is a pure copy, the planned "ACK without
-REQ" finding cannot fire and is dropped; the coherency check that remains is
-the spec one — a snoop arriving at an RN-F before it asserted `SYSCOREQ` (or
-after deassertion) is a DUT error. Status: **CONFIRMED** → `[ASSUMPTION:4]`.
-
-### Q5. Which NodeID values are legal, and how is a NodeID constructed?
-
-**Why it matters.** `SrcID` on every testbench-driven flit, and `TgtID` on the
-exceptional cases in Q6, must be a legal NodeID under the DUT's encoding.
-
-**What the top module gives.** `NODE_IDS` is
-`logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0] [NUM_NODES-1:0]` with an all-ones
-sentinel that means "use `defaultNodeId(CFG, ordinal)`". The elaboration check
-requires, for every ordinal: a valid placement,
-`placement.nodeClass == nodeClassForOrdinal(CFG, i)`,
-`int'(placement.nodeIndex) == nodeIndexForOrdinal(CFG, i)`,
-`meshX`/`meshY`/`devicePort` inside `CFG.meshX`/`CFG.meshY`/
-`CFG.numDevPortsPerXp`, agreement between the placement coordinates and
-`nodeIdMeshX/nodeIdMeshY/nodeIdDevicePort(CFG, NODE_IDS[i])`, globally unique
-NodeIDs, and no two nodes on the same `(meshX, meshY, devicePort)`. So a NodeID
-embeds its routing coordinates, and `defaultNodeId` is the only constructor the
-top module names.
-
-**Default.** The testbench never invents a NodeID. `chiGlobalsPkg` materialises
-`NODE_IDS[i] = defaultNodeId(CHI_CFG, i)` for all ordinals and derives each
-placement from the NodeID it just built:
-
-```
-placement.valid      = 1'b1
-placement.nodeClass  = nodeClassForOrdinal(CHI_CFG, i)
-placement.nodeIndex  = nodeIndexForOrdinal(CHI_CFG, i)
-placement.meshX      = nodeIdMeshX(CHI_CFG, NODE_IDS[i])
-placement.meshY      = nodeIdMeshY(CHI_CFG, NODE_IDS[i])
-placement.devicePort = nodeIdDevicePort(CHI_CFG, NODE_IDS[i])
-```
-
-with `USE_DEFAULT_PLACEMENTS = 1'b0` so the explicit array is the one used. This
-satisfies every check by construction for any configuration, not only the
-14-node default, and it makes the whole NodeID table a testbench-side constant.
-Illegal-NodeID stimulus is out of scope.
-
-**Resolution (2026-09-22, user from `chi_pkg.sv` / `chi_cfg_pkg.sv`).** The
-helpers are split across two packages: `chi_cfg_pkg` holds
-`defaultMeshPlacement`, `nodeClassForOrdinal`, `nodeIndexForOrdinal` and the
-placement/region types; `chi_pkg` holds `defaultNodeId`, `encodeNodeId`,
-`deviceIdWidth`, `clog2Min1` and `nodeIdMeshX/Y/DevicePort/DeviceId`. The NodeID
-layout is LSB-first **`{meshY, meshX, devicePort, deviceId}`** with
-`xW = clog2Min1(meshX)`, `yW = clog2Min1(meshY)`,
-`portW = clog2Min1(numDevPortsPerXp)` (each at least 1) and
-`deviceIdWidth = nodeIdW − yW − xW − portW` (6 bits in the DUT default
-11-2-2-1); `defaultNodeId` sets `deviceId` to the node ordinal.
-`chi_mesh_placement_t.nodeClass` is `chi_node_class_e` with `NODE_RNF`=0 …
-`NODE_MN`=7, and the elaboration checks run for **every** topology, not only
-MESH_2D. **TB decision:** rather than importing `chi_pkg` (the DUT's protocol
-package — the TB protocol model must stay independent of it), `chiGlobalsPkg`
-implements its own `tbEncodeNodeId()` from this confirmed formula with
-`deviceId = ordinal`, and builds placements from
-`chi_cfg_pkg::chi_mesh_placement_t` and `chi_node_class_e` literals. The DUT's
-own elaboration checks then independently verify the TB table (routing fields
-vs placement, uniqueness, no collisions) — if the TB encoder ever drifted from
-`defaultNodeId`, elaboration fails loudly. `USE_DEFAULT_PLACEMENTS=0` with
-explicit `PLACEMENTS` for any node count. Status: **CONFIRMED** →
-`[ASSUMPTION:5]`.
-
-### Q6. How is `TgtID` on a Requester REQ flit interpreted?
-
-**What the top module gives.** This one is readable. Per requester port the top
-module unpacks the incoming REQ, and `reqToNoc` **overwrites** `request.tgtId`
-with the routing target before the flit enters the NoC. The routing target is
-the address-mapper output, except that `DVMOp` goes to the MN, `PrefetchTgt`
-goes to the prefetch mapper's SN-F, and `PCrdReturn` or any request with
-`allowRetry == 0` uses the `tgtId` the Requester supplied.
-
-**Default.** The requester driver drives `tgtId = '0` on an ordinary
-`allowRetry == 1` request, drives the `srcId` captured from the `RetryAck` on a
-replay with `allowRetry == 0`, and drives the granting Home's NodeID on
-`PCrdReturn`. The lifecycle reference model never checks `TgtID` on a request
-and never predicts which Home or Subordinate a request reaches. Status:
-**CLOSED** — re-confirmed 2026-09-22 by the user from
-`chi_interconnect_top.sv:188, 511-529`: the SAM overwrites TgtID except
-DVMOp→MN and PrefetchTgt→prefetch mapper, and PCrdReturn / `AllowRetry==0`
-honor the driven TgtID, overriding the other two exceptions. No assumption
-needed; cited as `[TOP:reqToNoc, requester_sam]`.
-
-### Q7. Flit field order and optional-field placement
-
-**Why it matters.** The testbench owns its flit model, so a packing mismatch
-stops all traffic. The configurable widths make the optional-field positions the
-risky part, not the field list.
-
-**What the top module gives.** Field widths and presence follow `CFG.addrW`,
-`dataW`, `nodeIdW`, `txnIdW`, `lpidW`, `ccidW`, `groupIdW`, `rsvdcW`, `mpamW`,
-`mpamEn`, `mecEn`, `cdaEn`, and the width functions `reqFlitWidth`,
-`rspFlitWidth`, `snpFlitWidth`, `datFlitWidth`. The elaboration check bounds
-them: REQ within `[93 + addrW, 120 + addrW + CHI_MAX_RSVDC_W + CHI_MPAM_W +
-CHI_PBHA_W + 1 + CHI_STREAMID_W]`, RSP within `[71, 89]`, SNP within
-`[53 + addrW - 3, 71 + addrW - 3 + CHI_MPAM_W + CHI_MECID_W]`, DAT at least
-`240 + ((dataW - 128) * 149) / 128`, and the comment ties the field list to
-`B13.9`. `MECID` and `StreamID` share one REQ field of width `max(E, R)`, which
-is why `mecEn && cdaEn` is illegal. SNP carries `addrW - 3` address bits and no
-`TgtID`.
-
-**Default.** Pack each flit LSB-first in the order the Issue H `B13.9` field
-table lists, omitting any field whose configured width is zero, keeping the
-shared `MECID`/`StreamID` field at a single position sized `max(CHI_MECID_W,
-CHI_STREAMID_W)`, and leaving optional fields at the position the table gives
-rather than appending them. `chiGlobalsPkg` asserts its own computed widths
-against `reqFlitWidth(CHI_CFG)` and friends at elaboration, so a field-list
-drift is caught before any test runs rather than appearing as random data
-corruption.
-
-**Resolution (2026-09-22, user from `chi_pkg.sv`, cross-checked against the
-B13.9 tables obtained in Q19).** Optional-field presence is now known:
-`CHI_CFG_DEFAULT` has `dataCheckEn=1` (DW/8 bits) and `poisonEn=1` (DW/64 bits);
-DAT Tag (DW/32) and TU (DW/128) are **always present** whatever `mteEn` is; PBHA
-is a 4-bit REQ field when `pbhaEn=1` and shares the FwdNID/HomeNID slots in
-SNP/DAT; MECID/StreamID share one REQ field (`mecEn && cdaEn` is an elaboration
-fatal) and MECID also appears in SNP and DAT when `mecEn=1`. Fixed slots: TxnID
-12, ReturnTxnID 12, GroupID/LPID shared 8-bit slot, CCID 2, DataID 2, REQ
-Size/NumReq 6-bit slot, RSP DBID 12, DAT DBID 16. **Independent check (the TB
-side of the black-box split):** the TB flit model is derived from the B13.9
-tables, not from the DUT's pack order. The B13.9.1 total-width formula forces
-exactly 72 fixed REQ bits + 3·NodeID + RAW (both anchors give 72: N=7 →
-93+RAW, N=16 → 120+RAW), which admits exactly one 8-bit slot between SnpAttr
-and Excl — the slot shared by DoDWT / PGroupID / StashGroupID / TagGroupID /
-LPID — matching the DUT's stated "GroupID/LPID shared 8-bit slot". RSP sums to
-T=71 at N=7 and 89 at N=16; SNP to S=53+SAW; DAT to the 240/389/687 minima at
-DW=128/256/512 — all consistent with B13.9.2/3/4. No flit-layout finding. Bit 0
-is the LSB and fields pack LSB-first in table order. The elaboration self-check
-of TB-computed widths against the DUT's `reqFlitWidth(CHI_CFG)` and friends is
-kept (called by explicit scope if visible; otherwise against the absolute B13.9
-formulas). Status: **CONFIRMED** → `[ASSUMPTION:7]`.
-
-### Q8. Data flit granularity, `DataID`, `BE` width, and cache line size
-
-**Default.** The cache line is 64 bytes for all configurations. A line transfer
-is `512 / CFG.dataW` DAT flits, `BE` is `CFG.dataW / 8` bits, and `DataID`
-identifies the flit's 16-byte offset, so it steps by `CFG.dataW / 128`: values
-0, 1, 2, 3 at `dataW = 128`, 0 and 2 at 256, and 0 only at 512. Partial and
-non-line-size accesses use `Size` plus `Addr` and set `BE` accordingly.
-
-**Resolution (2026-09-22, spec IHI0050H B2.9.4 "Data packetization" and
-B13.9.4).** ADOPTED as stated; the DAT flit table confirms BE = DW/8 and the
-flit-count rule, and B13.9.4's DataID is the 16-byte chunk index. Re-verified
-numerically in Stage 1 when the DAT pack functions are written. Status:
-**CONFIRMED** → `[ASSUMPTION:8]`.
-
-### Q9. `CFG.lcrdDepth` semantics
-
-**Default.** `lcrdDepth` is the per-channel receive buffer depth on one side of
-one link, it is the same on every channel and in both directions, and the
-receiver may advertise up to `lcrdDepth` L-Credits. The testbench's link layer
-advertises exactly `lcrdDepth` credits per channel it receives on, once the
-direction reaches RUN. The link reference model checks that neither side ever
-has more flits in flight on a channel than credits it was given, and that the
-DUT never advertises more than `lcrdDepth`. The elaboration check
-`CFG.lcrdDepth < 2` confirms at least two credits per channel.
-
-**Resolution (2026-09-22).** ADOPTED: `lcrdDepth` is the per-channel receive
-buffer depth on one side of one link; the TB link layer advertises exactly
-`lcrdDepth` L-Credits per channel it receives on once that direction reaches
-RUN, and the link reference model enforces the credit ceiling in both
-directions. Status: **CONFIRMED** → `[ASSUMPTION:9]`.
-
-### Q17. Can a link parity error or credit error be provoked, or only observed?
-
-**Why it matters.** `linkParityError` and `linkCreditError` are outputs the
-monitor must observe `[TOP:ports]`, and the feature matrix may not call them
-Verified without a test that reaches them.
-
-**Resolution (2026-09-22, user answers to Stage 0 register items 1 and 8).**
-Both errors **are** injectable, so the `Partial` default is upgraded. Parity:
-`*FLITCHK` pins exist and the TB drives `TX<x>FLITCHK` when `parityEn=1`, so a
-directed test miscomputes one check byte and observes `linkParityError` — a
-registered one-cycle pulse per mismatching flit, only when `parityEn=1`. Credit:
-`linkCreditError` is a combinational pulse on credit overflow/underflow,
-reachable by a negative test that deliberately over-sends beyond granted
-credits. Neither output is sticky, so the monitor latches both. The parity test
-runs two sub-tests: spec-odd parity (every TB flit is flagged → demonstrates
-finding **F-1** at the boundary) and DUT-convention even parity with single-bit
-injection (proves the detection path end to end). The same answer fixed
-`linkUp[i]` semantics: it is the OR of the DUT's **receive**-direction channel
-states being RUN — the node→fabric direction only — level, and zero on the
-HN-F/HN-I/MN ordinals (finding **F-3**); the link reference model checks it
-against the TB's TX-link RUN state and checks the fabric→node direction
-separately via observed flit flow. Status: **CONFIRMED** → `[ASSUMPTION:17]`.
-
----
-
-## Configuration, address map, and node table
-
-### Q10. `REGION_TARGET` slot semantics and the `REGION_ATTRIBUTES[3:0]` bit layout
-
-**What the top module gives.** `REGION_TARGET` is
-`logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]`, and `makeRegionTarget` assigns
-`EFFECTIVE_NODE_IDS[OFF_HNI]` into it, so the slot holds a literal NodeID rather
-than an index into a node table. The same width appears on
-`requesterSamTarget`, on `chi_noc_flit_t.targetNodeId`, and on the `tgtId` field
-that `reqToNoc` writes. Attributes are built as
-`{SAM_REGION_HNF_HASH, 1'b0, 1'b1}`, `{SAM_REGION_DIRECT, 1'b0, 1'b1}` and
-`{SAM_REGION_MMIO, 1'b0, 1'b1}`, so `SAM_REGION_*` occupies bits 3:2 and two
-single-bit fields follow.
-
-**Resolution (2026-09-22, user from `chi_sam.sv`).** Confirmed with one
-correction: the attribute layout is `{kind[3:2], secureOnly[1], valid[0]}` —
-bit 1 is **secure-only**, not a generic qualifier, and bit 0 is valid. Kinds:
-HNF_HASH=00, DIRECT=01, MMIO=10. `CHI_NODEID_SLOT_W == CHI_MAX_NODEID_W == 16`;
-the slot holds the Home Node's NodeID zero-extended to 16 bits and is ignored
-for HNF_HASH regions. The limit is **inclusive** (`addr <= limit`) and the first
-matching region in ascending order wins; a secure-only match from a Non-secure
-request returns unmapped with **no fall-through** to later regions. The TB
-region table sets `secureOnly` per test intent, and a directed test covers the
-secure-only/NS-mismatch unmapped path. Status: **CONFIRMED** →
-`[ASSUMPTION:10]`.
-
-### Q11. Unused regions, and the fourth region slot
-
-**What the top module gives.** `NUM_REGIONS` defaults to 4 but
-`USE_DEFAULT_REGIONS` fills only regions 0, 1 and 2: region 0 is the lower half
-of the address space hashed across the HN-Fs, region 1 is the upper half below
-`CFG_MMIO_BASE` direct to HN-I ordinal 0, region 2 is the 4 KiB `CFG_MMIO_BASE`
-window to the same HN-I. Region 3 is left `'0`.
-
-**Resolution (2026-09-22, user from `chi_sam.sv`).** Corrected mechanism:
-region 3 is inert because its attributes default to `'0` (`valid=0`), not
-because base ≥ limit — with `valid=1`, `base == limit` matches exactly one
-address, since the limit is inclusive. The TB mirrors the three-region default
-explicitly with `USE_DEFAULT_REGIONS=0`, keeps region 3 invalid in the default
-map, and exercises single-address (`base == limit`) regions in the
-region-boundary directed test. Runtime region programming is out of scope
-(Q18a). Status: **CONFIRMED** → `[ASSUMPTION:11]`.
-
-### Q12. What is in `CHI_CFG_DEFAULT`?
-
-**Why it matters.** The Stage 0 report cannot print a numeric NodeID and region
-table without it, and `USE_DEFAULT_PLACEMENTS` is only legal when
-`NUM_NODES == 14`, with `DEFAULT_PLACEMENTS` enumerated for ordinals 0 to 13.
-
-**Default.** Nothing numeric is hardcoded in the testbench. `chiGlobalsPkg`
-starts from `CHI_CFG_DEFAULT`, applies the `+define+CHI_TB_*` overrides, and
-exports the resolved values; `hdlTop` prints the fully resolved configuration,
-NodeID table, placement table and region table in an `initial` block at time 0,
-and Stage 1 pastes that printout into `traceability.md`. The testbench never
-depends on `NUM_NODES == 14` because it supplies its own placements (Q5).
-
-**Resolution (2026-09-22).** Partially revealed by the Q5/Q7 answers: the DUT
-default has `nodeIdW=11` on a 4×4 mesh with a 6-bit deviceId field, and
-`dataCheckEn=1`, `poisonEn=1`; the answers also confirm `chi_cfg_t` contains
-`pbhaEn`, `mteEn`, `multiReqEn` and `parityEn` even though the top module never
-references them. Everything the TB depends on is overridden through
-`+define+CHI_TB_*`, and the time-0 printout mechanism above is adopted to
-capture the rest. Status: **CLOSED** (non-blocking; printout adopted).
-
-### Q21. How does `chiFileList.f` pull in the repository's `filelist.f` without opening it?
-
-**Default.** `chiFileList.f` references it as `-F $(CHI_RTL_ROOT)/filelist.f`,
-using the `xrun` form that resolves paths inside an argument file relative to
-**that file's own directory** rather than the launch directory, so the
-repository's internal relative paths resolve against the repository root whatever
-directory `make` was run from. `CHI_RTL_ROOT` is a Makefile variable defaulting
-to `../../../chi_rtl`, matching a clone placed beside the `DV/` tree. If `-F`
-turns out not to have that semantics in the installed Xcelium version, the
-Makefile's fallback target runs `cd $(CHI_RTL_ROOT) && xrun ... -f filelist.f`
-with all testbench paths made absolute. Confirm which form the installed version
-needs, and whether `filelist.f` already supplies its own `-incdir` lines for
-`rtl/if` and `rtl/pkg` or whether `chiFileList.f` must add them.
-
-**Resolution (2026-09-22).** ADOPTED: `chiFileList.f` references the repository
-as `-F $(CHI_RTL_ROOT)/filelist.f` (xrun `-F` resolves paths inside an argument
-file relative to that file's own directory), with `CHI_RTL_ROOT` defaulting to
-the sibling clone and the CWD-based fallback target documented in the Makefile.
-For the local slang pass, the equivalent (`slang -F`) is verified against the
-built binary before use and recorded in `iteration-log.md`. Status:
-**CONFIRMED** → `[ASSUMPTION:21]`.
-
----
-
-## Protocol scope per node class
-
-### Q13. Do RN-D and RN-I ports receive snoops?
-
-**What the top module gives.** All three requester classes are instantiated with
-`IS_REQUESTER = 1'b1`, so `portSnpTxValid`/`portSnpTxFlit` are wired from
-`snpOutValid`/`snpOutFlit` on RN-D and RN-I ports too, not tied off.
-
-**Resolution (2026-09-22, user from `chi_mn_dvm.sv`).** The MN sends `SnpDVMOp`
-sequentially to **every** Requester — RN-F, RN-D **and RN-I** — including the
-originator itself, two flits per target, waiting for each response. Sending to
-the originator is legal (IHI0050H B8.2.1 step 4: permitted, not required);
-sending to RN-I violates B13.6.1.3 (the RN-I interface has no SNP channel) →
-finding **F-5**, waived and counted so DVM tests can run
-(`chiRequesterAgentConfig.allowRniDvmSnoop`, default 1 with a UVM_WARNING per
-occurrence; 0 = strict, UVM_ERROR). All three requester agent classes advertise
-SNP credits and answer `SnpDVMOp`; coherent (non-DVM) snoops to RN-D/RN-I
-remain hard errors. Status: **CONFIRMED** → `[ASSUMPTION:13]`.
-
-### Q14. Which nodes are in the DVM node set?
-
-**What the top module gives.** `makeDvmIds` fills `DVM_NODE_IDS` with the first
-`NUM_REQ` NodeIDs, that is every RN-F, RN-D **and** RN-I, and passes them to
-`chi_mn_dvm` as `NUM_DVM_NODES`/`DVM_NODE_IDS`.
-
-**Resolution (2026-09-22, user from `chi_mn_dvm.sv`).** Confirmed: the DVM node
-set is every Requester including RN-I and the originator (the RN-I part is
-finding **F-5**, waived per Q13). The same answer exposed two more MN
-deviations: the MN has **no DBIDResp / NonCopyBackWriteData phase** (it goes
-IDLE → snoop → Comp), although IHI0050H B8.2.1 steps 2–3 and B8.2.2 steps 2–3
-require a DBIDResp followed by an 8-byte NonCopyBackWriteData — finding **F-6**,
-waived by `chiRequesterAgentConfig.expectDvmDbidResp` (default 0 = tolerate and
-count a warning; 1 = strict, expect the spec flow and error on its absence);
-and the MN returns NDERR for DVM types above Sync, which the TB expects and
-checks. The MN's SnpDVMOp payload bit layout is a local choice, so the TB
-checks only spec-mandated SnpDVMOp properties (two parts, same TxnID on both —
-B8.2.3.2) and never the payload encoding. Status: **CONFIRMED** →
-`[ASSUMPTION:14]`.
-
-### Q15. Features with no `chi_cfg_t` enable field among those the top module references
-
-**Why it matters.** The feature matrix may not mark a feature `N/A: disabled`
-without an enable field, nor `Verified` without a test, a check and covered
-bins. The referenced enable fields are `atomicEn`, `dctEn`, `dmtEn`, `dwtEn`,
-`stashEn`, `dvmEn`, `exclEn`, `mpamEn`, `mecEn`, `cdaEn`, plus `cfgAccess`,
-`topology`, `interleaveGranule`, `posEntries`, `lcrdDepth`, `exclMonitors`,
-`snpFilterEntries`, `snpFilterWays`, `rsvdcW`, `mpamW`. There is no field for
-CMOs, write-zero, `Order`/`ReadReceipt`, error and poison and `DataCheck`,
-memory tagging, or PBHA, yet `CHI_PBHA_W` and a lone `+ 1` appear in the REQ
-width bound, which suggests PBHA and at least one tag-related field are sized by
-`chi_cfg_t` members the top module does not reference and that I am therefore
-not allowed to use.
-
-**Resolution (2026-09-22, user answers to Stage 0 register items 5 and 9).**
-The enable fields exist in `chi_cfg_t` even though the top module never
-references them: `pbhaEn`, `mteEn`, `dataCheckEn`, `poisonEn`, `multiReqEn`,
-`parityEn`. Consequences: CMOs, Write+CMO (`Write*CleanSh/CleanInv/PerSep/PoPA`
-— supported), WriteZero (`WriteUniqueZero`/`WriteNoSnpZero` — supported in
-HN-F), Order/ReadReceipt, QoS and the error/poison/DataCheck paths are all
-testable and each gets a test, a check and coverage; MTE is testable for tag
-propagation because DAT Tag/TU bits are always present; PBHA is testable with
-`pbhaEn=1`. **MultiReq is inert**: `multiReqEn` is declared but no logic
-references it, so the DUT neither implements nor rejects multi-request
-transactions → finding **F-4**; the TB always drives MultiReq=0 and
-chiMultiReqTest stays gated and reports SKIP. Status: **CONFIRMED** →
-`[ASSUMPTION:15]`.
-
-### Q16. Reset and bring-up requirements
-
-**Default.** `resetn` is asserted low for at least 10 `clk` cycles from time 0
-and de-asserted synchronously on a clock edge. No `chi_if` activity, including
-`TXSACTIVE`, starts before `resetn` is high. Link activation then runs
-STOP to ACTIVATE to RUN per direction, and no flit is sent before both the
-direction is RUN and a credit has been received.
-
-**Resolution (2026-09-22).** ADOPTED. With Q2 resolved, BFMs additionally
-qualify on `chiPort.RESETn` (DUT-driven copy of the same reset); with Q3
-resolved, "no `TXSACTIVE` before reset" becomes a DUT observation, not a TB
-action, since the DUT owns both SACTIVE pins (F-2). Status: **CONFIRMED** →
-`[ASSUMPTION:16]`.
-
----
-
-## Testbench structure questions for approval
-
-### Q18. Four reference-model files inside `topEnv/`
-
-The checking section requires four reference models with no shared state. Coding
-them as one class in `topScoreboard.sv` would make one very large file whose
-four halves cannot be reviewed or reused independently.
-
-**Default.** Keep `topScoreboard.sv` as the `uvm_scoreboard` that owns the
-analysis exports, the flit queues and the end-of-test checks, and add four files
-in the same directory, named by the integration-layer scheme without the `chi`
-prefix: `topEnv/topLinkRefModel.sv`, `topEnv/topLifecycleRefModel.sv`,
-`topEnv/topDirectoryRefModel.sv`, `topEnv/topMemoryRefModel.sv`, each a
-`uvm_component` fed only from boundary traffic, all four listed in
-`chiFileList.f` and in the DV spec component inventory. If a single file is
-preferred, they collapse into `topScoreboard.sv` as nested classes with no other
-change.
-
-**Resolution (2026-09-22).** ADOPTED with one naming adjustment to naming rule
-3 (the approved suffix list has `Model`, not `RefModel`):
-`topEnv/topLinkModel.sv`, `topEnv/topLifecycleModel.sv`,
-`topEnv/topDirectoryModel.sv`, `topEnv/topMemoryModel.sv` — four
-`uvm_component`s fed only from boundary traffic, with no shared state between
-them or with any driver, each added to `chiFileList.f` and to the DV spec
-component inventory. Status: **CONFIRMED** → `[ASSUMPTION:18]`.
-
-### Q18a. Is configuration-port stimulus in scope?
-
-The architecture rules say the unused APB port is tied off, but `CFG.cfgAccess`
-can select `CFG_APB` or `CFG_CHI_MMIO`, and both change the DUT's address map at
-run time through `regionUpdate`.
-
-**Resolution (2026-09-22, user answer to Stage 0 register item 10).** Tie-off
-confirmed benign: with APB unselected the DUT drives `PRDATA=0`, `PREADY=1`,
-`PSLVERR=PSEL&PENABLE`, so `PSEL=0` (all other inputs 0) is safe. APB and
-CHI-MMIO runtime region programming are **Not verified — out of scope**; no APB
-stimulus test is built. Status: **CONFIRMED** → `[ASSUMPTION:18a]`.
-
----
-
-## Confirmed assumptions
-
-All entries resolved 2026-09-22. The number is the question number so that a
-source tag and this log never drift apart. `[ASSUMPTION:n]` in TB source refers
-to this register; each is also marked `See OPEN QUESTIONS`.
-
-- `[ASSUMPTION:1]` chi_if carries all spec-named signals plus `CLK`/`RESETn`
-  plus per-byte `*CHK` parity companions; no shared-credit pins; TB drives only
-  `TX<x>FLITPEND/FLITV/FLIT[/FLITCHK]`, `TXLINKACTIVEREQ`, `RXLINKACTIVEACK`,
-  `RX<x>LCRDV`, `SYSCOREQ`; `TXSNPFLIT*` tied 0. (Q1)
-- `[ASSUMPTION:2]` `chi_if.CLK/RESETn` are driven by the DUT; BFMs sample
-  `chiPort.CLK`; TB never drives them. (Q2)
-- `[ASSUMPTION:3]` DUT drives both SACTIVE pins to `resetn`; TB never drives
-  `TXSACTIVE`; SACTIVE checking reduced accordingly. Finding F-2. (Q3)
-- `[ASSUMPTION:4]` `SYSCOACK` is a combinational copy of `SYSCOREQ` on every
-  port class; TB drives `SYSCOREQ` on RN-F (RN-D optional), ties 0 elsewhere. (Q4)
-- `[ASSUMPTION:5]` NodeID = `{meshY, meshX, devicePort, deviceId}` LSB-first
-  with `xW/yW/portW = clog2Min1(meshX/meshY/numDevPortsPerXp)` (≥1) and
-  `deviceIdWidth = nodeIdW − yW − xW − portW`; TB-owned `tbEncodeNodeId` with
-  `deviceId = ordinal`; placements built from `chi_cfg_pkg` types and
-  `chi_node_class_e` literals; DUT elaboration checks verify the table. (Q5)
-- `[ASSUMPTION:7]` Flit field presence/order per IHI0050H B13.9 as extracted by
-  this run; DataCheck/Poison present by default; Tag/TU always present in DAT;
-  PBHA when `pbhaEn`; MECID in REQ/SNP/DAT when `mecEn`; StreamID+SecSID1 when
-  `cdaEn`; TB widths self-checked at elaboration. (Q7)
-- `[ASSUMPTION:8]` 64-byte line; `512/dataW` flits per line; `BE = dataW/8`;
-  `DataID` steps by `dataW/128`. (Q8)
-- `[ASSUMPTION:9]` `lcrdDepth` = per-channel RX buffer depth; TB advertises
-  exactly `lcrdDepth` credits per received channel at RUN. (Q9)
-- `[ASSUMPTION:10]` Region attributes `{kind[3:2], secureOnly[1], valid[0]}`,
-  kinds HNF_HASH=00/DIRECT=01/MMIO=10; `REGION_TARGET` = Home NodeID (16-bit
-  slot); inclusive limit; first match wins; secure-only + NS → unmapped. (Q10)
-- `[ASSUMPTION:11]` A region with `valid=0` never matches; `base == limit`
-  with `valid=1` matches exactly one address. (Q11)
-- `[ASSUMPTION:13]` MN snoops DVM to every Requester incl. RN-I (F-5, waived
-  and counted) and the originator (legal); all requester agents answer
-  `SnpDVMOp`. (Q13)
-- `[ASSUMPTION:14]` MN has no DVM DBIDResp/NCBWrData phase (F-6, waived via
-  `expectDvmDbidResp=0`); MN returns NDERR for DVM types above Sync; TB checks
-  only spec-mandated SnpDVMOp properties. (Q14)
-- `[ASSUMPTION:15]` `pbhaEn`/`mteEn`/`dataCheckEn`/`poisonEn`/`multiReqEn`/
-  `parityEn` exist in `chi_cfg_t`; MultiReq is inert in the DUT (F-4) and the
-  TB always drives MultiReq=0. (Q15)
-- `[ASSUMPTION:16]` Reset held ≥10 cycles, synchronous deassert; no link
-  activity before `resetn` high. (Q16)
-- `[ASSUMPTION:17]` Parity and credit errors are injectable black-box;
-  `linkParityError`/`linkCreditError` are single-cycle pulses latched by the
-  monitor; `linkUp[i]` = DUT receive-direction RUN, level (F-3). (Q17)
-- `[ASSUMPTION:18]` Four reference models live in separate files
-  `topEnv/topLinkModel.sv`, `topLifecycleModel.sv`, `topDirectoryModel.sv`,
-  `topMemoryModel.sv`. (Q18)
-- `[ASSUMPTION:18a]` APB tied off; runtime region programming out of scope. (Q18a)
-- `[ASSUMPTION:21]` `chiFileList.f` pulls in the DUT via
-  `-F $(CHI_RTL_ROOT)/filelist.f` (paths resolve relative to the filelist's own
-  directory). (Q21)
-
-Q6 (TgtID) and Q12 (`CHI_CFG_DEFAULT` contents) are **CLOSED** — facts, not
-assumptions. Q19 (spec issue) and Q20 (simulator process) are **CLOSED**.
-
-### Mapping from the 2026-09-22 Stage 0 twelve-question register
-
-The user's RTL answers were keyed to this run's original twelve-question
-register. Mapping to this 21-item register (several originals split):
-
-| Stage 0 register | This register | Answer headline |
-|---|---|---|
-| 1 chi_if inventory | Q1 (+Q17) | Corrected: parity `*CHK` pins exist; no shared-credit pins; even parity → F-1 |
-| 2 orientation | Q1 | Confirmed: node perspective on all classes |
-| 3 NodeID encoding | Q5 | Corrected: `{meshY,meshX,devicePort,deviceId}`, deviceId=ordinal |
-| 4 TgtID | Q6 | Confirmed (already readable from the top module) |
-| 5 flit layout | Q7 | Corrected: DataCheck/Poison default-on, Tag/TU always, PBHA via `pbhaEn` |
-| 6 REGION_TARGET | Q10 | Confirmed + secureOnly bit and inclusive limit |
-| 7 CLK/SACTIVE/SYSCO | Q2, Q3, Q4 | Corrected: DUT drives CLK/RESETn and both SACTIVE (F-2); SYSCOACK is a comb copy |
-| 8 linkUp/errors | Q17 | Corrected: RX-direction-only linkUp (F-3), pulsed error outputs |
-| 9 Issue-H support | Q15 | Corrected: Write+CMO/WriteZero supported; MultiReq inert (F-4) |
-| 10 APB | Q18a | Confirmed: tie-off benign |
-| 11 RN-I/RN-D snoops | Q13, Q14 | Confirmed + MN deviations (F-5, F-6) |
-| 12 region 3 | Q11 | Corrected: inert via `valid=0`; inclusive limit |
-
----
-
-## Annex: what Stage 0 read from `chi_interconnect_top.sv`
-
-Recorded here so that later stages can be reviewed without reopening the DUT
-file, and so that every `[TOP:...]` tag has a written source.
-
-**Parameters.** `CFG` (`chi_cfg_pkg::chi_cfg_t`, default `CHI_CFG_DEFAULT`),
-`AGE_LIMIT` (16), `NUM_REGIONS` (4), `NUM_NODES` (sum of the eight node counts),
-`NODE_IDS[NUM_NODES-1:0]` (`CHI_MAX_NODEID_W` wide, all-ones sentinel),
-`USE_DEFAULT_PLACEMENTS` (1), `PLACEMENTS[NUM_NODES-1:0]`
-(`chi_mesh_placement_t`), `CFG_MMIO_BASE` (`addrW` wide, top 4 KiB),
-`USE_DEFAULT_REGIONS` (1), `REGION_BASE`, `REGION_LIMIT` (`addrW` wide),
-`REGION_TARGET` (`CHI_NODEID_SLOT_W` wide), `REGION_ATTRIBUTES` (4 bits), the
-last four dimensioned `[NUM_REGIONS-1:0]`.
-
-**Ports.** `clk`, `resetn`; `chi_if` arrays `rnf`, `rnd`, `rni`, `snf`, `sni`,
-each sized `(count > 0 ? count : 1) - 1 : 0`; APB `PADDR[11:0]`, `PSEL`,
-`PENABLE`, `PWRITE`, `PWDATA[31:0]`, `PSTRB[3:0]`, `PPROT[2:0]`,
-`PRDATA[31:0]`, `PREADY`, `PSLVERR`; and `linkUp`, `linkParityError`,
-`linkCreditError`, each `[NUM_NODES-1:0]` and indexed by node ordinal, with the
-HN-F, HN-I and MN bits reading zero because those endpoints have no external
-link.
-
-**Node ordinal order.** RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I, MN, from
-`OFF_RNF = 0`, `OFF_RND`, `OFF_RNI`, `OFF_SNF`, `OFF_SNI`, `OFF_HNF`,
-`OFF_HNI`, `OFF_MN`.
-
-**`chi_cfg_t` fields the top module references, and nothing else is available to
-the testbench.** `numRnf`, `numRnd`, `numRni`, `numSnf`, `numSni`, `numHnf`,
-`numHni`, `numMn`, `addrW`, `dataW`, `nodeIdW`, `txnIdW`, `lpidW`, `ccidW`,
-`groupIdW`, `rsvdcW`, `numIfPerNode`, `replChannels`, `mpamW`, `mpamEn`,
-`mecEn`, `cdaEn`, `posEntries`, `lcrdDepth`, `exclMonitors`,
-`interleaveGranule`, `snpFilterEntries`, `snpFilterWays`, `atomicEn`, `dctEn`,
-`dmtEn`, `dwtEn`, `stashEn`, `dvmEn`, `exclEn`, `topology`, `meshX`, `meshY`,
-`numDevPortsPerXp`, `cfgAccess`.
-
-**Configuration legality, from the top module's own elaboration checks.**
-`dataW` in {128, 256, 512}; `addrW`, `nodeIdW`, `txnIdW`, `lpidW`, `ccidW`,
-`groupIdW` inside their `CHI_MIN_*`/`CHI_MAX_*` bounds; `rsvdcW` in {0, 4, 8,
-12, 16, 24, 32}; `numIfPerNode == 1` and `replChannels == 1`; `mpamW` in {0, 12,
-15} and `mpamEn` requires a non-zero `mpamW`; `mecEn` and `cdaEn` mutually
-exclusive; the four flit widths inside their Issue H ranges; `posEntries`,
-`exclMonitors`, `interleaveGranule`, `NUM_REGIONS`, `AGE_LIMIT` all non-zero and
-`lcrdDepth >= 2`; snoop-filter geometry non-zero with `snpFilterWays <=
-snpFilterEntries` and `snpFilterEntries % snpFilterWays == 0`;
-`interleaveGranule` a power of two at least 64; `numHnf > 0` requires
-`numSnf > 0`; `numHni > 0` requires `numSni > 0`; `atomicEn` requires a Home;
-`dctEn` requires RN-F and HN-F; `dmtEn` or `dwtEn` requires a Home and SN-F;
-`stashEn` requires RN-F and HN-F; `dvmEn` requires an MN and a Request Node;
-`exclEn` requires a Home and monitors; `topology` in {`CROSSBAR`, `RING`,
-`MESH_2D`}; `NUM_NODES` equal to the sum of the counts; `USE_DEFAULT_PLACEMENTS`
-only when `NUM_NODES == 14`; `MESH_2D` needs non-zero `meshX`, `meshY`,
-`numDevPortsPerXp`, a positive `deviceIdWidth(CFG)` and
-`meshX * meshY * numDevPortsPerXp >= NUM_NODES`; `cfgAccess` in
-{`CFG_PARAM_ONLY`, `CFG_APB`, `CFG_CHI_MMIO`}; `CFG_CHI_MMIO` requires
-`numHni > 0` and a 4 KiB-aligned `CFG_MMIO_BASE`; `CFG_APB` requires
-`NUM_REGIONS > 0`.
-
-**Boundary-visible routing rules.** A requester's REQ has its `TgtID` replaced
-by the address mapper's target; `DVMOp` is redirected to the MN when one exists;
-`PrefetchTgt` is redirected to an SN-F chosen by a separate prefetch mapper;
-`PCrdReturn` and any request with `allowRetry == 0` keep the `TgtID` the
-requester supplied. REQ egress toward a requester port and SNP ingress from any
-external port are unused.
-
-**Default region table when `USE_DEFAULT_REGIONS` is 1.** Region 0 covers
-`0` to `2**(addrW-1) - 1` with `{SAM_REGION_HNF_HASH, 1'b0, 1'b1}`; region 1
-covers `2**(addrW-1)` to `CFG_MMIO_BASE - 1` targeting HN-I ordinal 0 with
-`{SAM_REGION_DIRECT, 1'b0, 1'b1}`; region 2 covers `CFG_MMIO_BASE` to all-ones
-targeting the same HN-I with `{SAM_REGION_MMIO, 1'b0, 1'b1}`; region 3 is zero.
-
-**Internal endpoint pairing, visible only as parameters.** HN-F ordinal `i` is
-given `SN_NODE_ID = EFFECTIVE_NODE_IDS[OFF_SNF + (i % numSnf)]` and HN-I ordinal
-`i` targets `EFFECTIVE_NODE_IDS[OFF_SNI + (i % numSni)]`. The scoreboard does
-**not** use this: it never predicts which Home or Subordinate a request reaches.
-It is recorded only to explain why the memory reference model must track data by
-address across all Subordinates rather than per port.
+# Open questions
+
+Stage 0 questions, with the answers that Stage 1 codes against.
+Tags in the testbench use these numbers: `[ASSUMPTION:n]`.
+
+## 1. `chi_if` members and orientation — CONFIRMED, corrected
+
+`chi_if` carries the Issue H pin names, including a `*CHK` for every signal.
+`TX/RX<channel>FLITCHK` is `ceil(width/8)` bits. The DUT drives every
+single-bit `*CHK` to 0, including the node-side copies, so the testbench
+does not drive those.
+
+TX/RX names are from the external node's point of view. `*LCRDV` is driven
+by the receiver of that channel: the DUT drives `TX*LCRDV`, and the node
+drives `RX*LCRDV`.
+
+Requester testbench drives: `TXREQ/RSP/DAT` `FLITPEND`, `FLITV`, `FLIT`,
+`FLITCHK`; `RXRSP/DAT/SNP LCRDV`; `TXLINKACTIVEREQ`; `RXLINKACTIVEACK`;
+`SYSCOREQ`.
+
+Requester DUT drives: `RXRSP/DAT/SNP FLIT*`; `TXREQ/RSP/DAT LCRDV`;
+`TXLINKACTIVEACK`; `RXLINKACTIVEREQ`; `SYSCOACK`; `TXSACTIVE`; `RXSACTIVE`;
+`CLK`; `RESETn`; `TXSNPLCRDV` (held at 0); every 1-bit `*CHK`.
+
+Subordinate testbench drives: `TXRSP/DAT FLIT*`; `RXREQ/RSP/DAT LCRDV`;
+`TXLINKACTIVEREQ`; `RXLINKACTIVEACK`.
+
+Subordinate DUT drives: `RXREQ/RSP/DAT FLIT*`; `TXRSP/DAT LCRDV`; the same
+link, SACTIVE, `CLK`/`RESETn`, and 1-bit `*CHK` signals as on a requester port.
+
+`TXSNP*` is tied to 0 on every port. `TXREQ*` is tied to 0 on subordinate
+ports. `SYSCOACK` is a combinational copy of `SYSCOREQ` on every port class.
+Subordinate `SYSCOREQ` is tied to 0.
+
+## 2. CLK, RESETn, and SACTIVE — CONFIRMED, corrected
+
+`chi_if` contains `CLK` and `RESETn`. `chi_link_port` drives them from the
+top-level `clk` and `resetn`. The DUT also drives `TXSACTIVE` and
+`RXSACTIVE`, each equal to `resetn`. The testbench drives none of these.
+`chiClkRstBfm` drives only the module ports. BFMs sample `chiPort.CLK`.
+
+This is a spec deviation: IHI 0050H B14.7.2 makes `TXSACTIVE` a node output.
+The monitor records the values and does not try to drive them.
+
+## 3. NodeID encoding — CONFIRMED, corrected
+
+LSB-first field order is `{deviceId, devicePort, meshX, meshY}`
+(MSB-first that reads `{meshY, meshX, devicePort, deviceId}`).
+
+Each coordinate field is `clog2Min1(dim)` bits, minimum 1.
+`deviceIdWidth = nodeIdW - yW - xW - portW`. The fields fill `nodeIdW`;
+the identifier is not zero-extended inside `nodeIdW`.
+`defaultNodeId` puts the node ordinal in `deviceId`. The testbench does
+the same when it builds `NODE_IDS`.
+
+For the default configuration the split is 11 = 2 + 2 + 1 + 6.
+
+`nodeClass` 0..7 is RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I, MN.
+`nodeIndex` is the index inside that class.
+
+`CHI_NODEID_SLOT_W` is 16, equal to `CHI_MAX_NODEID_W`. NodeIDs are
+zero-extended into that slot. On a REQ flit, `tgtId` is packed at
+`nodeIdW` bits.
+
+## 4. Requester TgtID — CONFIRMED
+
+`reqToNoc` writes the full NodeID into `tgtId`. DVMOp is redirected to the
+MN and PrefetchTgt to the prefetch mapper; both are overwritten as well.
+`PCrdReturn`, and any request with `AllowRetry == 0`, keeps the TgtID the
+requester drove.
+
+## 5. Flit layout — CONFIRMED, corrected
+
+Pack order follows IHI 0050H B13.9.1 (REQ), B13.9.2 (RSP), B13.9.3 (SNP),
+and B13.9.4 (DAT), from bit 0.
+
+REQ inserts a 6-bit slot after `MultiReq`: `{3'b0, Size[2:0]}` when
+`MultiReq` is 0, and `NumReq[5:0]` when it is 1. `Addr` follows that slot.
+
+`dataCheckEn` and `poisonEn` default to 1. DAT then carries `dataW/8`
+DataCheck bits and `dataW/64` Poison bits. Tag (`dataW/32`) and TU
+(`dataW/128`) are always present, whatever `mteEn` is. PBHA is off by
+default and is omitted.
+
+On-wire widths stay fixed when `txnIdW`, `lpidW`, `ccidW`, or `groupIdW`
+change. Those parameters size internal structures only. TxnID is 12,
+the group/LPID slot is 8, CCID is 2, ReturnTxnID is 12, RSP DBID is 12,
+DAT DBID is 16, DataSource is 8, and CacheLineID is 6 on RSP and DAT.
+Opcode widths are REQ 7, RSP 5, SNP 5, DAT 4. `PAS` Non-secure is `3'b001`.
+
+The 8-bit group slot is opaque. The DUT does not interpret LPID inside it,
+and the exclusive monitor matches line address and requester NodeID only.
+Two LPIDs on the same node collide in that monitor. That is a DUT finding.
+The testbench does not expect them to stay separate, and it does not place
+LPID in the low 5 bits.
+
+## 6. Region attributes — CONFIRMED, with the bit-1 correction
+
+`REGION_ATTRIBUTES` is `{kind[1:0], secureOnly, valid}`.
+
+- `2'b00` hashes across HN-F and ignores `REGION_TARGET`.
+- `2'b01` is a direct target.
+- `2'b10` is MMIO, also direct.
+
+`secureOnly` 1 rejects a PAS that `pasNonSecure()` treats as non-secure:
+Non-secure, Realm, and Non-secure Protected. `secureOnly` 0 applies to
+every PAS. Limits are inclusive. The first valid region in ascending index
+order wins. An unmapped or rejected address produces no error response,
+because `unmappedError` is not connected. Stimulus must not use those
+addresses.
+
+The default windows match the formulas in `chi_interconnect_top`: lower
+half hashed to HN-F, the span up to `CFG_MMIO_BASE` direct to the first
+HN-I, and the top window MMIO to that same HN-I. The testbench passes
+those values with `USE_DEFAULT_REGIONS` 0 so it knows them by construction.
+
+## 7. `CHI_CFG_DEFAULT` — CONFIRMED
+
+Counts sum to 14: RN-F 4, RN-D 0, RN-I 1, SN-F 2, SN-I 1, HN-F 4, HN-I 1,
+MN 1. The testbench reads the counts from the elaborated struct and does
+not hard-code them. `+define+CHI_TB_*` can override individual fields.
+
+## 8. Sentinel ports and L-Credits — CONFIRMED, with additions
+
+An idle sentinel, such as `rnd[0]`, is driven only on the node-owned
+signals from item 1, held inactive. No agent is bound to it.
+
+The DUT advertises `max(lcrdDepth, 2)` credits per channel. The top
+rejects `lcrdDepth` below 2, so a legal configuration advertises
+`lcrdDepth`. Granting more than that fires `linkCreditError`. The
+testbench treats `lcrdDepth` as a hard outstanding-credit cap.
+
+The DUT raises its TX link (the node's `RXLINKACTIVEREQ`) as soon as reset
+is released. The testbench acknowledges on the following clock.
+
+The per-agent outstanding cap of 16 is independent of `posEntries`.
+
+## 9. `filelist.f` — CONFIRMED, corrected
+
+`filelist.f` is an xrun argument file. `chiFileList.f` references it with
+`-F`, so paths inside it resolve from the `chi_rtl` directory regardless
+of the launch directory. It is not a SystemVerilog `` `include ``.
+
+Line 1 is a `#` comment. The file also compiles `rtl/top/*_compile.sv`
+(harmless with an explicit `-top`) and the `rtl/sva/*` bind files, which
+are active on every run. No `-incdir` is required for the DUT list.
+The testbench adds one `-incdir` for `chiLinkLayerBfm.svh`.
