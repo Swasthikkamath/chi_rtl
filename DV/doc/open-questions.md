@@ -1,0 +1,42 @@
+# CHI Interconnect DV — Open Questions and Assumptions Log
+
+Status: **Stage 0 — AWAITING ANSWERS** · Spec: ARM IHI 0050, **Issue H** (17 Sep 2025)
+
+Permitted inputs (INPUT ISOLATION): `chi_rtl/rtl/top/chi_interconnect_top.sv` and the
+AMBA CHI Architecture Specification only. No other repository file is read, listed, or
+inferred from.
+
+Every assumption below is marked in TB source with `See OPEN QUESTIONS` plus
+`[ASSUMPTION:<n>]`. An assumption becomes CONFIRMED or CORRECTED only by an explicit
+answer or by a documented elaboration/compile result that does not expose DUT internals.
+
+| # | Question | Default assumption (used until answered) | Status |
+|---|----------|-------------------------------------------|--------|
+| 1 | **chi_if signal inventory and names.** Does `chi_if` carry exactly the spec-named signals — per channel and direction `TX<x>FLITPEND/FLITV/FLIT/LCRDV` and `RX<x>FLITPEND/FLITV/FLIT/LCRDV` for x in {REQ,RSP,SNP,DAT}, plus `TXLINKACTIVEREQ/ACK`, `RXLINKACTIVEREQ/ACK`, `TXSACTIVE`, `RXSACTIVE`, `SYSCOREQ`, `SYSCOACK`? Are interface-parity pins (`*FLIPTRP`, `*CHK`), or Issue-H shared-credit pins (`*SHAREDCRD`, `*LCRDSHV`) present? | `chi_if` uses the exact IHI 0050H signal names; no parity/CHK pins and no shared-credit pins are present (no enable field for them is referenced by the top module). BFMs reference spec names only. | OPEN |
+| 2 | **TX/RX orientation on Subordinate-facing ports.** On `snf[]`/`sni[]` elements, are signal names still from the external node's perspective, i.e. the TB Subordinate BFM drives `TXRSP*`/`TXDAT*` and samples `RXREQ*`/`RXDAT*` (mirror of the Requester ports, where the TB drives `TXREQ*`/`TXRSP*`/`TXDAT*` and samples `RXRSP*`/`RXSNP*`/`RXDAT*`)? | Yes — names are from the external (TB) node's perspective on every port; the DUT drives the `RX*` side everywhere. Consistent with the top module, which receives `portReqRx*` and drives `portReqTx*` toward Subordinates. | OPEN |
+| 3 | **Legal NodeID values and placement encoding.** What bit layout do `nodeIdMeshX/nodeIdMeshY/nodeIdDevicePort` imply for NodeID, what is `deviceIdWidth(CFG)`, what are the `chi_mesh_placement_t.nodeClass` enum literals, and may the TB call `defaultNodeId`, `defaultMeshPlacement`, `nodeClassForOrdinal`, `nodeIndexForOrdinal` (are they in `chi_cfg_pkg`, like `chi_mesh_placement_t` and the `CHI_*` constants the top module qualifies explicitly)? | The TB calls those helpers from `chi_cfg_pkg` to build its NodeID/placement tables, then passes the same values back through `NODE_IDS`/`PLACEMENTS` with `USE_DEFAULT_PLACEMENTS=0`. Fallback if they are not visible: NodeID = `{meshY, meshX, devicePort}` with `deviceIdWidth` port bits, `clog2Min1(meshX)` x bits, `clog2Min1(meshY)` y bits, LSB-first. | OPEN |
+| 4 | **TgtID interpretation for Requester-originated REQ.** Confirmed from the top module that the SAM overrides TgtID except for DVM (→MN), PrefetchTgt (→prefetch mapper), and PCrdReturn or `AllowRetry==0` (→TgtID honored). Confirm the TB may drive any legal NodeID in TgtID for `AllowRetry==1` mapped requests, and that a replayed (`AllowRetry==0`) request must carry the NodeID taken from the RetryAck's SrcID. | TgtID is don't-care for mapped `AllowRetry==1` requests (TB drives 0); for replays and PCrdReturn the TB uses the SrcID observed on the RetryAck/PCrdGrant. No scoreboard check depends on the mapped-request TgtID value. | OPEN |
+| 5 | **Flit layout options (field presence and order).** Which optional B13.9 fields exist in the DUT's flits: MPAM (known: `mpamW`), RSVDC (known: `rsvdcW`), MECID (assume `mecEn`→16), StreamID+SecSID1 (assume `cdaEn`→16+1)? Which fields, if any, enable PBHA, DAT Tag/TU (MTE), DataCheck, and Poison — no `chi_cfg_t` field for them is referenced by the top module? | Field presence/order follows the IHI 0050H B13.9 tables exactly; only MPAM, RSVDC, MECID (mecEn), StreamID/SecSID1 (cdaEn) are optional-present; PBHA, Tag/TU, DataCheck, Poison are absent. `txnIdW`, `lpidW`, `ccidW`, `groupIdW` size internal structures only — flit fields stay TxnID=12, LPID=5-in-8, CCID=2, GroupID=8. | OPEN |
+| 6 | **REGION_TARGET slot semantics.** Is `REGION_TARGET[i]` the target Home Node's NodeID (truncated to `CHI_NODEID_SLOT_W`)? What is `CHI_NODEID_SLOT_W`? What are the `SAM_REGION_HNF_HASH/DIRECT/MMIO` encodings, and is the attribute layout `{mode[3:2], 1'b0, valid[0]}` as the top module's defaults suggest? | `REGION_TARGET` = Home Node (HN-F/HN-I) NodeID; `CHI_NODEID_SLOT_W == CHI_MAX_NODEID_W`; attributes = `{mode, 1'b0, valid}` with HNF_HASH=2'b00, DIRECT=2'b01, MMIO=2'b10; for HNF_HASH regions the target slot is ignored. | OPEN |
+| 7 | **Clock/reset/SACTIVE/SYSCO ownership.** Does `chi_if` contain `CLK`/`RESETn`, and if so who drives them? Confirm the TB node side drives `TXSACTIVE` (and `SYSCOREQ` on Requester ports) and the DUT drives `RXSACTIVE`/`SYSCOACK`. Which port classes expose SYSCO — RN-F only, or RN-F and RN-D? | `chi_if` has no CLK/RESETn (the top-level `clk`/`resetn` ports are the only clocks); TB drives `TXSACTIVE` on all node ports and `SYSCOREQ` on RN-F/RN-D ports (tied 0 on RN-I and Subordinate ports); SYSCO exists on RN-F and RN-D only. | OPEN |
+| 8 | **linkUp / error output semantics.** Does `linkUp[i]` assert exactly when both link directions reach RUN, and is it level? Are `linkParityError[i]`/`linkCreditError[i]` sticky-until-reset or pulsed? | `linkUp[i]` = (TxRun && RxRun), level; error outputs are sticky until reset; TB checks they remain 0 in error-free runs and treats any assertion as a DUT error. | OPEN |
+| 9 | **Issue-H transaction support.** Does the DUT implement: PrefetchTgt (routing visible in the top module — assumed yes), multi-request transactions (`MultiReq/NumReq/CacheLineID`), Write-with-CMO opcodes, and WriteZero (write-to-zero without data transfer)? No `chi_cfg_t` enable field for the last three is referenced by the top module. | PrefetchTgt: supported. MultiReq, Write+CMO, WriteZero: assumed unsupported; their tests are feature-gated and report SKIP until this is confirmed. | OPEN |
+| 10 | **APB configuration path.** With `cfgAccess == CFG_PARAM_ONLY`, confirm tying PSEL=0 (all other APB inputs 0) is legal and the DUT's tie-off (PREADY=1, PSLVERR=PSEL&PENABLE) is benign. | TB ties off APB in all default configurations; an APB-directed test runs only in a `CHI_TB_CFG_ACCESS_APB` variant. | OPEN |
+| 11 | **Snoop channel on RN-I / DVM-only snoops on RN-D.** The DUT builds a full SNP TX path on every Requester-class port. Confirm the TB must tolerate (drain) the SNP channel on RN-I ports even though no legal snoop may arrive, and that RN-D ports may receive only `SnpDVMOp`. | TB keeps the SNP RX link active on every Requester port; the scoreboard flags any non-DVM snoop to RN-D and any snoop at all to RN-I as a DUT error. | OPEN |
+| 12 | **Default region map usability.** With `USE_DEFAULT_REGIONS=1`, region 3 keeps `'{default:'0}` (base=0, limit=0). Confirm a region with base >= limit (or valid=0) matches nothing, so region 3 is inert. | Region with base >= limit (or valid=0) never matches; the TB's own region tables always set valid explicitly. | OPEN |
+
+## Confirmed facts read from `chi_interconnect_top.sv` (not assumptions)
+
+- Node ordinal map: RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I, MN (`OFF_*` localparams). `[TOP:OFF_*]`
+- `chi_if` arrays sized `max(count,1)`; no link layer is built for a zero-count class. `[TOP:ports]`
+- REQ routing: SAM(address, PAS.NS) decides, overridden by DVM→MN, PrefetchTgt→prefetch mapper,
+  PCrdReturn or `AllowRetry==0` → TgtID. `reqToNoc` rewrites `tgtId` to the SAM target. `[TOP:reqToNoc]`
+- HN-F *i* pairs with SN-F (*i* mod numSnf); HN-I *i* pairs with SN-I (*i* mod numSni). `[TOP:hnf_nodes/hni_nodes]`
+- Default regions: 0 = lower half → HNF_HASH; 1 = upper half below `CFG_MMIO_BASE` → DIRECT→HN-I[0];
+  2 = top 4 KiB → MMIO→HN-I[0]; attribute layout `{mode,1'b0,valid}`. `[TOP:makeRegion*]`
+- `USE_DEFAULT_PLACEMENTS=1` requires `NUM_NODES==14`; placements are checked for all topologies,
+  including NodeID routing fields matching placement coordinates. `[TOP:cfg_check]`
+- Legal ranges enforced by the DUT: dataW ∈ {128,256,512}; rsvdcW ∈ {0,4,8,12,16,24,32};
+  mpamW ∈ {0,12,15}; mecEn and cdaEn mutually exclusive; lcrdDepth ≥ 2; interleaveGranule ≥ 64 and
+  a power of two; numIfPerNode == replChannels == 1. `[TOP:cfg_check]`
+- Flit totals must land inside the Issue H ranges of B13.9 (checked by the DUT). `[TOP:cfg_check]`

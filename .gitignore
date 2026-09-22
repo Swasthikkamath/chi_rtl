@@ -1,0 +1,17 @@
+# DUT input repository (read-only input, never committed; INPUT ISOLATION)
+chi_rtl/
+
+# Tool/agent scratch (spec text snapshots, logs)
+agent-tools/
+
+# Simulation output
+*.shm
+*.log
+*.vcd
+*.fsdb
+xcelium.d
+waves/
+simv*
+*.history
+*.key
+DV/sim/xcelium/work/
