@@ -36,3 +36,7 @@ $CHI_TB_ROOT/src/hdlTop/hdlTop.sv
 // the tests. Include path covers the classes this package pulls in.
 +incdir+$CHI_TB_ROOT/src/hvlTop/chiRequester
 $CHI_TB_ROOT/src/hvlTop/chiRequester/chiRequesterPkg.sv
+
+// Subordinate agent. Same include-path rule as the requester package.
++incdir+$CHI_TB_ROOT/src/hvlTop/chiSubordinate
+$CHI_TB_ROOT/src/hvlTop/chiSubordinate/chiSubordinatePkg.sv

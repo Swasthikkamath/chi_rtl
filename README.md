@@ -5,14 +5,16 @@ in the `chi_rtl` checkout. This tree is only the testbench and the DV spec.
 
 Stage 1 elaborates the HDL top. Stage 2 adds the requester agent:
 sequences state intent, and the driver proxy chooses the opcode from
-its cache model. The subordinate agent, scoreboard, and tests are not
-in this snapshot yet.
+its cache model. Stage 3 adds the subordinate agent: it answers
+whatever request arrives, from its own memory, and does not predict
+the home. The scoreboard and tests are not in this snapshot yet.
 
 ## Layout
 
 - `DV/src/globals/chiGlobalsPkg.sv` owns the configuration and the flit model.
 - `DV/src/hdlTop` holds the DUT, the BFMs, and `hdlTop`.
 - `DV/src/hvlTop/chiRequester` is the RN-F, RN-D, and RN-I agent.
+- `DV/src/hvlTop/chiSubordinate` is the SN-F and SN-I agent.
 - `DV/sim/xcelium` is the Xcelium flow. `make check` elaborates it with slang.
 - `DV/doc/open-questions.md` records the confirmed Stage 0 answers.
 - `DV/doc/iteration-log.md` is the findings register and the bring-up log.
@@ -36,8 +38,9 @@ so until then the licence-free check is the command that passes:
 make -C DV/sim/xcelium check SLANG=/path/to/slang UVM_HOME=/path/to/uvm-core-2020.3.1
 ```
 
-`check` elaborates `hdlTop` and type-checks `chiRequesterPkg`. The DUT
-list is generated from `chi_rtl/filelist.f` on each build.
+`check` elaborates `hdlTop` and type-checks `chiRequesterPkg` and
+`chiSubordinatePkg`. The DUT list is generated from `chi_rtl/filelist.f`
+on each build.
 
 ```
 make -C DV/sim/xcelium check-sweep
