@@ -39,7 +39,7 @@ driver. [ASSUMPTION:18]
 | Model | What it checks |
 | --- | --- |
 | `topLinkModel` | Active ports reach TX and RX RUN. `linkUp` is compared with TX RUN only. At the end every TX link is STOP. Credit grants equal protocol flits plus L-Credit returns on active ports. Parity and credit pulses match the test's expect flags. A missing credit pulse is a warning. |
-| `topLifecycleModel` | Every requester TX request and subordinate RX request is outstanding until Comp, the expected data beats, and CompAck when `expCompAck` is set. An ordered read that completes or returns data before ReadReceipt is an error. The maps are empty at the end. |
+| `topLifecycleModel` | Every requester TX request and subordinate RX request is outstanding until Comp, the expected data beats, and CompAck when `expCompAck` is set. An ordered read that completes or returns data before ReadReceipt is an error. PrefetchTgt is counted, not tracked: it has no response, and its TxnID must be 0 and need not be unique. Error completions arriving at a requester are counted in total and by line. The maps are empty at the end. |
 | `topDirectoryModel` | A snoop response without a remembered snoop is an error. A response of UC/UD, SD, UC-PD, or SD-PD claims unique for that line. A second owner is an error. UC and UD share one encoding. |
 | `topMemoryModel` | Bytes are stored by address. A byte never written reads as `chiMemInitData`. The image changes only from subordinate RX write data, committed on Comp, and from WriteZero completions. WriteDataCancel does not commit. ReadNoSnp and ReadNoSnpSep data are compared. Coherent data and atomics are not. |
 
@@ -91,6 +91,17 @@ numHnf 4, numHni 1, numMn 1.
 | `chiDctTest` | `dctEn` and two RN-F | shared-line traffic |
 | `chiDmtTest` | `dmtEn` | ReadNoSnp |
 | `chiDwtTest` | `dwtEn` | WriteNoSnp |
+| `chiRespShapeTest` | always | subordinates send DBIDResp + Comp and withhold ReadReceipt |
+| `chiDataErrTest` | always | DERR on one line; reads that line and an untouched one |
+| `chiPrefetchTest` | `NUM_SNF >= 1` | PrefetchTgt, then ReadNoSnp of the same line |
+| `chiDataCorruptTest` | always | corrupt read data with RespErr OK; expects the checker to object |
+
+Four of those exist because a check the testbench already made had never
+been reached. `chiDataCorruptTest` is the only test whose pass condition
+is that a model reported an error: the mismatch reports are demoted and
+counted, and seeing none is the failure. It is what makes a clean run of
+every other test mean something, because it is the only evidence that the
+data comparison runs at all.
 
 ## 4. Feature matrix
 
@@ -113,7 +124,12 @@ fail, and a covered bin. Xcelium has not been run in this environment
 | CMO | `chiCmoTest` | lifecycle | `topIssueCg` | Implemented — Xcelium pending |
 | WriteZero | `chiWriteZeroTest` | memory zeros then compares the read | `topIssueCg` | Implemented — Xcelium pending |
 | Ordering | `chiOrderTest` | ReadReceipt before data and Comp | `topIssueCg` | Implemented — Xcelium pending |
-| RespErr NDERR | `chiRespErrTest` | lifecycle still retires | — | Implemented — Xcelium pending |
+| RespErr NDERR | `chiRespErrTest` | lifecycle still retires and the NDERR arrives at a Requester | `topCompletionCg`, `topReadDataCg` | Implemented — Xcelium pending |
+| RespErr DERR, one line | `chiDataErrTest` | the error reaches that line's read and no other | `topCompletionCg`, `topReadDataCg` | Implemented — Xcelium pending |
+| Subordinate response shapes | `chiRespShapeTest` | the separate pair was driven at least once | `chiSubordinateRespCg` shapeCx | Implemented — Xcelium pending |
+| PrefetchTgt (F-13) | `chiPrefetchTest` | the hint reached an SN-F; the read after it completes | `topIssueCg` prefetch | Implemented — Xcelium pending |
+| Data comparison is live | `chiDataCorruptTest` | fails when the corruption is *not* reported | — | Implemented — Xcelium pending |
+| Snoops the DUT chose | all coherent tests | directory invariant | `topSnoopCg` | Implemented — Xcelium pending |
 | Poison / DataCheck | `chiPoisonTest` | `expectPoison` / `expectDataCheck` | — | Implemented — Xcelium pending |
 | MTE | `chiMteTest` | request completes with TagOp | `topMteCg` when `mteEn` | Implemented — Xcelium pending |
 | PBHA | `chiPbhaTest` | request completes with PBHA | `topPbhaCg` when `pbhaEn` | Implemented — Xcelium pending |
@@ -127,6 +143,15 @@ fail, and a covered bin. Xcelium has not been run in this environment
 Disabled-feature covergroups are package-scope types constructed in
 `build_phase` only when the enable is set. `option.auto_bin_max = 0`
 because slang rejects `ignore_bins = default`.
+
+Coverage is split by who decided the thing being measured. `topIssueCg`
+and the feature groups record what the testbench asked of the
+interconnect, which is predictable and therefore weak evidence.
+`topSnoopCg`, `topCompletionCg`, `topReadDataCg` and the subordinate
+groups record what the interconnect chose to do about it: which snoops
+it sent, how it ended each transaction, and what it forwarded
+downstream. Those are the bins worth reading, because no sequence can
+ask for them directly.
 
 ## 5. Sign-off
 
@@ -143,9 +168,18 @@ a test. A resized port connection fails the check.
 
 ## 6. Open items
 
-No new assumption was added for stages 4–7. The citation index remains
-`DV/doc/open-questions.md`.
+No new assumption was added for stages 4–9. The citation index remains
+`DV/doc/open-questions.md`. F-13 to F-15, all testbench defects found by
+the stage 9 audit, are in `DV/doc/iteration-log.md`.
 
 Still open for an Xcelium run: NumDat is not decoded (Q8); the credit
 equality check may be off by a pipeline beat and would then be loosened
 to a warning; F-1 is demonstrated only when `parityEn` is 1.
+
+One result of the audit is worth carrying forward as a rule. Three
+sequences existed that no test ever started, and each of them was the
+only thing that would have reached a check the testbench had already
+been written to make. A checker nothing arms is indistinguishable from
+a checker that works. Every check added from here should land with the
+stimulus that reaches it, and where the check is the deliverable, with
+a test that fails when it does not fire.
