@@ -14,6 +14,10 @@ class chiRequesterMonitorProxy extends uvm_monitor;
   uvm_analysis_port#(chiDatFlitT) rxDatPort;
   uvm_analysis_port#(chiSnpFlitT) rxSnpPort;
   uvm_analysis_port#(chiLinkSampleT) linkPort;
+  // The raw sample stream, with the node identity, the sample time and the
+  // L-Credit-return flag still attached. The scoreboard subscribes here:
+  // the per-channel ports above unpack the flit but drop all three.
+  uvm_analysis_port#(chiFlitSampleT) flitSamplePort;
 
   `uvm_component_utils(chiRequesterMonitorProxy)
 
@@ -27,6 +31,7 @@ class chiRequesterMonitorProxy extends uvm_monitor;
     rxDatPort = new("rxDatPort", this);
     rxSnpPort = new("rxSnpPort", this);
     linkPort = new("linkPort", this);
+    flitSamplePort = new("flitSamplePort", this);
   endfunction
 
   function void build_phase(uvm_phase phase);
@@ -53,6 +58,7 @@ class chiRequesterMonitorProxy extends uvm_monitor;
     chiFlitSampleT sample;
     forever begin
       bfm.getFlitSample(sample);
+      flitSamplePort.write(sample);
       case (sample.channel)
         CHI_CH_REQ: begin
           if (sample.direction == CHI_DIR_TX)

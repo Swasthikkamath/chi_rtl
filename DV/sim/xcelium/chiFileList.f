@@ -40,3 +40,9 @@ $CHI_TB_ROOT/src/hvlTop/chiRequester/chiRequesterPkg.sv
 // Subordinate agent. Same include-path rule as the requester package.
 +incdir+$CHI_TB_ROOT/src/hvlTop/chiSubordinate
 $CHI_TB_ROOT/src/hvlTop/chiSubordinate/chiSubordinatePkg.sv
+
+// Top-level environment: the scoreboard's four reference models, the
+// scoreboard that feeds them, and the env that builds the agents. Comes
+// after both agent packages, which it imports.
++incdir+$CHI_TB_ROOT/src/hvlTop/topEnv
+$CHI_TB_ROOT/src/hvlTop/topEnv/topEnvPkg.sv

@@ -1102,6 +1102,13 @@ package chiGlobalsPkg;
     chiLinkStateE rxState;
     bit           sysCoReq;
     bit           sysCoAck;
+    // The two SACTIVE pins, sampled with the rest of the status. The DUT
+    // drives both to resetn on every port class (finding F-2), so out of
+    // reset they must read constant 1; the link model checks exactly that
+    // and treats anything else (including X, which samples as 0) as a
+    // violation.
+    bit           txSActive;
+    bit           rxSActive;
     time          sampleTime;
   } chiLinkSampleT;
 
