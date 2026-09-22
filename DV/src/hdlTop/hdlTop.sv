@@ -74,6 +74,24 @@ module hdlTop;
     $error("[hdlTop] NodeID device field is %0d bits, too few for %0d nodes plus the reserved id 0",
            chiGlobalsPkg::DEVICE_ID_W, chiGlobalsPkg::NUM_NODES);
 
+  // The flit model has two independent derivations that have to agree: the
+  // width formula, whose coefficients were measured at the DUT boundary, and
+  // the field list, read off the specification's B13.6 to B13.9 tables. If
+  // they ever disagree the model has gained or lost a field, and every flit
+  // above the missing one is misplaced. See OPEN QUESTIONS Q7.
+  if (chiGlobalsPkg::REQ_NAMED_W != chiGlobalsPkg::REQ_FLIT_W)
+    $error("[hdlTop] REQ fields sum to %0d but the bus is %0d bits wide",
+           chiGlobalsPkg::REQ_NAMED_W, chiGlobalsPkg::REQ_FLIT_W);
+  if (chiGlobalsPkg::RSP_NAMED_W != chiGlobalsPkg::RSP_FLIT_W)
+    $error("[hdlTop] RSP fields sum to %0d but the bus is %0d bits wide",
+           chiGlobalsPkg::RSP_NAMED_W, chiGlobalsPkg::RSP_FLIT_W);
+  if (chiGlobalsPkg::SNP_NAMED_W != chiGlobalsPkg::SNP_FLIT_W)
+    $error("[hdlTop] SNP fields sum to %0d but the bus is %0d bits wide",
+           chiGlobalsPkg::SNP_NAMED_W, chiGlobalsPkg::SNP_FLIT_W);
+  if (chiGlobalsPkg::DAT_NAMED_W != chiGlobalsPkg::DAT_FLIT_W)
+    $error("[hdlTop] DAT fields sum to %0d but the bus is %0d bits wide",
+           chiGlobalsPkg::DAT_NAMED_W, chiGlobalsPkg::DAT_FLIT_W);
+
   //----------------------------------------------------------------------------
   // Node interfaces
   //----------------------------------------------------------------------------
@@ -429,27 +447,22 @@ module hdlTop;
              chiGlobalsPkg::ADDR_W, chiGlobalsPkg::DATA_W,
              chiGlobalsPkg::NODE_ID_W, chiGlobalsPkg::TXN_ID_W,
              chiGlobalsPkg::LCRD_DEPTH);
-    $display({"[hdlTop] Flit widths, testbench model against interface:\n",
-              "[hdlTop]   REQ interface %0d  named %0d  reserved %0d\n",
-              "[hdlTop]   RSP interface %0d  named %0d  reserved %0d\n",
-              "[hdlTop]   SNP interface %0d  named %0d  reserved %0d\n",
-              "[hdlTop]   DAT interface %0d  named %0d  reserved %0d"},
-             ifReqW, chiGlobalsPkg::REQ_OFF_RESERVED, chiGlobalsPkg::REQ_RESERVED_W,
-             ifRspW, chiGlobalsPkg::RSP_OFF_RESERVED, chiGlobalsPkg::RSP_RESERVED_W,
-             ifSnpW, chiGlobalsPkg::SNP_OFF_RESERVED, chiGlobalsPkg::SNP_RESERVED_W,
-             ifDatW, chiGlobalsPkg::DAT_OFF_RESERVED, chiGlobalsPkg::DAT_RESERVED_W);
+    $display({"[hdlTop] Flit widths, interface against the model's field sum:\n",
+              "[hdlTop]   REQ %0d / %0d\n",
+              "[hdlTop]   RSP %0d / %0d\n",
+              "[hdlTop]   SNP %0d / %0d\n",
+              "[hdlTop]   DAT %0d / %0d"},
+             ifReqW, chiGlobalsPkg::REQ_NAMED_W,
+             ifRspW, chiGlobalsPkg::RSP_NAMED_W,
+             ifSnpW, chiGlobalsPkg::SNP_NAMED_W,
+             ifDatW, chiGlobalsPkg::DAT_NAMED_W);
 
-    // Two different failures are possible here and they are not equally bad.
-    //
     // A model width that disagrees with the chi_if bus means every flit is
-    // resized by the port connection, silently, in both directions. That is
-    // unrecoverable, so it is fatal.
-    //
-    // A non-empty reserved region means there are bits the bus carries that
-    // this model does not name. Packing still lands inside the wire and the
-    // link layer still works, but any transaction-level check that depends on
-    // a field inside that region is worthless. That is a finding, reported and
-    // carried, not a stop. See OPEN QUESTIONS Q7.
+    // resized by the port connection, silently, in both directions, so it is
+    // fatal rather than a warning. The two comparisons are different claims:
+    // the first says the width formula matches the bus, the second says the
+    // field list adds up to that width, so a field the model forgets shows up
+    // here instead of shifting every field above it. See OPEN QUESTIONS Q7.
     if ((chiGlobalsPkg::REQ_FLIT_W != ifReqW) ||
         (chiGlobalsPkg::RSP_FLIT_W != ifRspW) ||
         (chiGlobalsPkg::SNP_FLIT_W != ifSnpW) ||
@@ -458,15 +471,6 @@ module hdlTop;
                  " REQ %0d/%0d RSP %0d/%0d SNP %0d/%0d DAT %0d/%0d"},
              chiGlobalsPkg::REQ_FLIT_W, ifReqW, chiGlobalsPkg::RSP_FLIT_W, ifRspW,
              chiGlobalsPkg::SNP_FLIT_W, ifSnpW, chiGlobalsPkg::DAT_FLIT_W, ifDatW);
-    if ((chiGlobalsPkg::REQ_RESERVED_W != 0) ||
-        (chiGlobalsPkg::RSP_RESERVED_W != 0) ||
-        (chiGlobalsPkg::SNP_RESERVED_W != 0) ||
-        (chiGlobalsPkg::DAT_RESERVED_W != 0))
-      $display({"[hdlTop] FINDING: REQ %0d, RSP %0d, SNP %0d and DAT %0d bits",
-                " are carried but not named by the testbench flit model.",
-                " See OPEN QUESTIONS Q7."},
-               chiGlobalsPkg::REQ_RESERVED_W, chiGlobalsPkg::RSP_RESERVED_W,
-               chiGlobalsPkg::SNP_RESERVED_W, chiGlobalsPkg::DAT_RESERVED_W);
 
     for (int unsigned i = 0; i < chiGlobalsPkg::NUM_NODES; i++)
       $display({"[hdlTop] node %0d  %s  nodeId 0x%0h  mesh (%0d,%0d)",
