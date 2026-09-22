@@ -66,7 +66,11 @@ class chiRequesterSeq extends uvm_sequence#(chiRequesterTx);
     item.addr.rand_mode(0);
     item.size.rand_mode(0);
     item.order.rand_mode(0);
-    if (!(intent inside {CHI_INTENT_DVM_OP, CHI_INTENT_PCRD_RETURN})) begin
+    // Three intents have no say in ExpCompAck: DVM and PCrdReturn take no
+    // CompAck, and PrefetchTgt takes no response at all.
+    // [SPEC:IHI0050H B4.2.6.2]
+    if (!(intent inside {CHI_INTENT_DVM_OP, CHI_INTENT_PCRD_RETURN,
+                         CHI_INTENT_PREFETCH_TGT})) begin
       item.expCompAck = expCompAck;
       item.expCompAck.rand_mode(0);
     end

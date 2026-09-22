@@ -36,11 +36,19 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
 
   int unsigned prefetchTgtSeen;
 
+  // How often each alternative shape was actually driven. A test that
+  // switched the shape needs to know the DUT was presented with it, and no
+  // response comes back to say so.
+  int unsigned separateRespSent;
+  int unsigned readReceiptSuppressed;
+
   `uvm_component_utils(chiSubordinateDriverProxy)
 
   function new(string name, uvm_component parent);
     super.new(name, parent);
     prefetchTgtSeen = 0;
+    separateRespSent = 0;
+    readReceiptSuppressed = 0;
   endfunction
 
   function void build_phase(uvm_phase phase);
@@ -305,9 +313,13 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
     err = (rule != null) ? rule.respErr : cfg.defaultRespErr;
     wantReceipt = cfg.sendReadReceipt && ((rule == null) || !rule.suppressReadReceipt);
 
-    if ((req.order != '0) && wantReceipt) begin
-      chiWaitResponse(rule);
-      chiSendReadReceipt(req);
+    if (req.order != '0) begin
+      if (wantReceipt) begin
+        chiWaitResponse(rule);
+        chiSendReadReceipt(req);
+      end
+      else
+        readReceiptSuppressed++;
     end
 
     chiWaitResponse(rule);
@@ -446,6 +458,7 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
 
     chiWaitResponse(rule);
     if (separate) begin
+      separateRespSent++;
       chiSendSimpleRsp(req, RSP_DBID_RESP, err, ctx.dbId);
       chiWaitResponse(rule);
       chiSendSimpleRsp(req, RSP_COMP, err, ctx.dbId);
@@ -664,6 +677,14 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
   // Flit construction and bookkeeping
   //----------------------------------------------------------------------------
 
+  // The two responses that carry two completions in one flit. Everything
+  // else a Subordinate sends is one half of a pair, or a flow with no
+  // choice of shape at all.
+  // [SPEC:IHI0050H B2.3.9.2 Figure B2.16] [SPEC:IHI0050H B2.3.9.5 Figure B2.19]
+  function bit chiRspIsCombined(input chiRspOpcodeE opcode);
+    return opcode inside {RSP_COMP_DBID_RESP, RSP_COMP_PERSIST};
+  endfunction
+
   function chiRspFlitT chiBlankRsp();
     chiRspFlitT flit;
     flit = '{default: '0, opcode: RSP_LCRD_RETURN};
@@ -691,8 +712,13 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
     rsp.respErr = err;
     rsp.dbId = dbId;
     rsp.traceTag = req.traceTag;
+    // The shape is read back off the response being sent, not off the
+    // config knob that usually selects it. A sequence rule can override the
+    // knob per request, and a covergroup whose whole purpose is to prove
+    // both shapes were driven must not be told the shape by the thing being
+    // overridden.
     if (cov != null)
-      cov.sampleResponse(opcode, err, cfg.combinedWriteResp);
+      cov.sampleResponse(opcode, err, chiRspIsCombined(opcode));
     bfm.driveRsp(rsp);
   endtask
 

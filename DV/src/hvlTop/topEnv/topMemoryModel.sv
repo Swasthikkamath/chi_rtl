@@ -289,6 +289,13 @@ class topMemoryModel extends uvm_component;
     topMemKeyT key;
     if ((flit.opcode == REQ_LCRD_RETURN) || (flit.opcode == REQ_P_CRD_RETURN))
       return;
+    // PrefetchTgt moves no data and must carry TxnID 0, which another
+    // transaction from the same Requester is allowed to be using. Recording
+    // its address under that key would make the next read at TxnID 0 be
+    // compared against the wrong line.
+    // [SPEC:IHI0050H B4.2.6.2] [SPEC:IHI0050H B2.4.2]
+    if (flit.opcode == REQ_PREFETCH_TGT)
+      return;
     chiRnNoteReq(ordinal, nodeClass, isTx, flit);
     if (nodeClassIsRequester(nodeClass) && isTx) begin
       key = chiMemKey(ordinal, flit.txnId);

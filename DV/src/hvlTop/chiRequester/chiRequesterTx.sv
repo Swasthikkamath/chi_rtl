@@ -157,10 +157,37 @@ class chiRequesterTx extends uvm_sequence_item;
     else
       excl == 1'b0;
 
-    if (intent == CHI_INTENT_PCRD_RETURN)
+    // A request sent for the first time must carry AllowRetry 1; only a
+    // resend spending a pre-allocated P-Credit may clear it, and the driver
+    // does that itself on the resend rather than through this item. A
+    // PCrdReturn is spending a credit by definition.
+    // [SPEC:IHI0050H B2.10.2.1 AllowRetry]
+    if (intent == CHI_INTENT_PCRD_RETURN) {
       allowRetry == 1'b0;
-    else
+    } else {
+      allowRetry == 1'b1;
       tgtId == '0;
+    }
+    // PCrdType must be 0 whenever AllowRetry is 1.
+    // [SPEC:IHI0050H B2.10.2.2 PCrdType]
+    if (allowRetry == 1'b1)
+      pCrdType == '0;
+
+    // PrefetchTgt is a hint with no response, so most of the request is
+    // inapplicable and the specification requires those fields to be 0. The
+    // TgtID is the exception: it must name an SN-F, which the driver fills
+    // in from the prefetch mapper because the sequence does not know the
+    // node table. [SPEC:IHI0050H B4.2.6.2] [SPEC:IHI0050H B2.10.2.1]
+    if (intent == CHI_INTENT_PREFETCH_TGT) {
+      order == '0;
+      memAttr == '0;
+      snpAttr == 1'b0;
+      excl == 1'b0;
+      expCompAck == 1'b0;
+      allowRetry == 1'b1;
+      pCrdType == '0;
+      qos == '0;
+    }
 
     if (intent inside {
       CHI_INTENT_READ_SHARED, CHI_INTENT_READ_CLEAN, CHI_INTENT_READ_UNIQUE,

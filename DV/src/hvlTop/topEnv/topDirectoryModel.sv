@@ -236,6 +236,15 @@ class topDirectoryModel extends uvm_component;
       return;
     if (flit.opcode == REQ_LCRD_RETURN)
       return;
+    // DVMOp and PrefetchTgt have no cache state transition, and neither
+    // carries a usable line address: a DVMOp puts an operation in the
+    // address field and a PrefetchTgt is required to send TxnID 0, which is
+    // the one TxnID a Requester may reuse while another transaction holds
+    // it. Recording either would let a later completion that happens to
+    // carry TxnID 0 be attributed to the wrong line.
+    // [SPEC:IHI0050H B4.9] [SPEC:IHI0050H B2.4.2] [SPEC:IHI0050H B4.2.6.2]
+    if (flit.opcode inside {REQ_DVM_OP, REQ_PREFETCH_TGT, REQ_P_CRD_RETURN})
+      return;
     // Giving the line up needs no completion to be believed: the node has
     // said it no longer holds it.
     if (flit.opcode inside {REQ_EVICT, REQ_WRITE_BACK_FULL, REQ_WRITE_BACK_PTL,

@@ -501,6 +501,26 @@ package chiGlobalsPkg;
     return addr & ~chiAddrT'(CACHE_LINE_BYTES - 1);
   endfunction
 
+  // PrefetchTgt is the one request a Requester sends straight to a
+  // Subordinate, and it is mapped by an address-to-node table of its own:
+  // the same address reaches a Home as a Read and an SN-F as a PrefetchTgt.
+  // So this is a second mapper, not chiSamLookup read differently.
+  // [SPEC:IHI0050H B3.3.1] [SPEC:IHI0050H B4.2.6.2]
+  //
+  // Which SN-F holds which line is the interconnect's own business and is
+  // not visible at the boundary, so the testbench spreads lines across the
+  // SN-Fs itself. Landing on the SN-F that does not hold the line is still
+  // legal: the receiver is permitted to discard the hint.
+  function automatic int unsigned prefetchTargetOrdinal(input chiAddrT addr);
+    int unsigned line;
+    line = int'(lineAlign(addr) / CACHE_LINE_BYTES);
+    return OFF_SNF + (line % NUM_SNF_IF);
+  endfunction
+
+  function automatic chiNodeIdT prefetchTargetNodeId(input chiAddrT addr);
+    return nodeIdOfOrdinal(prefetchTargetOrdinal(addr));
+  endfunction
+
   // The testbench's own model of the DUT's address mapper, written from the
   // region semantics rather than from the design: attribute bit 0 is valid,
   // bit 1 is secureOnly, bits 3:2 are the region kind, limits are inclusive,

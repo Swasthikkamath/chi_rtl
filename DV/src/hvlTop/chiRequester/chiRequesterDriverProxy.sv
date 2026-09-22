@@ -246,6 +246,17 @@ class chiRequesterDriverProxy extends uvm_driver#(chiRequesterTx);
       seq_item_port.put_response(item);
       return;
     end
+    // PrefetchTgt has no response, no RetryAck and no TxnID: the Requester
+    // deallocates as soon as the request is sent. Allocating a TxnID and
+    // waiting, as every other request does, would hang here forever, and
+    // holding a TxnID would also break the rule that PrefetchTgt is the one
+    // request whose TxnID need not be unique.
+    // [SPEC:IHI0050H B4.2.6.2] [SPEC:IHI0050H B2.4.2]
+    if (opcode == REQ_PREFETCH_TGT) begin
+      chiSendRequest(item, opcode, '0, 1'b1, prefetchTargetNodeId(item.addr));
+      seq_item_port.put_response(item);
+      return;
+    end
     if (opcode == REQ_P_CRD_RETURN)
       chiTakePcrd(item.tgtId, item.pCrdType);
     chiAllocTxnId(txnId);

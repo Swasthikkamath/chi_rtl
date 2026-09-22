@@ -44,10 +44,18 @@ class topLifecycleModel extends uvm_component;
   topOpenTxn snTxn[topTxnKeyT];
   int unsigned txReqCount[int unsigned];
 
+  // PrefetchTgt is not a lifecycle at all, so it is counted rather than
+  // tracked. A test that sent one asks for the count to prove the hint
+  // reached a Subordinate, since no response would ever say so.
+  int unsigned rnPrefetchCount;
+  int unsigned snPrefetchCount;
+
   `uvm_component_utils(topLifecycleModel)
 
   function new(string name, uvm_component parent);
     super.new(name, parent);
+    rnPrefetchCount = 0;
+    snPrefetchCount = 0;
   endfunction
 
   function topTxnKeyT chiKey(input int unsigned ordinal, input chiTxnIdT txnId);
@@ -186,6 +194,20 @@ class topLifecycleModel extends uvm_component;
       txReqCount[ordinal]++;
       if (flit.opcode == REQ_P_CRD_RETURN)
         return;
+      // A PrefetchTgt gets no response and no RetryAck, and must carry
+      // TxnID 0, which is the one TxnID a Requester may use while another
+      // transaction still holds it. Opening a transaction for it would
+      // leave an entry nothing can ever retire, and would collide with the
+      // real transaction using TxnID 0.
+      // [SPEC:IHI0050H B4.2.6.2] [SPEC:IHI0050H B2.4.2]
+      if (flit.opcode == REQ_PREFETCH_TGT) begin
+        rnPrefetchCount++;
+        if (flit.txnId != '0)
+          `uvm_error("topLifecycleModel",
+            {$sformatf("RN ordinal %0d sent PrefetchTgt with TxnID %0h; B4.2.6.2 requires 0",
+              ordinal, flit.txnId)})
+        return;
+      end
       key = chiKey(ordinal, flit.txnId);
       if (!rnTxn.exists(key))
         rnTxn[key] = new();
@@ -194,6 +216,10 @@ class topLifecycleModel extends uvm_component;
     if (!nodeClassIsRequester(nodeClass) && !isTx) begin
       if (flit.opcode == REQ_P_CRD_RETURN)
         return;
+      if (flit.opcode == REQ_PREFETCH_TGT) begin
+        snPrefetchCount++;
+        return;
+      end
       key = chiKey(ordinal, flit.txnId);
       if (!snTxn.exists(key))
         snTxn[key] = new();

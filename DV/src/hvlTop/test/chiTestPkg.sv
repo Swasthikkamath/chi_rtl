@@ -37,4 +37,7 @@ package chiTestPkg;
   `include "chiDctTest.sv"
   `include "chiDmtTest.sv"
   `include "chiDwtTest.sv"
+  `include "chiRespShapeTest.sv"
+  `include "chiPrefetchTest.sv"
+  `include "chiDataCorruptTest.sv"
 endpackage

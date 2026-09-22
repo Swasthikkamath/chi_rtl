@@ -19,8 +19,16 @@ typedef enum int unsigned {
   CHI_VSEQ_WRITE,
   CHI_VSEQ_BURST,
   CHI_VSEQ_POISON,
-  CHI_VSEQ_RESP_ERR
+  CHI_VSEQ_RESP_ERR,
+  CHI_VSEQ_SEPARATE_RESP,
+  CHI_VSEQ_CORRUPT,
+  CHI_VSEQ_PREFETCH
 } chiVirtualSeqModeE;
+
+// The line the corruption mode targets. Named here so the test that arms
+// the rule and the test that checks the result agree without either one
+// reaching into the other.
+localparam int unsigned CHI_CORRUPT_LINE_INDEX = 40;
 
 class chiVirtualSeq extends uvm_sequence;
   chiVirtualSeqModeE mode;
@@ -140,6 +148,40 @@ class chiVirtualSeq extends uvm_sequence;
     end
   endtask
 
+  // Both write completion shapes and both read receipt policies are legal,
+  // so a Subordinate that always picks the same one leaves half of the
+  // DUT's receive logic untried. This switches every Subordinate to the
+  // other half. [SPEC:IHI0050H B2.3.9.1] [SPEC:IHI0050H B2.3.9.2]
+  task chiAllSeparateResp();
+    foreach (p_sequencer.snfSeqr[i]) begin
+      chiSubordinateSeparateRespSeq seq;
+      seq = chiSubordinateSeparateRespSeq::type_id::create($sformatf("sepSnf%0d", i));
+      seq.start(p_sequencer.snfSeqr[i]);
+    end
+    foreach (p_sequencer.sniSeqr[i]) begin
+      chiSubordinateSeparateRespSeq seq;
+      seq = chiSubordinateSeparateRespSeq::type_id::create($sformatf("sepSni%0d", i));
+      seq.start(p_sequencer.sniSeqr[i]);
+    end
+  endtask
+
+  // Armed on every Subordinate because the testbench does not choose which
+  // one the line lands on.
+  task chiAllCorrupt(input chiAddrT line);
+    foreach (p_sequencer.snfSeqr[i]) begin
+      chiSubordinateCorruptSeq seq;
+      seq = chiSubordinateCorruptSeq::type_id::create($sformatf("corruptSnf%0d", i));
+      seq.corruptLine = line;
+      seq.start(p_sequencer.snfSeqr[i]);
+    end
+    foreach (p_sequencer.sniSeqr[i]) begin
+      chiSubordinateCorruptSeq seq;
+      seq = chiSubordinateCorruptSeq::type_id::create($sformatf("corruptSni%0d", i));
+      seq.corruptLine = line;
+      seq.start(p_sequencer.sniSeqr[i]);
+    end
+  endtask
+
   task body();
     case (mode)
       CHI_VSEQ_COHERENT: begin
@@ -186,6 +228,29 @@ class chiVirtualSeq extends uvm_sequence;
       CHI_VSEQ_RESP_ERR: begin
         chiAllRespErr();
         chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(31));
+      end
+      CHI_VSEQ_SEPARATE_RESP: begin
+        chiAllSeparateResp();
+        // A write, so the DBIDResp and Comp arrive as two flits; then an
+        // ordered read, which is the only request whose ReadReceipt the
+        // Subordinate may withhold.
+        chiRnf(0, CHI_INTENT_WRITE_NO_SNP, coherentLineAddr(35));
+        chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(35), SIZE_W'(6), 2'b01);
+        chiRnf(0, CHI_INTENT_CLEAN_SHARED, coherentLineAddr(36));
+      end
+      CHI_VSEQ_CORRUPT: begin
+        // Write the line first: a byte nobody has written has no expected
+        // value, so corrupting a read of it would prove nothing.
+        chiRnf(0, CHI_INTENT_WRITE_NO_SNP, coherentLineAddr(CHI_CORRUPT_LINE_INDEX));
+        chiAllCorrupt(coherentLineAddr(CHI_CORRUPT_LINE_INDEX));
+        chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(CHI_CORRUPT_LINE_INDEX));
+      end
+      CHI_VSEQ_PREFETCH: begin
+        // The hint, then a real read of the same line. The read is what
+        // proves the Requester did not stall waiting for a response the
+        // hint never gets. [SPEC:IHI0050H B4.2.6.2]
+        chiRnf(0, CHI_INTENT_PREFETCH_TGT, coherentLineAddr(38));
+        chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(38));
       end
       default: begin
       end
