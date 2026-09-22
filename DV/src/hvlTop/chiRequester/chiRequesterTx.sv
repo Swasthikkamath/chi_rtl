@@ -105,9 +105,12 @@ class chiRequesterTx extends uvm_sequence_item;
     poison == '0;
     dataCheck == '0;
     size inside {[3'd0:3'd6]};
-    // The flit model stores PAS as {NSE, NS}. Non-secure is NS=1, NSE=0.
-    // [ASSUMPTION:10]
-    soft pas == 2'b01;
+    // Issue H replaced the NS and NSE bits with a three-bit PAS naming one of
+    // six Physical Address Spaces [SPEC:IHI0050H B13.10.68]. Stimulus stays in
+    // the Non-secure space: the address map's secure-only regions reject
+    // anything else, and a rejected request gets no error response from this
+    // DUT at all (finding F-7).
+    soft pas == chiGlobalsPkg::PAS_NON_SECURE;
     soft qos == '0;
     addr <= COHERENT_REGION_LIMIT;
 

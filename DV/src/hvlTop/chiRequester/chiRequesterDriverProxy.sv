@@ -192,6 +192,9 @@ class chiRequesterDriverProxy extends uvm_driver#(chiRequesterTx);
     flit.txnId = txnId;
     flit.opcode = opcode;
     flit.size = item.size;
+    // MultiReq 0 is what selects the Size reading of the shared slot. The DUT
+    // has no MultiReq logic at all (finding F-4), so it is never driven 1.
+    flit.multiReq = 1'b0;
     flit.numReq = '0;
     flit.addr = item.addr;
     flit.pas = item.pas;

@@ -4,22 +4,42 @@ This file is the single register of everything the testbench could not read from
 its two permitted inputs. Every entry has a number, the reason it matters, the
 default the testbench will take if the question is not answered, and a status.
 
-Permitted inputs (INPUT ISOLATION):
+Permitted inputs (INPUT ISOLATION), as widened by the user on 2026-09-22:
 
-1. `chi_rtl/rtl/top/chi_interconnect_top.sv` - port list, parameters, the
-   `chi_cfg_pkg::chi_cfg_t` type and only those `chi_cfg_t` fields the top
-   module itself references.
-2. The AMBA 5 CHI Architecture Specification, ARM IHI 0050. See Q19 for the
+1. `chi_rtl/rtl/top/chi_interconnect_top.sv` — port list, parameters and body.
+2. The `chi_cfg_pkg::chi_cfg_t` declaration and `CHI_CFG_DEFAULT`. Widened per
+   the Q15 recommendation: these are types and values, not behaviour, and four
+   of the fields the top module never references (`dataCheckEn`, `poisonEn`,
+   `parityEn`, `mteEn`) change the DAT flit width, so the flit model cannot be
+   built without them.
+3. The AMBA 5 CHI Architecture Specification, ARM IHI 0050. See Q19 for the
    issue actually available to this run.
+4. **Compiling** the real RTL through its own `filelist.f`, per the Q20
+   decision. Compiling is not reading: an elaboration error, a bus width or a
+   configuration constraint reported by the compiler is boundary information,
+   and it is how several entries below were answered.
 
-Nothing else in the DUT repository has been opened. `rtl/if/`, `rtl/pkg/`,
-`rtl/link/`, `rtl/noc/`, `rtl/sam/`, `rtl/hnf/`, `rtl/hni/`, `rtl/mn/`,
-`rtl/sva/`, the other files under `rtl/top/`, `filelist.f`, `DV/`, `tb/`,
-`doc-src/` and `docs/` are unread. `filelist.f` is referenced by path only.
+Nothing else in the DUT repository has been opened. `rtl/if/`, `rtl/pkg/`
+beyond the two items named above, `rtl/link/`, `rtl/noc/`, `rtl/sam/`,
+`rtl/hnf/`, `rtl/hni/`, `rtl/mn/`, `rtl/sva/`, the other files under
+`rtl/top/`, `DV/`, `tb/`, `doc-src/` and `docs/` are unread. `filelist.f` is
+read only as a list of file names, by the Makefile, never by a person.
 
 Status values: `OPEN` (blocking, default in use), `CONFIRMED` (answered, now an
 `[ASSUMPTION:n]` tag in source), `CLOSED` (answered and no longer an
 assumption, replaced by a `[TOP:...]` or `[SPEC:...]` tag).
+
+**2026-09-22 — second RTL answer round.** The user re-read the RTL on `main`
+and confirmed most of the first round. Four entries moved: **Q5** (the DUT's
+default NodeID table is legal only up to 14 nodes, and only under geometry
+constraints), **Q11** (`unmappedError` is unconnected → finding **F-7**),
+**Q15** (isolation widened to the `chi_cfg_t` declaration and
+`CHI_CFG_DEFAULT`, with the full default table now recorded under Q12) and
+**Q21** (the design's `filelist.f` needs sanitising before `xrun` reads it).
+Q18, Q18a, Q19 and Q20 were decisions rather than facts and are recorded with
+the choice made. Compiling the RTL at swept configurations, which Q20 allows,
+added findings **F-8** (`numMn = 0` indexes out of range), **F-9** (`mpamW`
+sizes nothing) and **F-10** (18 flit bits the model cannot name).
 
 **2026-09-22 — Stage 0 closure update.** All 21 items are resolved: the user
 supplied answers read from the RTL for the twelve-question Stage 0 register
@@ -245,6 +265,27 @@ vs placement, uniqueness, no collisions) — if the TB encoder ever drifted from
 explicit `PLACEMENTS` for any node count. Status: **CONFIRMED** →
 `[ASSUMPTION:5]`.
 
+**Second round (2026-09-22).** The layout is re-confirmed, and the caution
+about the DUT's default table is noted but does not apply here.
+`defaultMeshPlacement` is defined only for ordinals 0 to 13; ordinal 14 and
+above returns `'0` with `valid = 0`, so any configuration over 14 nodes that
+derived its placements from `defaultNodeId` would collide at (0,0,0). It also
+needs `meshX >= 3`, `meshY >= 3`, `numDevPortsPerXp >= 2` and
+`deviceIdWidth >= 4` for the 14-node case, in every topology including
+CROSSBAR and RING.
+
+The testbench never reads that table. `chiGlobalsPkg` computes its own
+placement for every ordinal — device port varying fastest, then mesh X, then
+mesh Y — and encodes the matching NodeID with the confirmed LSB-first layout,
+so the assignment is a bijection at any node count the geometry can hold and
+the 14-node ceiling is not inherited. Two differences from `defaultNodeId` are
+deliberate: device IDs start at 1, so that NodeID 0 stays reserved and an
+unmapped request routed to target 0 is distinguishable from a delivery to a
+real node (finding F-7); and placements are built directly rather than decoded
+back out of the NodeID. `hdlTop` checks the geometry capacity and the device
+field width at elaboration, and the NodeID and placement tables for collisions
+at time 0, on top of the DUT's own checks.
+
 ### Q6. How is `TgtID` on a Requester REQ flit interpreted?
 
 **What the top module gives.** This one is readable. Per requester port the top
@@ -314,6 +355,46 @@ of TB-computed widths against the DUT's `reqFlitWidth(CHI_CFG)` and friends is
 kept (called by explicit scope if visible; otherwise against the absolute B13.9
 formulas). Status: **CONFIRMED** → `[ASSUMPTION:7]`.
 
+**Second round (2026-09-22): the widths are now measured, not derived.** The
+user's warning that the default configuration would fail the width check
+unless DAT included DataCheck and Poison was the prompt to stop deriving flit
+widths from the B13.9 formulas and start measuring them at the boundary, which
+is what the Q20 decision allows. Sweeping one configuration field at a time
+and reading the resulting bus width gives every coefficient directly:
+
+| field | REQ | RSP | SNP | DAT | note |
+|---|---|---|---|---|---|
+| `nodeIdW` | +3 | +2 | +2 | +3 | per bit; the NodeID count per channel |
+| `addrW` | +1 | — | +1 | — | per bit; SNP carries `addrW − 3` |
+| `dataW` | — | — | — | +334 per 256 | data + BE + DataCheck + Poison + Tag + TU |
+| `rsvdcW` | +1 | — | — | +1 | per bit |
+| `mpamEn` | +15 | — | +15 | — | fixed slot, see F-9 |
+| `mecEn` | +16 | — | +16 | +16 | |
+| `cdaEn` | +17 | — | — | — | StreamID 16 + SecSID1 1 |
+| `pbhaEn` | +4 | — | — | — | |
+
+with constant terms REQ 72, RSP 57, SNP 39, DAT 70, giving 153 / 79 / 106 /
+437 at the default. Three results were not predictable from the spec text:
+`txnIdW`, `lpidW`, `ccidW`, `groupIdW` and `mpamW` move no bus bit at all, so
+those fields sit in slots fixed at their architectural maximum (finding F-9
+for `mpamW`); `mteEn` moves nothing, confirming Tag and TU are always carried;
+and `mecEn` with `cdaEn` add 17 to REQ rather than 33, because MECID and
+StreamID share one slot. Every coefficient is confirmed over 41 random
+configurations, and `make check` re-checks the formulas against the real buses
+on every build.
+
+**What is still not known is the field order**, and it is the one part of the
+model carrying real risk. The named fields total 151 REQ, 78 RSP, 106 SNP and
+422 DAT bits, so 2, 1, 0 and 15 bits respectively are carried and unnamed —
+the same at every configuration, so a fixed field set rather than a formula
+error. Those bits are now an explicit reserved region at the top of each flit,
+preserved bit-exact through unpack and repack and printed by `hdlTop` at time
+0, rather than a silent gap. This is finding **F-10**. Per the user's advice
+the DUT's field order is *not* being requested yet, because taking it would
+defeat the independent-model check; the request stands in reserve for the
+moment bring-up stalls, and the Q19 encoding table gets a spec diff before
+Stage 5 either way.
+
 ### Q8. Data flit granularity, `DataID`, `BE` width, and cache line size
 
 **Default.** The cache line is 64 bytes for all configurations. A line transfer
@@ -327,6 +408,15 @@ B13.9.4).** ADOPTED as stated; the DAT flit table confirms BE = DW/8 and the
 flit-count rule, and B13.9.4's DataID is the 16-byte chunk index. Re-verified
 numerically in Stage 1 when the DAT pack functions are written. Status:
 **CONFIRMED** → `[ASSUMPTION:8]`.
+
+**Second round (2026-09-22): one correction on the receive side.** A transfer
+is only the packets covering the bytes named by `Addr` and `Size`, not a whole
+line, so a 16-byte or smaller transfer is a single packet whatever `dataW` is.
+The DUT also honours `NumDat`, so a sender may elide later packets and a
+receiver must accept a DAT message shorter than `512/dataW` packets. Nothing
+in the testbench may count on a fixed packet count:
+`chiGlobalsPkg::datPacketCount()` derives it from `Size`, and
+`datDataId()` derives DataID from the address offset within the line.
 
 ### Q9. `CFG.lcrdDepth` semantics
 
@@ -344,6 +434,14 @@ buffer depth on one side of one link; the TB link layer advertises exactly
 `lcrdDepth` L-Credits per channel it receives on once that direction reaches
 RUN, and the link reference model enforces the credit ceiling in both
 directions. Status: **CONFIRMED** → `[ASSUMPTION:9]`.
+
+**Second round (2026-09-22).** The DUT advertises `max(lcrdDepth, 2)` credits
+per receive channel, and raises `linkCreditError` from the credit manager's
+overflow path if it is ever handed more than its transmitter depth. So the
+ceiling is a protocol requirement the testbench must respect, not a
+politeness, and `chiGlobalsPkg::LCRD_DEPTH` is `max(lcrdDepth, 2)` to match.
+Over-advertising is still reachable deliberately, through
+`injectExtraCredits()`, which is how the directed credit-error test works.
 
 ### Q17. Can a link parity error or credit error be provoked, or only observed?
 
@@ -413,6 +511,22 @@ map, and exercises single-address (`base == limit`) regions in the
 region-boundary directed test. Runtime region programming is out of scope
 (Q18a). Status: **CONFIRMED** → `[ASSUMPTION:11]`.
 
+**Second round (2026-09-22): the unmapped path is broken, finding F-7.** The
+mapper's `unmappedError` output (`requesterSamError`) is wired to nothing in
+the top module. An unmapped address, or a Non-secure access to a secure-only
+region, therefore gets no error response at all: the request is routed to
+target NodeID 0, which is not a valid node, and the result is a hang or a
+misdelivery rather than a DERR.
+
+Two consequences, both now in the code. No test may generate an undeliverable
+address, so `chiGlobalsPkg::chiSamLookup()` models the mapper from its region
+semantics and `chiAddrIsDeliverable()` gates every generated address;
+`hdlTop` checks both stimulus windows against it at time 0. And the
+"unmapped → DERR" directed test is written but gated as an expected failure,
+so the gap stays visible in the report instead of being quietly dropped from
+the plan. The secure-only / Non-secure mismatch test is gated the same way,
+since it reaches the same unconnected output.
+
 ### Q12. What is in `CHI_CFG_DEFAULT`?
 
 **Why it matters.** The Stage 0 report cannot print a numeric NodeID and region
@@ -433,6 +547,30 @@ default has `nodeIdW=11` on a 4×4 mesh with a 6-bit deviceId field, and
 references them. Everything the TB depends on is overridden through
 `+define+CHI_TB_*`, and the time-0 printout mechanism above is adopted to
 capture the rest. Status: **CLOSED** (non-blocking; printout adopted).
+
+**Second round (2026-09-22): the table in full, now a permitted input.** With
+the Q15 widening, `CHI_CFG_DEFAULT` is read directly rather than inferred, and
+`chiGlobalsPkg` starts from it. Recorded here so the register stands on its own:
+
+| group | values |
+|---|---|
+| node counts | `numRnf` 4, `numRnd` **0**, `numRni` 1, `numSnf` 2, `numSni` 1, `numHnf` 4, `numHni` 1, `numMn` 1 — 14 nodes |
+| widths | `dataW` 256, `addrW` 48, `nodeIdW` 11, `txnIdW` 12, `lpidW` 5, `rsvdcW` 0, `ccidW` 2, `groupIdW` 8, `mpamW` 0 |
+| topology | `numIfPerNode` 1, `replChannels` 1, MESH_2D 3×3, 2 device ports per crosspoint |
+| home node | snoop filter 1024 entries / 4 ways, `posEntries` 32, `retryRecords` 16, `lcrdDepth` 8, `exclMonitors` 32, `interleaveGranule` 64, `hnHashShift` 6 |
+| enabled | `dataCheckEn`, `poisonEn`, `dctEn`, `dmtEn`, `dwtEn`, `atomicEn`, `dvmEn`, `stashEn`, `exclEn` |
+| disabled | `parityEn`, `mpamEn`, `mteEn`, `mecEn`, `pbhaEn`, `cdaEn`, `multiReqEn` |
+| config access | `CFG_PARAM_ONLY` |
+
+Two of these change the testbench rather than just documenting it. The mesh is
+3×3 with 2 ports, not 4×4: 18 positions for 14 nodes, which is what the
+`hdlTop` geometry-capacity check now enforces before the DUT's own check can
+fail more obscurely. And `numRnd` is 0, so `rnd[0]` is a sentinel port with no
+node behind it — no agent, no driver, no monitor, and every node-side signal
+tied to zero in `hdlTop` so the absent port cannot push X into the DUT.
+`retryRecords` and `hnHashShift` are internal sizing the boundary never sees;
+they are recorded only so that a POS-full or hash-distribution test knows the
+scale it is aiming at.
 
 ### Q21. How does `chiFileList.f` pull in the repository's `filelist.f` without opening it?
 
