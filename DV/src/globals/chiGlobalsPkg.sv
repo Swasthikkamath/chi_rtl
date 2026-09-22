@@ -501,6 +501,71 @@ package chiGlobalsPkg;
     return addr & ~chiAddrT'(CACHE_LINE_BYTES - 1);
   endfunction
 
+  // The testbench's own model of the DUT's address mapper, written from the
+  // region semantics rather than from the design: attribute bit 0 is valid,
+  // bit 1 is secureOnly, bits 3:2 are the region kind, limits are inclusive,
+  // and the first matching region in ascending index order wins. A Non-secure
+  // access to a secure-only region is rejected outright and does not fall
+  // through to a later region. [ASSUMPTION:10]
+  //
+  // This exists for two reasons, and the second one is the important one.
+  // The scoreboard needs to predict which node a request is routed to. And
+  // every generated address has to be checked before it is driven, because
+  // the DUT leaves the mapper's unmappedError output unconnected: an unmapped
+  // or security-rejected request gets no error response and is routed to
+  // target NodeID 0, which is not a valid node. The result is a hang or a
+  // misdelivery, not a DERR. Until that is fixed no test may generate one.
+  // [TOP:chi_sam unmappedError unconnected] See OPEN QUESTIONS Q11.
+  typedef struct {
+    bit                          hit;
+    bit                          securityReject;
+    int unsigned                 index;
+    logic [NODE_ID_SLOT_W-1:0]   target;
+    logic [1:0]                  kind;
+  } chiSamResultT;
+
+  function automatic chiSamResultT chiSamLookup(input chiAddrT addr,
+                                                input bit nonSecure);
+    chiSamResultT result;
+    result = '{hit:1'b0, securityReject:1'b0, index:NUM_REGIONS,
+               target:'0, kind:2'b00};
+    for (int unsigned r = 0; r < NUM_REGIONS; r++) begin
+      if (REGION_ATTRIBUTES[r][0] &&
+          (addr >= REGION_BASE[r]) && (addr <= REGION_LIMIT[r])) begin
+        result.index = r;
+        result.kind  = REGION_ATTRIBUTES[r][3:2];
+        if (REGION_ATTRIBUTES[r][1] && nonSecure)
+          result.securityReject = 1'b1;
+        else begin
+          result.hit    = 1'b1;
+          result.target = REGION_TARGET[r];
+        end
+        return result;
+      end
+    end
+    return result;
+  endfunction
+
+  // A hashed region has no single target: the interconnect spreads the region
+  // across the HN-Fs with a hash the top module does not expose, built from
+  // interleaveGranule and hnHashShift, neither of which is visible at the
+  // boundary. So result.target is meaningful only for a direct or MMIO
+  // region, and a scoreboard checking a coherent access must accept any HN-F
+  // and learn the address-to-HN-F mapping by observation rather than assume
+  // one. See OPEN QUESTIONS Q10 and Q15.
+  function automatic bit chiRegionIsHashed(input chiSamResultT result);
+    return result.hit && (result.kind == 2'(chi_cfg_pkg::SAM_REGION_HNF_HASH));
+  endfunction
+
+  // True when a request at this address can be delivered somewhere real. No
+  // sequence may drive an address for which this is false.
+  function automatic bit chiAddrIsDeliverable(input chiAddrT addr,
+                                              input bit nonSecure);
+    chiSamResultT result;
+    result = chiSamLookup(addr, nonSecure);
+    return result.hit;
+  endfunction
+
   //----------------------------------------------------------------------------
   // 5. Flit widths
   //

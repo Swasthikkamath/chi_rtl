@@ -11,6 +11,7 @@ DV/sim/xcelium/logs/
 DV/sim/xcelium/*.log
 DV/sim/xcelium/.simvision/
 DV/sim/xcelium/INCA_libs/
+DV/sim/xcelium/gen/
 DV/doc/*.pdf
 DV/doc/build/
 

@@ -41,6 +41,40 @@ module hdlTop;
   chiClkRstBfm clkRstBfm();
 
   //----------------------------------------------------------------------------
+  // Configuration constraints, checked at elaboration
+  //
+  // These are not testbench preferences. Each one was found by compiling the
+  // real RTL at a swept configuration and reading the error, which is what
+  // OPEN QUESTIONS Q20 allows. Checking them here turns an internal DUT index
+  // error into a message that names the configuration field a sweep has to
+  // change, and keeps the constraint written down in one place.
+  //
+  //   numMn >= 1                  the DVM route reads NODE_IDS[OFF_MN] whether
+  //                               or not numMn is zero, so ordinal OFF_MN has
+  //                               to exist [TOP:requesterRouteTarget]
+  //   numHnf > 0 -> numSnf >= 1   HN-F picks its Subordinate with i % numSnf
+  //   numHni > 0 -> numSni >= 1   HN-I does the same with i % numSni
+  //
+  // The mesh checks are the testbench's own: its NodeID and placement tables
+  // have to be a bijection, which needs room in the geometry and room in the
+  // NodeID device field. See OPEN QUESTIONS Q5.
+  //----------------------------------------------------------------------------
+
+  if (chiGlobalsPkg::NUM_MN < 1)
+    $error("[hdlTop] numMn must be at least 1: the DVM route indexes ordinal OFF_MN unconditionally");
+  if ((chiGlobalsPkg::NUM_HNF > 0) && (chiGlobalsPkg::NUM_SNF < 1))
+    $error("[hdlTop] numHnf > 0 needs numSnf >= 1: each HN-F selects a Subordinate with i %% numSnf");
+  if ((chiGlobalsPkg::NUM_HNI > 0) && (chiGlobalsPkg::NUM_SNI < 1))
+    $error("[hdlTop] numHni > 0 needs numSni >= 1: each HN-I selects a Subordinate with i %% numSni");
+  if ((chiGlobalsPkg::CHI_CFG.meshX * chiGlobalsPkg::CHI_CFG.meshY *
+       chiGlobalsPkg::CHI_CFG.numDevPortsPerXp) < chiGlobalsPkg::NUM_NODES)
+    $error("[hdlTop] mesh geometry holds fewer positions than the %0d configured nodes",
+           chiGlobalsPkg::NUM_NODES);
+  if ((chiGlobalsPkg::NUM_NODES + 1) > ((1 << chiGlobalsPkg::DEVICE_ID_W) - 1))
+    $error("[hdlTop] NodeID device field is %0d bits, too few for %0d nodes plus the reserved id 0",
+           chiGlobalsPkg::DEVICE_ID_W, chiGlobalsPkg::NUM_NODES);
+
+  //----------------------------------------------------------------------------
   // Node interfaces
   //----------------------------------------------------------------------------
 
@@ -208,6 +242,60 @@ module hdlTop;
       .linkUp(dutLinkUp[ordinal]),                       \
       .linkParityError(dutLinkParityError[ordinal]),     \
       .linkCreditError(dutLinkCreditError[ordinal])
+
+  // A node class configured to zero still has a one-element interface array,
+  // because SystemVerilog cannot declare a zero-length one and the DUT sizes
+  // its ports the same way [TOP:ports]. The default configuration has
+  // numRnd = 0, so rnd[0] is a sentinel with no node behind it. It gets no
+  // driver, no monitor and no agent, but its node-side signals are still DUT
+  // inputs, so they are held at zero here. Leaving them floating would push X
+  // into the DUT for a port that is supposed to be absent, and an X that
+  // reaches linkUp would be indistinguishable from a real bring-up failure.
+  // See OPEN QUESTIONS Q12.
+`define CHI_TB_TIE_OFF_PORT(nodePort)                    \
+    assign nodePort.TXLINKACTIVEREQ = 1'b0;              \
+    assign nodePort.RXLINKACTIVEACK = 1'b0;              \
+    assign nodePort.SYSCOREQ        = 1'b0;              \
+    assign nodePort.TXREQFLITPEND   = 1'b0;              \
+    assign nodePort.TXREQFLITV      = 1'b0;              \
+    assign nodePort.TXREQFLIT       = '0;                \
+    assign nodePort.TXREQFLITCHK    = '0;                \
+    assign nodePort.TXRSPFLITPEND   = 1'b0;              \
+    assign nodePort.TXRSPFLITV      = 1'b0;              \
+    assign nodePort.TXRSPFLIT       = '0;                \
+    assign nodePort.TXRSPFLITCHK    = '0;                \
+    assign nodePort.TXDATFLITPEND   = 1'b0;              \
+    assign nodePort.TXDATFLITV      = 1'b0;              \
+    assign nodePort.TXDATFLIT       = '0;                \
+    assign nodePort.TXDATFLITCHK    = '0;                \
+    assign nodePort.TXSNPFLITPEND   = 1'b0;              \
+    assign nodePort.TXSNPFLITV      = 1'b0;              \
+    assign nodePort.TXSNPFLIT       = '0;                \
+    assign nodePort.RXREQLCRDV      = 1'b0;              \
+    assign nodePort.RXRSPLCRDV      = 1'b0;              \
+    assign nodePort.RXDATLCRDV      = 1'b0;              \
+    assign nodePort.RXSNPLCRDV      = 1'b0;
+
+  for (genvar i = chiGlobalsPkg::NUM_RNF; i < chiGlobalsPkg::NUM_RNF_IF; i++)
+  begin : rnfSentinel
+    `CHI_TB_TIE_OFF_PORT(rnf[i])
+  end
+  for (genvar i = chiGlobalsPkg::NUM_RND; i < chiGlobalsPkg::NUM_RND_IF; i++)
+  begin : rndSentinel
+    `CHI_TB_TIE_OFF_PORT(rnd[i])
+  end
+  for (genvar i = chiGlobalsPkg::NUM_RNI; i < chiGlobalsPkg::NUM_RNI_IF; i++)
+  begin : rniSentinel
+    `CHI_TB_TIE_OFF_PORT(rni[i])
+  end
+  for (genvar i = chiGlobalsPkg::NUM_SNF; i < chiGlobalsPkg::NUM_SNF_IF; i++)
+  begin : snfSentinel
+    `CHI_TB_TIE_OFF_PORT(snf[i])
+  end
+  for (genvar i = chiGlobalsPkg::NUM_SNI; i < chiGlobalsPkg::NUM_SNI_IF; i++)
+  begin : sniSentinel
+    `CHI_TB_TIE_OFF_PORT(sni[i])
+  end
 
   for (genvar i = 0; i < chiGlobalsPkg::NUM_RNF; i++) begin : rnfPorts
     localparam int unsigned PORT_ORDINAL = chiGlobalsPkg::OFF_RNF + i;
@@ -396,17 +484,21 @@ module hdlTop;
                r, chiGlobalsPkg::REGION_BASE[r], chiGlobalsPkg::REGION_LIMIT[r],
                chiGlobalsPkg::REGION_TARGET[r], chiGlobalsPkg::REGION_ATTRIBUTES[r]);
 
+    // Every window a sequence is allowed to draw from has to map to a real
+    // target. An unmapped request gets no error response from this DUT, so an
+    // out-of-window address would show up as a hang with no explanation
+    // rather than as a failed check. See OPEN QUESTIONS Q11.
+    if (!chiGlobalsPkg::chiAddrIsDeliverable(chiGlobalsPkg::COHERENT_WINDOW_BASE, 1'b1))
+      $fatal(1, "[hdlTop] the coherent stimulus window at 0x%0h is not mapped",
+             chiGlobalsPkg::COHERENT_WINDOW_BASE);
+    if (!chiGlobalsPkg::chiAddrIsDeliverable(chiGlobalsPkg::DIRECT_WINDOW_BASE, 1'b1))
+      $fatal(1, "[hdlTop] the direct stimulus window at 0x%0h is not mapped",
+             chiGlobalsPkg::DIRECT_WINDOW_BASE);
+
     if (nodeIdCollisionCount() != 0)
       $fatal(1, "[hdlTop] NodeID table has %0d collisions", nodeIdCollisionCount());
     if (placementCollisionCount() != 0)
       $fatal(1, "[hdlTop] placement table has %0d collisions", placementCollisionCount());
-    if ((chiGlobalsPkg::NUM_NODES + 1) >= (1 << chiGlobalsPkg::DEVICE_ID_W))
-      $fatal(1, {"[hdlTop] NodeID device field holds %0d ids, too few for %0d",
-                 " nodes"}, 1 << chiGlobalsPkg::DEVICE_ID_W, chiGlobalsPkg::NUM_NODES);
-    if ((chiGlobalsPkg::CHI_CFG.meshX * chiGlobalsPkg::CHI_CFG.meshY *
-         chiGlobalsPkg::CHI_CFG.numDevPortsPerXp) < chiGlobalsPkg::NUM_NODES)
-      $fatal(1, "[hdlTop] mesh geometry cannot hold %0d nodes",
-             chiGlobalsPkg::NUM_NODES);
   end
 
   //----------------------------------------------------------------------------

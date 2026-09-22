@@ -40,6 +40,34 @@ FILELIST  := $(CHI_TB_ROOT)/sim/xcelium/chiFileList.f
 LOGDIR    := $(CURDIR)/logs
 LOG       := $(LOGDIR)/$(TEST)_$(SEED).log
 
+# ---------------------------------------------------------------------------
+# The DUT file list
+#
+# The design owns which files make up the DUT, so that list is not copied
+# here; it is derived from the design's own filelist.f every build. Three
+# things have to be fixed on the way through, and all three are mechanical.
+# See OPEN QUESTIONS Q21.
+#
+#   1. Its first line is a '#' comment. Argument files are not standardised on
+#      the comment character, and xrun is not guaranteed to accept '#'. Every
+#      such line is rewritten as '//'.
+#   2. Its paths are relative to the design's root. They are made absolute so
+#      that this list can be read from anywhere.
+#   3. It pulls in rtl/top/*_compile.sv lint harnesses and rtl/sva/* bind
+#      files. The harnesses are extra elaboration roots that -top hdlTop makes
+#      dead weight, so they are always dropped. The binds attach assertions to
+#      DUT internals; they are kept by default, because a firing one is worth
+#      knowing about, and dropped by SVA=0.
+#
+# Set CHI_DUT_FILELIST on the command line to bypass all of this and supply an
+# explicit list.
+# ---------------------------------------------------------------------------
+
+GENDIR           := $(CURDIR)/gen
+DUT_FILELIST_SRC := $(CHI_RTL_ROOT)/filelist.f
+CHI_DUT_FILELIST ?= $(GENDIR)/chiDutFileList_sva$(SVA).f
+export CHI_DUT_FILELIST
+
 # Configuration sweep. Any chi_cfg_t field the testbench exposes can be
 # overridden from the command line as CFG_DEFINES="+define+CHI_TB_NUM_RNF=2".
 CFG_DEFINES ?=
@@ -81,17 +109,34 @@ ifeq ($(COVERAGE),1)
 XRUN_COMMON += -coverage all -covoverwrite
 endif
 
-.PHONY: all compile run regress check check-sweep clean help
+.PHONY: all compile run regress check check-sweep dutlist clean help
 
 all: run
 
 $(LOGDIR):
 	@mkdir -p $(LOGDIR)
 
-compile: | $(LOGDIR)
+$(GENDIR):
+	@mkdir -p $(GENDIR)
+
+dutlist: $(CHI_DUT_FILELIST)
+
+$(GENDIR)/chiDutFileList_sva$(SVA).f: $(DUT_FILELIST_SRC) $(MAKEFILE_LIST) | $(GENDIR)
+	@test -f $(DUT_FILELIST_SRC) || \
+		{ echo "no DUT file list at $(DUT_FILELIST_SRC); set CHI_RTL_ROOT"; exit 1; }
+	@awk -v root='$(CHI_RTL_ROOT)' -v sva='$(SVA)' '\
+		/^[[:space:]]*$$/ { print; next } \
+		/^[[:space:]]*#/  { sub(/^[[:space:]]*#/, "//"); print; next } \
+		/^[[:space:]]*\/\// { print; next } \
+		/_compile\.sv[[:space:]]*$$/ { print "// dropped, lint harness: " $$0; next } \
+		/\/sva\// { if (sva == "0") { print "// dropped by SVA=0: " $$0; next } } \
+		{ print root "/" $$0 }' $(DUT_FILELIST_SRC) > $@
+	@echo "dutlist: $@"
+
+compile: $(CHI_DUT_FILELIST) | $(LOGDIR)
 	xrun $(XRUN_COMMON) $(XRUN_ELAB) -l $(LOGDIR)/compile.log
 
-run: | $(LOGDIR)
+run: $(CHI_DUT_FILELIST) | $(LOGDIR)
 	xrun $(XRUN_COMMON) $(XRUN_RUN) -l $(LOG)
 
 # ---------------------------------------------------------------------------
@@ -125,7 +170,7 @@ SLANG_ARGS := \
 	--top hdlTop \
 	$(CFG_DEFINES)
 
-check:
+check: $(CHI_DUT_FILELIST)
 	@test -x $(SLANG) || { echo "no static front end at $(SLANG); set SLANG="; exit 1; }
 	@test -d $(UVM_HOME)/src || { echo "no UVM source at $(UVM_HOME); set UVM_HOME="; exit 1; }
 	@$(SLANG) $(SLANG_ARGS) > $(CURDIR)/check.log 2>&1; \
@@ -163,13 +208,17 @@ regress: | $(LOGDIR)
 	done
 
 clean:
-	rm -rf xcelium.d INCA_libs waves.shm cov_work $(LOGDIR) *.log *.history check.log
+	rm -rf xcelium.d INCA_libs waves.shm cov_work $(GENDIR) $(LOGDIR) *.log *.history check.log
 
 help:
 	@echo "make compile              elaborate with Xcelium"
 	@echo "make run TEST=<name>      run one test"
 	@echo "make check                elaborate with the licence-free front end"
+	@echo "make check-sweep          re-elaborate over the configuration sweep"
 	@echo "make regress TEST=<name>  run one test over three seeds"
+	@echo "make dutlist              regenerate the sanitised DUT file list"
 	@echo ""
 	@echo "knobs: SEED VERBOSITY TIMEOUT WAVES=1 SVA=0 COVERAGE=1"
 	@echo "       CFG_DEFINES='+define+CHI_TB_NUM_RNF=2 +define+CHI_TB_DATA_W=512'"
+	@echo "       SVA=0 drops the DUT assertion binds from the compile"
+	@echo "       CHI_DUT_FILELIST=<path> supplies an explicit DUT file list"
