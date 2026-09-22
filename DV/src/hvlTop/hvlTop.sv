@@ -1,16 +1,11 @@
-// Dynamic side of the testbench.
-//
-// hdlTop owns the DUT and the pin-level BFMs and publishes a virtual interface
-// handle for each of them. This module only starts UVM; the test named on the
-// command line picks up those handles through the configuration database. The
-// two tops are kept separate so that the static hierarchy elaborates whether
-// or not a UVM test is running, which is what makes a pure elaboration check
-// of the HDL side possible.
+// HVL top. The only import is the test package, which re-exports
+// uvm_pkg so run_test is visible here. No class in this module
+// touches a pin.
+
 module hvlTop;
+  // chiTestPkg re-exports uvm_pkg. slang does not make that export
+  // visible through a single import, so uvm_pkg is imported here too.
   import uvm_pkg::*;
   import chiTestPkg::*;
-
-  initial begin
-    run_test();
-  end
+  initial run_test();
 endmodule

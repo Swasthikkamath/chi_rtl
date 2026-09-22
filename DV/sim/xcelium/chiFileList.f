@@ -1,98 +1,48 @@
-// Compile order for the CHI UVM testbench.
+// chiFileList.f
 //
-// Paths are relative to DV/sim/xcelium, which is where xrun is launched from
-// so that xcelium.d, INCA_libs and any waveform database land inside the
-// project.
+// Compile order for the CHI interconnect testbench.
 //
-// The RTL comes first and in the DUT's own order, because chiGlobalsPkg
-// imports chi_cfg_pkg and chi_pkg and the BFMs attach to chi_if. This list is
-// a superset of the repository's filelist.f rather than a replacement for it:
-// the same RTL files in the same order, minus the lint-only compile harnesses
-// in top/ that would elaborate extra copies of the fabric, plus the DV files.
+// The DUT is not listed file by file here. The design's own filelist.f stays
+// the source of truth for what the DUT is made of, so a rename there never
+// has to be tracked here. What this list reads is the sanitised copy the
+// Makefile derives from it each build: '#' comments rewritten, paths made
+// absolute, lint harnesses dropped, and the assertion bind files kept or
+// dropped by SVA. CHI_DUT_FILELIST names that copy, and can be pointed at an
+// explicit list instead. See OPEN QUESTIONS Q21.
+//
+// Order matters in exactly two places: chi_cfg_pkg must be compiled before
+// chiGlobalsPkg, which the DUT list guarantees by coming first, and
+// chiGlobalsPkg must be compiled before anything that imports it.
 
--incdir ../../src/hdlTop/chiLink
--incdir ../../src/hvlTop/chiEnv
--incdir ../../src/hvlTop/chiEnv/chiRequester
--incdir ../../src/hvlTop/chiEnv/chiSubordinate
--incdir ../../src/hvlTop/chiEnv/chiVirtualSequencer
--incdir ../../src/hvlTop/chiEnv/chiVirtualSequences
--incdir ../../src/hvlTop/topEnv
--incdir ../../src/hvlTop/test
+-F $CHI_DUT_FILELIST
 
-// ---------------------------------------------------------------------------
-// DUT
-// ---------------------------------------------------------------------------
-../../../rtl/pkg/chi_cfg_pkg.sv
-../../../rtl/pkg/chi_pkg.sv
-../../../rtl/if/chi_if.sv
-../../../rtl/link/chi_lcrd_mgr.sv
-../../../rtl/link/chi_link_fsm.sv
-../../../rtl/link/chi_link_tx.sv
-../../../rtl/link/chi_link_rx.sv
-../../../rtl/link/chi_link_port.sv
-../../../rtl/noc/chi_vc_arb.sv
-../../../rtl/noc/chi_xbar.sv
-../../../rtl/noc/chi_ring.sv
-../../../rtl/noc/chi_route_compute.sv
-../../../rtl/noc/chi_router.sv
-../../../rtl/noc/chi_mesh_xp.sv
-../../../rtl/noc/chi_mesh.sv
-../../../rtl/noc/chi_noc_top.sv
-../../../rtl/sam/chi_hn_hash.sv
-../../../rtl/sam/chi_sam.sv
-../../../rtl/sam/chi_prefetch_map.sv
-../../../rtl/hni/chi_cfg_slave.sv
-../../../rtl/hni/chi_hni_top.sv
-../../../rtl/mn/chi_mn_dvm.sv
-../../../rtl/hnf/chi_pos.sv
-../../../rtl/hnf/chi_hazard.sv
-../../../rtl/hnf/chi_snoop_filter.sv
-../../../rtl/hnf/chi_snp_gen.sv
-../../../rtl/hnf/chi_retry.sv
-../../../rtl/hnf/chi_dct_ctrl.sv
-../../../rtl/hnf/chi_atomic_alu.sv
-../../../rtl/hnf/chi_dmt_ctrl.sv
-../../../rtl/hnf/chi_dwt_ctrl.sv
-../../../rtl/hnf/chi_stash_ctrl.sv
-../../../rtl/hnf/chi_cmo.sv
-../../../rtl/hnf/chi_excl_mon.sv
-../../../rtl/hnf/chi_hnf_top.sv
-../../../rtl/top/chi_interconnect_top.sv
+// Include search path for the shared link layer, which both driver BFMs
+// include. Written in the +incdir+ form rather than -incdir so that the same
+// list works under xrun and under the static front end used for elaboration
+// checks. The RTL itself needs no include path [ASSUMPTION:21].
++incdir+$CHI_TB_ROOT/src/hdlTop/chiLink
 
-// ---------------------------------------------------------------------------
-// DUT assertions
-// ---------------------------------------------------------------------------
-// These bind themselves into the fabric's internals, so they check the design
-// during every testbench run without the testbench referencing them.
-../../../rtl/sva/chi_link_sva.sv
-../../../rtl/sva/chi_link_rx_sva.sv
-../../../rtl/sva/chi_proto_sva.sv
-../../../rtl/sva/chi_mn_sva.sv
-../../../rtl/sva/chi_ordering_sva.sv
-../../../rtl/sva/chi_hnf_ordering_sva.sv
+// Testbench-owned configuration and protocol model, imported by both tops.
+$CHI_TB_ROOT/src/globals/chiGlobalsPkg.sv
 
-// ---------------------------------------------------------------------------
-// Testbench globals
-// ---------------------------------------------------------------------------
-../../src/globals/chiGlobalsPkg.sv
+// hdlTop side: everything that touches a pin.
+$CHI_TB_ROOT/src/hdlTop/chiInterface/chiClkRstBfm.sv
+$CHI_TB_ROOT/src/hdlTop/chiRequesterAgentBfm/chiRequesterDriverBfm.sv
+$CHI_TB_ROOT/src/hdlTop/chiSubordinateAgentBfm/chiSubordinateDriverBfm.sv
+$CHI_TB_ROOT/src/hdlTop/chiMonitor/chiMonitorBfm.sv
+$CHI_TB_ROOT/src/hdlTop/hdlTop.sv
 
-// ---------------------------------------------------------------------------
-// HDL side
-// ---------------------------------------------------------------------------
-../../src/hdlTop/chiInterface/chiClkRstBfm.sv
-../../src/hdlTop/chiRequesterAgentBfm/chiRequesterDriverBfm.sv
-../../src/hdlTop/chiSubordinateAgentBfm/chiSubordinateDriverBfm.sv
-../../src/hdlTop/chiMonitor/chiMonitorBfm.sv
-../../src/hdlTop/hdlTop.sv
+// Agents. hvlTop, which imports the test package, is added with the tests.
+// Each include path covers the classes that package pulls in.
++incdir+$CHI_TB_ROOT/src/hvlTop/chiRequester
+$CHI_TB_ROOT/src/hvlTop/chiRequester/chiRequesterPkg.sv
++incdir+$CHI_TB_ROOT/src/hvlTop/chiSubordinate
+$CHI_TB_ROOT/src/hvlTop/chiSubordinate/chiSubordinatePkg.sv
 
-// ---------------------------------------------------------------------------
-// HVL side
-// ---------------------------------------------------------------------------
-// Package order is dependency order: the two agent packages, then the
-// environment that instantiates them, then the checking layer, then the tests.
-../../src/hvlTop/chiEnv/chiRequester/chiRequesterPkg.sv
-../../src/hvlTop/chiEnv/chiSubordinate/chiSubordinatePkg.sv
-../../src/hvlTop/chiEnv/chiEnvPkg.sv
-../../src/hvlTop/topEnv/topEnvPkg.sv
-../../src/hvlTop/test/chiTestPkg.sv
-../../src/hvlTop/hvlTop.sv
+// Integration environment, tests, and the HVL top. hvlTop imports only
+// chiTestPkg, which re-exports uvm_pkg so run_test is visible.
++incdir+$CHI_TB_ROOT/src/hvlTop/topEnv
+$CHI_TB_ROOT/src/hvlTop/topEnv/topEnvPkg.sv
++incdir+$CHI_TB_ROOT/src/hvlTop/test
+$CHI_TB_ROOT/src/hvlTop/test/chiTestPkg.sv
+$CHI_TB_ROOT/src/hvlTop/hvlTop.sv

@@ -1,8 +1,21 @@
+# Simulator and build artefacts
 sim/xcelium/xcelium.d/
 sim/xcelium/INCA_libs/
 sim/xcelium/worklib/
-sim/xcelium/*.shm/
+sim/xcelium/waves.shm/
+sim/xcelium/.simvision/
+sim/xcelium/logs/
+sim/xcelium/gen/
 sim/xcelium/*.log
 sim/xcelium/*.history
 sim/xcelium/*.key
+sim/xcelium/*.shm
+
+# The DV spec PDF is generated; the Markdown is the source.
+doc/*.pdf
+doc/build/
 doc/__pycache__/
+
+# The CHI specification is Arm copyright. fetchSpec.sh downloads it locally.
+doc/spec/*.pdf
+doc/spec/*.txt

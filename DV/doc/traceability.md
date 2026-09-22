@@ -1,57 +1,206 @@
 # Traceability
 
-Every configurable quantity in the testbench is derived, never guessed. This
-table records where each one comes from. `[SPEC:...]` cites AMBA 5 CHI
-IHI 0050H; `[CFGDOC:...]` cites `doc-src/chi_interconnect_design_spec.md`;
-`[RTL:...]` cites the DUT source that the testbench must agree with bit for
-bit.
+Opcodes, responses, link states, and PAS encodings are defined once, in
+`chiGlobalsPkg`. Widths are formulas in that package (`REQ_FLIT_W`,
+`RSP_FLIT_W`, `SNP_FLIT_W`, `DAT_FLIT_W`, and the field offsets). They are
+not copied here. Each row is the encoding the testbench drives and
+checks. [SPEC:IHI0050H B13.8] [SPEC:IHI0050H B4.8] [SPEC:IHI0050H B13.5]
+[SPEC:IHI0050H B13.10.68]
 
-## Fabric shape
+## REQ opcodes
 
-| Quantity | Testbench symbol | Source |
-| --- | --- | --- |
-| Requester count | `CHI_NUM_REQUESTERS` | `[RTL:rtl/pkg/chi_cfg_pkg.sv CHI_CFG.numRnf/numRni/numRnd]` |
-| Subordinate count | `CHI_NUM_SUBORDINATES` | `[RTL:rtl/pkg/chi_cfg_pkg.sv CHI_CFG.numSnf/numSni]` |
-| Home node count | `CHI_NUM_HNF` | `[RTL:rtl/pkg/chi_cfg_pkg.sv CHI_CFG.numHnf]` |
-| Node class per port | `chiRequesterAgentConfig.nodeClass` | `[CFGDOC:#3.1]`, `[RTL:rtl/top/chi_interconnect_top.sv generate blocks]` |
-| NodeID per port | `chiNodeIdOf()` | `[RTL:rtl/pkg/chi_cfg_pkg.sv RNF_NODE_IDS/SN_NODE_IDS]`, encoding `[SPEC:IHI0050H A2.3]` |
-| Address map | `chiHomeForAddress()` | `[RTL:rtl/sam/chi_sam.sv]`, `[CFGDOC:#5.2]` |
+| Name | Encoding |
+| --- | --- |
+| REQ_LCRD_RETURN | 7'h00 |
+| REQ_READ_SHARED | 7'h01 |
+| REQ_READ_CLEAN | 7'h02 |
+| REQ_READ_ONCE | 7'h03 |
+| REQ_READ_NO_SNP | 7'h04 |
+| REQ_P_CRD_RETURN | 7'h05 |
+| REQ_READ_UNIQUE | 7'h07 |
+| REQ_CLEAN_SHARED | 7'h08 |
+| REQ_CLEAN_INVALID | 7'h09 |
+| REQ_MAKE_INVALID | 7'h0A |
+| REQ_CLEAN_UNIQUE | 7'h0B |
+| REQ_MAKE_UNIQUE | 7'h0C |
+| REQ_EVICT | 7'h0D |
+| REQ_CLEAN_INVALID_STORAGE | 7'h0E |
+| REQ_READ_NO_SNP_SEP | 7'h11 |
+| REQ_CLEAN_SHARED_PERSIST_SEP | 7'h13 |
+| REQ_DVM_OP | 7'h14 |
+| REQ_WRITE_EVICT_FULL | 7'h15 |
+| REQ_WRITE_CLEAN_FULL | 7'h17 |
+| REQ_WRITE_UNIQUE_PTL | 7'h18 |
+| REQ_WRITE_UNIQUE_FULL | 7'h19 |
+| REQ_WRITE_BACK_PTL | 7'h1A |
+| REQ_WRITE_BACK_FULL | 7'h1B |
+| REQ_WRITE_NO_SNP_PTL | 7'h1C |
+| REQ_WRITE_NO_SNP_FULL | 7'h1D |
+| REQ_WRITE_UNIQUE_FULL_STASH | 7'h20 |
+| REQ_WRITE_UNIQUE_PTL_STASH | 7'h21 |
+| REQ_STASH_ONCE_SHARED | 7'h22 |
+| REQ_STASH_ONCE_UNIQUE | 7'h23 |
+| REQ_READ_ONCE_CLEAN_INVALID | 7'h24 |
+| REQ_READ_ONCE_MAKE_INVALID | 7'h25 |
+| REQ_READ_NOT_SHARED_DIRTY | 7'h26 |
+| REQ_CLEAN_SHARED_PERSIST | 7'h27 |
+| REQ_ATOMIC_STORE_ADD | 7'h28 |
+| REQ_ATOMIC_STORE_CLR | 7'h29 |
+| REQ_ATOMIC_STORE_EOR | 7'h2A |
+| REQ_ATOMIC_STORE_SET | 7'h2B |
+| REQ_ATOMIC_STORE_SMAX | 7'h2C |
+| REQ_ATOMIC_STORE_SMIN | 7'h2D |
+| REQ_ATOMIC_STORE_UMAX | 7'h2E |
+| REQ_ATOMIC_STORE_UMIN | 7'h2F |
+| REQ_ATOMIC_LOAD_ADD | 7'h30 |
+| REQ_ATOMIC_LOAD_CLR | 7'h31 |
+| REQ_ATOMIC_LOAD_EOR | 7'h32 |
+| REQ_ATOMIC_LOAD_SET | 7'h33 |
+| REQ_ATOMIC_LOAD_SMAX | 7'h34 |
+| REQ_ATOMIC_LOAD_SMIN | 7'h35 |
+| REQ_ATOMIC_LOAD_UMAX | 7'h36 |
+| REQ_ATOMIC_LOAD_UMIN | 7'h37 |
+| REQ_ATOMIC_SWAP | 7'h38 |
+| REQ_ATOMIC_COMPARE | 7'h39 |
+| REQ_PREFETCH_TGT | 7'h3A |
+| REQ_MAKE_READ_UNIQUE | 7'h41 |
+| REQ_WRITE_EVICT_OR_EVICT | 7'h42 |
+| REQ_WRITE_UNIQUE_ZERO | 7'h43 |
+| REQ_WRITE_NO_SNP_ZERO | 7'h44 |
+| REQ_STASH_ONCE_SEP_SHARED | 7'h47 |
+| REQ_STASH_ONCE_SEP_UNIQUE | 7'h48 |
+| REQ_READ_PREFER_UNIQUE | 7'h4C |
+| REQ_CLEAN_INVALID_POPA | 7'h4D |
+| REQ_WRITE_NO_SNP_DEF | 7'h4E |
+| REQ_WRITE_NO_SNP_FULL_CLEAN_SH | 7'h50 |
+| REQ_WRITE_NO_SNP_FULL_CLEAN_INV | 7'h51 |
+| REQ_WRITE_NO_SNP_FULL_CLEAN_SH_PER_SEP | 7'h52 |
+| REQ_WRITE_UNIQUE_FULL_CLEAN_SH | 7'h54 |
+| REQ_WRITE_UNIQUE_FULL_CLEAN_SH_PER_SEP | 7'h56 |
+| REQ_WRITE_UNIQUE_FULL_CLEAN_INV_STRG | 7'h57 |
+| REQ_WRITE_BACK_FULL_CLEAN_SH | 7'h58 |
+| REQ_WRITE_BACK_FULL_CLEAN_INV | 7'h59 |
+| REQ_WRITE_BACK_FULL_CLEAN_SH_PER_SEP | 7'h5A |
+| REQ_WRITE_BACK_FULL_CLEAN_INV_STRG | 7'h5B |
+| REQ_WRITE_CLEAN_FULL_CLEAN_SH | 7'h5C |
+| REQ_WRITE_CLEAN_FULL_CLEAN_SH_PER_SEP | 7'h5E |
+| REQ_WRITE_NO_SNP_PTL_CLEAN_SH | 7'h60 |
+| REQ_WRITE_NO_SNP_PTL_CLEAN_INV | 7'h61 |
+| REQ_WRITE_NO_SNP_PTL_CLEAN_SH_PER_SEP | 7'h62 |
+| REQ_WRITE_UNIQUE_PTL_CLEAN_SH | 7'h64 |
+| REQ_WRITE_UNIQUE_PTL_CLEAN_SH_PER_SEP | 7'h66 |
+| REQ_WRITE_NO_SNP_PTL_CLEAN_INV_POPA | 7'h70 |
+| REQ_WRITE_NO_SNP_FULL_CLEAN_INV_POPA | 7'h71 |
+| REQ_WRITE_NO_SNP_FULL_CLEAN_INV_STRG | 7'h72 |
+| REQ_WRITE_BACK_FULL_CLEAN_INV_POPA | 7'h79 |
 
-## Link layer
+## RSP opcodes
 
-| Quantity | Testbench symbol | Source |
-| --- | --- | --- |
-| L-Credit depth | `CHI_CFG.lcrdDepth` | `[RTL:rtl/pkg/chi_cfg_pkg.sv]`, semantics `[SPEC:IHI0050H B13.3]` |
-| Link states | `chiLinkStateE` | `[RTL:rtl/link/chi_link_fsm.sv]`, `[SPEC:IHI0050H B13.4]` |
-| Activation handshake | `chiLinkLayerBfm` TX/RX FSMs | `[SPEC:IHI0050H B13.4.2]` |
-| SYSCOREQ/SYSCOACK | `chiRequesterDriverProxy::bringUp` | `[SPEC:IHI0050H B13.5]` |
-| Channels present per class | `channelApplies()` | `[SPEC:IHI0050H A2.1 Table A2-1]` |
+| Name | Encoding |
+| --- | --- |
+| RSP_LCRD_RETURN | 5'h00 |
+| RSP_SNP_RESP | 5'h01 |
+| RSP_COMP_ACK | 5'h02 |
+| RSP_RETRY_ACK | 5'h03 |
+| RSP_COMP | 5'h04 |
+| RSP_COMP_DBID_RESP | 5'h05 |
+| RSP_DBID_RESP | 5'h06 |
+| RSP_P_CRD_GRANT | 5'h07 |
+| RSP_READ_RECEIPT | 5'h08 |
+| RSP_SNP_RESP_FWDED | 5'h09 |
+| RSP_TAG_MATCH | 5'h0A |
+| RSP_RESP_SEP_DATA | 5'h0B |
+| RSP_PERSIST | 5'h0C |
+| RSP_COMP_PERSIST | 5'h0D |
+| RSP_DBID_RESP_ORD | 5'h0E |
+| RSP_STASH_DONE | 5'h10 |
+| RSP_COMP_STASH_DONE | 5'h11 |
+| RSP_COMP_CMO | 5'h14 |
 
-## Flit formats
+## SNP opcodes
 
-| Quantity | Testbench symbol | Source |
-| --- | --- | --- |
-| REQ/RSP/SNP/DAT field layout | `chi_pkg::pack*Flit/unpack*Flit` (reused) | `[RTL:rtl/pkg/chi_pkg.sv]`, `[SPEC:IHI0050H B13.6-B13.9]` |
-| Configured flit widths | `REQ_FLIT_W` etc. | `[RTL:rtl/pkg/chi_pkg.sv reqFlitWidth()]` |
-| Architectural maximum widths | `CHI_MAX_*_FLIT_W` | `[RTL:rtl/pkg/chi_pkg.sv]`, `[SPEC:IHI0050H B13.6]` |
-| Widest flit for the monitor | `CHI_WIDEST_FLIT_W` | max of the four architectural maxima, because `chi_if` carries the packed maximum, not the configured width |
-| Resp encoding (state + PassDirty) | `chi_resp_e` | `[SPEC:IHI0050H B13.10.34]` |
-| Cache states | `chi_cache_state_e` | `[SPEC:IHI0050H B2.2]` |
+| Name | Encoding |
+| --- | --- |
+| SNP_LCRD_RETURN | 5'h00 |
+| SNP_SHARED | 5'h01 |
+| SNP_CLEAN | 5'h02 |
+| SNP_ONCE | 5'h03 |
+| SNP_NOT_SHARED_DIRTY | 5'h04 |
+| SNP_UNIQUE_STASH | 5'h05 |
+| SNP_MAKE_INVALID_STASH | 5'h06 |
+| SNP_UNIQUE | 5'h07 |
+| SNP_CLEAN_SHARED | 5'h08 |
+| SNP_CLEAN_INVALID | 5'h09 |
+| SNP_MAKE_INVALID | 5'h0A |
+| SNP_STASH_UNIQUE | 5'h0B |
+| SNP_STASH_SHARED | 5'h0C |
+| SNP_DVM_OP | 5'h0D |
+| SNP_QUERY | 5'h10 |
+| SNP_SHARED_FWD | 5'h11 |
+| SNP_CLEAN_FWD | 5'h12 |
+| SNP_ONCE_FWD | 5'h13 |
+| SNP_NOT_SHARED_DIRTY_FWD | 5'h14 |
+| SNP_PREFER_UNIQUE | 5'h15 |
+| SNP_PREFER_UNIQUE_FWD | 5'h16 |
+| SNP_UNIQUE_FWD | 5'h17 |
 
-## Protocol behaviour modelled
+## DAT opcodes
 
-| Behaviour | Testbench component | Source |
-| --- | --- | --- |
-| RetryAck / PCrdGrant / credited re-send | `chiRequesterDriverProxy::issueWithRetry` | `[SPEC:IHI0050H B2.10]` |
-| TxnID uniqueness per source | `chiRequesterDriverProxy` TxnID pool, `topScoreboard` reuse check | `[SPEC:IHI0050H B2.3.1]` |
-| DBID matching for write data | `chiSubordinateDriverProxy::serveWrite`, `topScoreboard.dbidOwner` | `[SPEC:IHI0050H B2.9.1]` |
-| CompAck ordering | `chiRequesterDriverProxy::sendCompAck` | `[SPEC:IHI0050H B2.8]` |
-| Snoop response states | `chiRequesterCacheModel::applySnoop` | `[SPEC:IHI0050H B4.9, Table B4-9]` |
-| Unique ownership invariant | `topScoreboard::checkUniqueOwnership` | `[SPEC:IHI0050H B2.2]` |
-| Data integrity against memory | `topScoreboard::checkReadData` + `chiSubordinateMemoryModel` | `[SPEC:IHI0050H B2.12]` |
+| Name | Encoding |
+| --- | --- |
+| DAT_LCRD_RETURN | 4'h0 |
+| DAT_SNP_RESP_DATA | 4'h1 |
+| DAT_COPY_BACK_WR_DATA | 4'h2 |
+| DAT_NON_COPY_BACK_WR_DATA | 4'h3 |
+| DAT_COMP_DATA | 4'h4 |
+| DAT_SNP_RESP_DATA_PTL | 4'h5 |
+| DAT_SNP_RESP_DATA_FWDED | 4'h6 |
+| DAT_WRITE_DATA_CANCEL | 4'h7 |
+| DAT_DATA_SEP_RESP | 4'hB |
+| DAT_NCB_WR_DATA_COMP_ACK | 4'hC |
 
-## Stage 1 scope
+## Resp
 
-DMT, DWT and DCT are switched off in `chiGlobalsPkg` for this stage, so the
-Home always sits in the data path. `[CFGDOC:#6.4]` allows them; enabling them
-is future work recorded in `open-questions.md`.
+UC and UD share 3'b010. The cache model decides which one applies.
+
+| Name | Encoding |
+| --- | --- |
+| RESP_I | 3'b000 |
+| RESP_SC | 3'b001 |
+| RESP_UC_UD | 3'b010 |
+| RESP_SD | 3'b011 |
+| RESP_I_PD | 3'b100 |
+| RESP_SC_PD | 3'b101 |
+| RESP_UC_PD | 3'b110 |
+| RESP_SD_PD | 3'b111 |
+
+## RespErr
+
+| Name | Encoding |
+| --- | --- |
+| RESP_ERR_OK | 2'b00 |
+| RESP_ERR_EXOK | 2'b01 |
+| RESP_ERR_DERR | 2'b10 |
+| RESP_ERR_NDERR | 2'b11 |
+
+## Link state
+
+| Name | Encoding |
+| --- | --- |
+| LINK_STOP | 2'd0 |
+| LINK_ACTIVATE | 2'd1 |
+| LINK_RUN | 2'd2 |
+| LINK_DEACTIVATE | 2'd3 |
+
+## PAS
+
+| Name | Encoding |
+| --- | --- |
+| PAS_SECURE | 3'b000 |
+| PAS_NON_SECURE | 3'b001 |
+| PAS_ROOT | 3'b010 |
+| PAS_REALM | 3'b011 |
+| PAS_SYSTEM_AGENT | 3'b100 |
+| PAS_NON_SECURE_PROTECTED | 3'b101 |
+
+Stimulus uses `PAS_NON_SECURE`. `pasIsSecure` is what `chiSamLookup` consults.

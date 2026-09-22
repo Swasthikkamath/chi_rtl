@@ -1,169 +1,48 @@
-# Bring-up iteration log
+# CHI Interconnect DV — Iteration Log and Findings Register
 
-Each entry is a failure observed in simulation, what it turned out to be, and
-the change that fixed it. Failures are split into testbench bugs and DUT bugs;
-the DUT fixes are all in `rtl/hnf/` and each carries a comment at the change site.
+Bring-up failures, each classified **TB bug** or **DUT bug**, with the fix applied.
+Pre-simulation entries are findings by inspection (spec text vs. user-supplied RTL facts);
+each is demonstrated (or refuted) by a simulation before the DV spec is finalized.
 
-## Compile and elaborate
+## DUT findings register
 
-1. `chiNodeClassT` alias worked as an argument type but not as a return type in
-   Xcelium. Dropped the alias and used `chi_node_class_e` directly.
-2. Multiple drivers on `always_ff` outputs in `chiLinkLayerBfm.svh` and
-   `chiMonitorBfm.sv`: declaration initialisers on signals that the reset
-   branch also assigns. Removed the initialisers.
-3. Adjacent string literals in `$sformatf` are not concatenated in
-   SystemVerilog. Wrapped every multi-line format string in `{}`.
-4. `chiEnvPkg` could not open `chiEnvConfig.sv`: the `chiEnv` directory itself
-   was missing from the include path in `chiFileList.f`.
-5. `try_next_item` is a task, so `chiSubordinateDriverProxy::currentPolicy`
-   could not be a function. Converted it to a task with an output argument.
+| ID | Finding | Spec basis | Evidence | TB strategy | Status |
+|----|---------|------------|----------|-------------|--------|
+| F-1 | Interface parity is **even** per byte; spec requires **odd** parity (check bit makes an odd number of 1s in the group). DataCheck is likewise specified as odd byte parity. | IHI0050H B9.3.1, B9.6 | User RTL reading (Q1): check bit = XOR of the byte; spec text quoted in Stage 0 closure | TB implements spec-odd parity. Default config runs `parityEn=0`. Directed parity test (a) drives spec-odd and expects `linkParityError` pulses — demonstrating F-1 at the boundary; (b) drives DUT-convention even parity with injected single-bit flips to prove the detection path works | Open — demonstrate in Stage 6 |
+| F-2 | `TXSACTIVE` is driven by the fabric (to `resetn`) on every port; spec makes TXSACTIVE a node-side output indicating node protocol activity. | IHI0050H B14.7.2 | User RTL reading (Q7) | TB never drives `TXSACTIVE`; link reference model checks only `RXSACTIVE` (also DUT-driven = `resetn`) as a static out-of-reset indication. SACTIVE functional checking is reduced to "no X, constant high out of reset" | Open — waive ownership, log |
+| F-3 | `linkUp[i]` reflects only the node→fabric (DUT receive) direction reaching RUN, not both directions. | IHI0050H B14.5/B14.6 (link activation is bidirectional; a "link up" indication conventionally covers both) | User RTL reading (Q8) | Scoreboard link model checks `linkUp[i]` against the TB's TX-link RUN state only; the fabric→node direction is checked separately via observed flit flow | Open — adjusted check |
+| F-4 | `multiReqEn` is declared in `chi_cfg_t` but no logic references it: MultiReq is neither implemented nor rejected. | IHI0050H B13.9.1 (MultiReq/NumReq/CacheLineID) | User RTL reading (Q9) | TB always drives MultiReq=0; chiMultiReqTest stays feature-gated and reports SKIP; matrix row "Not verified — DUT ignores enable" | Open — documented limitation |
+| F-5 | MN sends `SnpDVMOp` to **every** Requester including RN-I; RN-I has no SNP channel in the spec. Sending to the originator is legal (permitted, not required). | IHI0050H B13.6.1.3, B8.2.1 step 4 | User RTL reading (Q11); spec B8.2.1 step 4: "broadcasts to the remaining RN-F and RN-D nodes" | TB keeps the SNP link active on RN-I ports and answers `SnpDVMOp` there under a documented, counted waiver (`chiRequesterAgentConfig.allowRniDvmSnoop`, default 1 with UVM_WARNING per occurrence) so DVM tests run; a strict mode (0) reports UVM_ERROR | Open — waived, counted |
+| F-6 | MN omits the DVMOp DBIDResp + 8-byte NonCopyBackWriteData phase (IDLE→snoop→Comp). Spec flow is Req → DBIDResp → NCBWrData → snoops → Comp. | IHI0050H B8.2.1 steps 2–3, B8.2.2 steps 2–3 | User RTL reading (Q11); spec text verified Stage 0 closure | TB Requester DVM flow has `expectDvmDbidResp` knob (default 0 = tolerate missing DBIDResp/data phase, counted warning); strict mode reports UVM_ERROR. TB still sends NCBWrData only after DBIDResp in strict mode; in tolerant mode it waits for Comp directly | Open — waived, counted |
+| F-7 | The address mapper's `unmappedError` output is not connected. An unmapped address, or a Non-secure access to a secure-only region, gets no error response and is routed to target NodeID 0, which is not a valid node under any node table the testbench can build. | IHI0050H B3.3 (an unsupported address returns a DERR/NDERR completion, not silence) | User RTL reading (Q11) | No sequence may generate an undeliverable address. `chiGlobalsPkg::chiAddrIsDeliverable()` models the mapper and `hdlTop` checks both stimulus windows against it at time 0. The "unmapped → DERR" directed test is written but gated as an expected failure | Open — stimulus constrained away |
+| F-8 | `numMn = 0` passes the DUT's own configuration checks whenever `dvmEn = 0`, but the DVM routing override reads `EFFECTIVE_NODE_IDS[OFF_MN]` outside the `CFG.numMn > 0` guard, so ordinal `OFF_MN` is indexed out of range. | N/A — a SystemVerilog elaboration defect, not a protocol one | `slang -F chi_rtl/filelist.f` with `+define+CHI_TB_NUM_MN=0 +define+CHI_TB_DVM_EN=0`: `chi_interconnect_top.sv:512: cannot refer to element 32'd13 of 'node_id_array_t'` | `hdlTop` rejects `numMn < 1` at elaboration with a message naming the field, so a configuration sweep gets an explanation instead of an internal index error | Open — configuration excluded |
+| F-9 | `mpamW` moves no bus bit at any legal value. MPAM occupies a fixed 15-bit slot whenever `mpamEn = 1`, so the DUT's own `mpamW in {0, 12, 15}` legality check constrains a field that does not size anything on the boundary. | IHI0050H B13.9.1 (MPAM field width follows the configured MPAM width) | Boundary width sweep: `mpamEn=1` adds exactly 15 bits to REQ and SNP at `mpamW` = 0, 9, 12, 15 and 24 alike | `chiGlobalsPkg::MPAM_SLOT_W` is 15 and the model packs the configured `mpamW` bits into the low end of that slot. An `mpamW` sweep is not a width sweep and the test plan does not treat it as one | Open — documented |
+| F-10 | ~~18 flit bits carried by the DUT but not named by the testbench model.~~ **Not a DUT finding.** All 18 were fields the model had missed: MultiReq and a one-bit-short PAS on REQ; an eight-bit FwdState slot that is three, the GroupIDs placed outside the DBID slot they share, and a missing CacheLineID on RSP; a four-bit DataSource slot that is eight, plus DataPull, CacheLineID, CAH, NumDat and Replicate, on DAT. | IHI0050H B13.6–B13.9 | Diff of the model against the real tables, once the Issue H PDF was in the workspace. With the fields corrected, every channel's field list sums exactly to its measured bus width — REQ 153, RSP 79, SNP 106, DAT 437 at the default — at every configuration in the sweep | Fields added, reserved regions removed. `hdlTop` now fails elaboration if any channel's field sum stops matching its bus width, which is an independent check because the field list comes from the specification and the width from the DUT's bus | **Closed** — testbench defect, fixed |
+| F-11 | The DUT drives the node-side single-bit `*CHK` companions — `TXLINKACTIVEREQCHK`, `SYSCOREQCHK`, the `TX<x>FLITPEND` and `FLITV` check bits — which Table B9.18 assigns to whichever side drives the signal they cover, i.e. the node. | IHI0050H B9.3.3 Table B9.18 | User RTL reading (Q1): the DUT drives all single-bit `*CHK` pins to 0, node-side included; spec table read from the PDF | The TB leaves them alone, since driving them would create a second driver. It costs a check the TB could otherwise make on its own control-signal parity; the multi-bit `TX<x>FLITCHK`, which the TB does drive, is unaffected and carries the parity test | Open — waived, same family as F-2 |
+| F-12 | Not a DUT finding. Five Home to Subordinate response flows were modelled wrongly by the first Subordinate agent, all of them written before the Issue H PDF was readable: RespSepData sent by the Subordinate, when Figure B2.15 makes it a Home to Requester response and gives the Subordinate only CompData or DataSepResp; CompDBIDResp selected by ExpCompAck and sent *after* DBIDResp, when Figure B2.16 makes it the combined alternative sent *instead of* the pair; WriteNoSnpZero answered with a bare Comp, when Figure B2.17 still requires the DBID handshake; PrefetchTgt answered with Comp, when it has no response at all; and CleanSharedPersistSep answered without the Persist that Figure B2.19 requires. The same model also accepted ReadOnce, WriteUnique and WriteUniqueZero at a Subordinate, which Tables B4.2 and B4.16 do not permit a Home to send, and had no Combined Write and CMO support. | IHI0050H B2.3.9.1 to B2.3.9.6, B4.2 Tables B4.2, B4.3, B4.9, B4.16, B4.17, B4.24, B4.20 | Diff of both parallel Subordinate agents against the five flow figures, once the PDF was in the workspace | Flows rebuilt from the figures, each citing the figure it came from. The Subordinate now reports any request outside the permitted Home to Subordinate set rather than answering it on a guess, which turns the tables into a live check on the DUT's downstream behaviour | **Closed** — testbench defect, fixed |
 
-## Testbench bugs found by simulation
+## Environment log
 
-6. **L-Credit overflow reported on every channel.** `chiMonitorBfm` was
-   counting credits granted since reset rather than credits currently held.
-   Changed to a balance: granted minus spent.
-7. **X addresses on RSP and DAT flits.** Those channels carry no address, but
-   the monitor was copying the field anyway. Added `addrValid` to
-   `chiRequesterTx`, and the scoreboard and coverage now resolve the address
-   from a `(agent, TxnID)` table populated when the request is seen.
-8. **`CHI_WIDEST_FLIT_W` too narrow.** It was derived from this
-   configuration's DAT width, but `chi_if` carries the architectural maximum,
-   so the monitor's part-select ran off the end of the payload and pulled in X.
-   Now the maximum of the four architectural maxima.
-9. **Requester driver deadlocked on accepted reads.** `issueWithRetry` waited
-   for a RetryAck on RSP, but an accepted ReadShared answers with CompData on
-   DAT and nothing ever arrives on RSP. It now watches both mailboxes and
-   treats either as the answer.
-10. **Subordinate completed writes before the data arrived.** `serveWrite` sent
-    a combined CompDBIDResp up front. Split into DBIDResp, then wait for the
-    data, then Comp; the DBID is the request's TxnID and the write-data mailbox
-    is keyed by `(SrcID, TxnID)`.
-11. **Read data and snoop response data reassembled in the same buffer.** The
-    scoreboard keyed its beat accumulator on `(agent, TxnID)` alone, but a
-    Requester's own TxnID space and the TxnID space of snoops sent to it are
-    independent and collide. A ReadUnique's CompData and a concurrent
-    SnpRespData with the same TxnID were merged, so the read never completed
-    and its data check compared the wrong bytes. The key now includes the
-    direction and the peer node, because two Home Nodes may use the same TxnID
-    towards one Requester. The same widening was needed for the snoop record
-    and the DBID record.
+| ID | Entry | Resolution |
+|----|-------|------------|
+| E-2 | The CHI specification itself, per the Q19 recommendation to put the Issue H PDF in the workspace rather than cite from recollection. | `DV/doc/spec/fetchSpec.sh` downloads ARM IHI 0050 Issue H from Arm's documentation service and renders it to text beside the PDF. The document is Arm copyright and free to download but not ours to redistribute, so the script is committed and both artefacts are gitignored. Reading the real tables closed F-10 and confirmed F-1 and F-6 the same day. |
+| E-1 | Elaboration checking of the whole testbench against the real RTL, per the Q20 decision to compile rather than read. | `make check` runs `slang` over `uvm_pkg`, the DUT file list and the testbench with `-Wport-width-trunc -Wport-width-expand`, and fails on any resized port connection, which is what makes the flit-width contract real rather than advisory. `make check-sweep` repeats it over nine configurations. The DUT file list is derived from the design's own `filelist.f` each build rather than copied (Q21). Verilator is not installed in this image, so slang is the only local elaborator; Xcelium remains the sign-off flow. |
+| E-0 | No commercial simulator in this environment (`xrun`, VCS, Questa all absent); the mandated flow is Xcelium. | Xcelium Makefile/filelist/probe remain the authoritative deliverables (`DV/sim/xcelium/`). For local verification, `slang` 11.0.0 was built from source in-environment (g++ 13; the default `c++` is Clang 18 with a broken GCC-14 toolchain path, so the build uses `-DCMAKE_CXX_COMPILER=g++`). Validated 2026-09-22: `slang --relax-enum-conversions --top chi_interconnect_top -F chi_rtl/filelist.f` compiles and elaborates the whole DUT; `-F` resolves paths relative to the filelist's own directory (same semantics as xrun `-F`, confirms Q21). Two tool-compat notes, neither a DUT bug: slang is LRM-strict about `'{default:'0}` on a struct with an enum member (xrun accepts; waived locally by `--relax-enum-conversions`), and slang errors on the DUT's unconnected interface ports when elaborated without a testbench (resolved by `hdlTop` in Stage 1). HVL parse-checks use Accellera UVM sources. Local pass/fail evidence comes from slang elaboration; Xcelium runs remain the sign-off flow. Recorded in the DV spec §10. |
 
-12. **Two transactions in flight to the same line.** The dispatcher checked
-    `isOutstanding` and then let the read and write paths mark the line, with a
-    TxnID allocation and a capacity eviction in between. Two access threads
-    both found the line free and both went to the fabric. When the first was
-    retried the second overtook it, so a Requester that had meanwhile acquired
-    and dirtied the line still had a read outstanding on it; the Home saw the
-    requester as the only sharer, snooped nobody, and returned stale memory.
-    The claim is now taken in the same step as the check.
+## Bring-up log (populated from Stage 1 onward)
 
-13. **The line claim was released by a bystander.** `allocate()` reset the
-    in-flight mark and `invalidate()` deleted it, so installing a line at
-    completion cleared the claim of the transaction that was still running, and
-    a snoop invalidating an unrelated line's neighbour cleared whatever claim
-    it found. Residency and the in-flight mark are now independent: only the
-    driver thread that took the claim releases it.
-
-14. **A store landed in the middle of a snoop.** The snoop handler read the
-    line out, sent the data beats over several cycles, and only then applied
-    the new state. A silent store to the same line in that window left the
-    snoop carrying pre-store bytes while this Requester kept post-store bytes,
-    and the peer given that data diverged. A real cache locks the line for the
-    duration of the snoop, so stores and snoop processing now take a common
-    lock.
-
-## DUT bugs found by simulation
-
-All are in the HN-F. Each fix is small and commented in place.
-
-15. **POS entries leaked** (`rtl/hnf/chi_pos.sv`). `freeValid` and `progressValid`
-    are handled in the same `always_ff`, and the progress branch wrote
-    `POS_ALLOCATED` over the `POS_FREE` that the free branch had just written
-    when both targeted the same index. Entries were never reclaimed, the
-    hazard logic then held `reqInReady` low and the fabric deadlocked. The
-    progress branch now stands down when a free lands on the same index.
-
-16. **Write data delivered to the wrong Requester** (`chi_hnf_top.sv`). The
-    data router chose between "towards memory" and "towards the Requester" by
-    comparing the flit's SrcID against the active request's SrcID. A Requester
-    only sends its write data after the DBID reaches it, by which time the Home
-    may be serving someone else, so write data was handed to an unrelated
-    Requester as its read data. Routing is now by data opcode
-    (`isWriteData()`).
-
-17. **Snoop responses carrying data deadlocked the Home.** In `HNF_SNOOP_WAIT`
-    the Home only consumed `SnpRespData` for atomics, and the snoop generator's
-    `responseValid` was wired only to RSP-channel snoop responses. A snoop sent
-    with RetToSrc therefore never retired. The Home now accepts data-channel
-    snoop responses, and `responseSource` is taken from whichever channel
-    carried the answer so the generator credits the right node.
-
-18. **Reads were granted Unique while peers still held the line.** The Home
-    forwarded the Subordinate's CompData unchanged, and a Subordinate knows
-    nothing about coherence. `grantedReadResp()` now replaces the Resp field
-    with the state the directory justifies: Unique only when no other Requester
-    holds a copy, and Invalid for ReadOnce so a non-caching Requester is never
-    recorded as a holder.
-
-19. **Requests asking for Unique snooped with SnpShared.** The snoop opcode was
-    chosen as "SnpUnique if this is a write, else SnpShared", so a ReadUnique
-    never invalidated its peers. `snoopForRequest()` now maps each request to
-    the snoop that makes its target state reachable.
-
-20. **The Requester was snooped for its own transaction.** The sharer set was
-    taken straight from the snoop filter. A CleanUnique from a current sharer
-    therefore invalidated the very copy it was asking to upgrade. The requester
-    is now masked out of the snoop set.
-
-21. **Dataless requests were sent downstream.** CleanUnique, MakeUnique and the
-    CMOs fell through to the memory-read path and then waited for a CompAck
-    that the Requester had no reason to send, which wedged the Home and starved
-    every retry record behind it. Added `HNF_DATALESS_COMP`, which answers with
-    a bare Comp and updates the directory.
-
-22. **ReadOnce was never snooped.** It is not a coherent request, so it skipped
-    the snoop phase and read stale memory whenever a peer held the line dirty.
-    `isSnoopable()` separates "must be snooped" from "changes the directory".
-
-23. **CompData overtook the remaining snoops.** Once the Home began forwarding
-    snoop-supplied data it passed the first `SnpRespData` straight through,
-    while peers later in the snoop burst had not yet been invalidated. Since
-    CompData carries the completion, the Requester was granted Unique before
-    the other copies were gone. The Home now buffers the returned line
-    (`snoopDatBuf`) and replays it as CompData from `HNF_SNOOP_DATA_SEND` only
-    after the snoop burst finishes.
-
-24. **Dirty data recovered by a dataless request was dropped.** A CleanUnique
-    or CMO that snooped a dirty peer received the line with PassDirty set and
-    then answered with a bare Comp, so the only dirty copy in the system was
-    discarded and memory kept the old contents. Added the writeback sequence
-    `HNF_SNOOP_WB_REQ` / `HNF_SNOOP_WB_DATA` / `HNF_SNOOP_WB_COMP`, which
-    pushes the buffered line to the Subordinate as WriteNoSnpFull before the
-    request completes.
-
-25. **WriteUnique asked its peers for data it would discard.** The snoop was
-    SnpUnique with RetToSrc set for every snoopable write, including full-line
-    writes that overwrite the whole line. Full writes now snoop with
-    SnpMakeInvalid, only WriteUniquePtl needs SnpUnique, and RetToSrc is off
-    for writes.
-
-## Final state
-
-All five tests run clean, and a 120-run sweep of the three traffic tests over
-40 seeds reports no errors:
-
-| Test | UVM_ERROR | UVM_FATAL |
-| --- | --- | --- |
-| `chiLinkBringUpTest` | 0 | 0 |
-| `chiCoherentTrafficTest` | 0 | 0 |
-| `chiSharedLineTest` | 0 | 0 |
-| `chiRetryStressTest` | 0 | 0 |
-| `chiPassiveAgentTest` | 0 | 0 |
-
-`chiCoherentTrafficTest` at seed 7 exercises 118 requests, 70 completions, 48
-retries with 48 matching grants, 39 snoops and 58 checked read-data
-comparisons, with 3 comparisons skipped for a concurrent write.
-
-`chi_dv_specification.md` is the specification of the environment those runs
-exercise.
+| Date | Stage | Symptom | Classification | Root cause | Fix |
+|------|-------|---------|----------------|------------|-----|
+| 2026-09-22 | 1 | `$bits()` of a hierarchical reference cannot size a `localparam`. | TB bug | The BFMs sized their flit slices from `$bits(chiPort.TXREQFLIT)`, which is not a constant expression. | Widths come from `chiGlobalsPkg`. The comparison against the real bus moved to a procedural check in `hdlTop` and to `-Wport-width-trunc/-expand` at compile time. |
+| 2026-09-22 | 1 | `interface with ports that reference other interfaces cannot be used in a virtual interface`. | TB bug | The BFMs took `chi_if` as an interface port and were then published as `virtual chiRequesterDriverBfm` handles, which LRM 25.9 does not allow. | Each BFM takes a flat list of signal ports; `hdlTop` connects them by name through one macro per BFM kind. |
+| 2026-09-22 | 1 | Elaborating with `numSnf = 0`, `numSni = 0` or `numMn = 0` fails inside the DUT with an out-of-range NodeID index. | DUT bug (F-8) and documented constraint | `i % CFG.numSnf` and `i % CFG.numSni` are evaluated when the count is zero; `EFFECTIVE_NODE_IDS[OFF_MN]` is read outside its `numMn > 0` guard. The first two are constraints the DUT documents but only enforces with a run-time `$fatal`, which elaboration never reaches. | `hdlTop` checks all three at elaboration and names the configuration field to change. |
+| 2026-09-22 | 1 | `rnd[0]` drove X into the DUT with the default configuration. | TB bug | `numRnd` is 0 by default, so `rnd[0]` is a sentinel port with no BFM behind it, and nothing held its node-side signals. | Every configured-out class gets its node-side signals tied to zero in `hdlTop`. |
+| 2026-09-22 | 2 | Requester agent added on the flat-port BFM API. `xrun` is not installed. `make check` with slang 11.0.0 elaborates `hdlTop` and `chiRequesterPkg`: 0 errors. Three warnings are pre-existing (SVA sequence never matched, UVM string escape). | environment | Q20: no Xcelium in this image. | Sign-off remains `make compile`, which also names `hvlTop` (Stage 5). No new assumption. |
+| 2026-09-22 | 1 | The flit model was 18 bits short of the bus across three channels, and had been carrying the gap as reserved regions. | TB bug (F-10, now closed) | Fields read from recollection of the B13.9 tables rather than from the tables: PAS sized at two bits when Issue H makes it three, merged width cells read as separate fields, and six fields simply absent. | Field lists rebuilt from the PDF. Each channel's sum is now checked against its bus width at elaboration, verified by narrowing a field and watching the check fire. |
+| 2026-09-22 | 3 | Subordinate agent added on the flat-port BFM API. `make check` with slang 11.0.0 elaborates `hdlTop` and type-checks `chiSubordinatePkg`: 0 errors, 3 warnings. The warnings are the same pre-existing SVA sequence and UVM string escape. slang rejects `ignore_bins = default`, so uncovered opcodes are kept out of the model with the coverpoint option that disables automatic bins. | environment | Q20: no Xcelium in this image. | Sign-off remains `make compile`, which also names `hvlTop` (Stage 5). No new assumption. |
+| 2026-09-22 | 3 | Two Subordinate agents existed, written in parallel against the same BFM. | reconciliation | Both were written before the Issue H PDF was available to check the Home to Subordinate flow figures against. | Kept the spec-checked flows and ported the retry path from the other. Five flow errors were found and removed in the process; they are listed under F-12. |
+| 2026-09-22 | 4 | `topEnv`, four reference models, scoreboard, and coverage added. slang rejected a `ref` argument whose type is an associative array (`expected identifier` on `ref topOpenTxn table[topTxnKeyT]`), so retire and DBID lookup update `rnTxn` / `snTxn` directly. | TB bug | The map has to be the caller's map or end-of-test outstanding checks delete a copy. | Lookup takes a requester/subordinate select and edits the member. No new assumption. |
+| 2026-09-22 | 5 | `hvlTop`, `chiTestPkg`, and the directed tests added. `make check` elaborates both tops. `export uvm_pkg::*` from `chiTestPkg` did not make `run_test` visible in `hvlTop` under slang, so `hvlTop` imports `uvm_pkg` as well. | environment | slang export of a wildcard import is not visible to a module. | Second import. Xcelium `make compile` / `make run` still not executed: `xrun` is absent (Q20). |
+| 2026-09-22 | 6 | Feature tests added in the same snapshot as stage 5. Gated tests `uvm_info` SKIP at `UVM_NONE`. `chiMultiReqTest` and `chiUnmappedTest` always skip (F-4, F-7) and the unmapped test drives nothing. | environment | No simulator, so none of these tests has been executed. | Matrix status is Implemented — Xcelium pending, not Verified. |
+| 2026-09-22 | 7 | `DV/doc/dv-spec.md`, `DV/doc/traceability.md`, and `DV/doc/Makefile` added. `make -C DV/sim/xcelium check SLANG=/tmp/slang-build/bin/slang UVM_HOME=/tmp/uvm12` after stages 4–6: Build succeeded, 0 errors, 3 warnings. Warnings are the pre-existing SVA sequence (`parityEn=0`) and the UVM `\.` escape. No port-connection resize. | environment | Q20. | No new assumption. `open-questions.md` was not edited. |
+| 2026-09-22 | 7 | Rebased onto the reconciled subordinate (F-12). The scoreboard listens to the subordinate `flitPort` so CompAck and L-Credit returns are not dropped, the memory model copies the subordinate reset-byte formula without sharing the store, and quiet ports still call `linkInit`. The same `make check` after the rebase: 0 errors, 3 warnings. | environment | Q20. | No new assumption. |

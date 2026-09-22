@@ -1,89 +1,138 @@
-// Subordinate side pin interface: the same link layer peer as the Requester
-// BFM, with the protocol services a Completer needs.
+//==============================================================================
+// chiSubordinateDriverBfm
 //
-// A Subordinate receives requests and answers them with responses and data. It
-// never issues a request and never receives a snoop, because only a fully
-// coherent Requester holds cacheable state [SPEC:IHI0050H B1.6.1].
+// Why this is a separate file from the Requester driver BFM rather than one
+// parameterized BFM:
+//
+// The two roles use mirror-image channel sets. A Subordinate port receives REQ
+// and never sends it, and never receives SNP at all [TOP:CHI_CONNECT_PORT with
+// IS_REQUESTER=0]. Sharing one interface would mean every task testing the role
+// at run time, when the role is fixed at elaboration. The part that genuinely
+// is shared - the whole link layer - is included from the same file the
+// Requester BFM includes, so a credit or activation fix lands on both.
+//
+// One instance exists per configured SN-F and SN-I port. Memory contents,
+// latency policy and error injection are not here: they are the Subordinate
+// agent's memory model and sequences, which reach this BFM only through a
+// virtual interface.
+//==============================================================================
+
 interface chiSubordinateDriverBfm (
-  chi_if chiPort
+    // Clock and reset, both driven by the DUT onto chi_if [ASSUMPTION:2].
+    input  logic CLK,
+    input  logic RESETn,
+
+    // Link activation. The node owns TXLINKACTIVEREQ and RXLINKACTIVEACK.
+    output logic TXLINKACTIVEREQ,
+    input  logic TXLINKACTIVEACK,
+    input  logic RXLINKACTIVEREQ,
+    output logic RXLINKACTIVEACK,
+
+    // System coherency. SYSCOACK is a combinational copy of SYSCOREQ in this
+    // DUT, so the handshake completes in zero time [ASSUMPTION:4].
+    output logic SYSCOREQ,
+    input  logic SYSCOACK,
+
+    // Node to interconnect. The SNP direction is unused on every port class
+    // and is held at zero rather than left floating [ASSUMPTION:1].
+    output logic TXREQFLITPEND,
+    output logic TXREQFLITV,
+    output logic [chiGlobalsPkg::REQ_FLIT_W-1:0] TXREQFLIT,
+    output logic [((chiGlobalsPkg::REQ_FLIT_W + 7) / 8)-1:0] TXREQFLITCHK,
+    input  logic TXREQLCRDV,
+
+    output logic TXRSPFLITPEND,
+    output logic TXRSPFLITV,
+    output logic [chiGlobalsPkg::RSP_FLIT_W-1:0] TXRSPFLIT,
+    output logic [((chiGlobalsPkg::RSP_FLIT_W + 7) / 8)-1:0] TXRSPFLITCHK,
+    input  logic TXRSPLCRDV,
+
+    output logic TXDATFLITPEND,
+    output logic TXDATFLITV,
+    output logic [chiGlobalsPkg::DAT_FLIT_W-1:0] TXDATFLIT,
+    output logic [((chiGlobalsPkg::DAT_FLIT_W + 7) / 8)-1:0] TXDATFLITCHK,
+    input  logic TXDATLCRDV,
+
+    output logic TXSNPFLITPEND,
+    output logic TXSNPFLITV,
+    output logic [chiGlobalsPkg::SNP_FLIT_W-1:0] TXSNPFLIT,
+
+    // Interconnect to node.
+    input  logic RXREQFLITPEND,
+    input  logic RXREQFLITV,
+    input  logic [chiGlobalsPkg::REQ_FLIT_W-1:0] RXREQFLIT,
+    output logic RXREQLCRDV,
+
+    input  logic RXRSPFLITPEND,
+    input  logic RXRSPFLITV,
+    input  logic [chiGlobalsPkg::RSP_FLIT_W-1:0] RXRSPFLIT,
+    output logic RXRSPLCRDV,
+
+    input  logic RXDATFLITPEND,
+    input  logic RXDATFLITV,
+    input  logic [chiGlobalsPkg::DAT_FLIT_W-1:0] RXDATFLIT,
+    output logic RXDATLCRDV,
+
+    input  logic RXSNPFLITPEND,
+    input  logic RXSNPFLITV,
+    input  logic [chiGlobalsPkg::SNP_FLIT_W-1:0] RXSNPFLIT,
+    output logic RXSNPLCRDV
 );
-  import chi_cfg_pkg::*;
-  import chi_pkg::*;
+
   import chiGlobalsPkg::*;
 
-  // See the note in chiRequesterDriverBfm: fixed, not a parameter, so the
-  // virtual interface type stays simple.
-  localparam bit REQUESTER_PORT = 1'b0;
+`include "chiLinkLayerBfm.svh"
 
-  `include "chiLinkLayerBfm.svh"
+  //----------------------------------------------------------------------------
+  // Struct-level reception: a Subordinate is driven by the requests it receives
+  //----------------------------------------------------------------------------
 
-  chi_node_class_e nodeClass = NODE_SNF;
-  int unsigned     agentId   = 0;
-
-  function automatic void configure(input int unsigned id,
-                                    input chi_node_class_e cls);
-    agentId   = id;
-    nodeClass = cls;
-  endfunction
-
-  // A Subordinate takes no part in system coherency: it has no cache to bring
-  // into the coherent domain, so SYSCOREQ stays deasserted.
-  task automatic bringUp();
-    waitOutOfReset();
-    activateLink();
-    waitLinkRun();
-    waitTxCreditsReady();
-  endtask
-
-  // -------------------------------------------------------------------------
-  // Receive
-  // -------------------------------------------------------------------------
-  task automatic getRequest(output chi_req_flit_t flit);
-    logic [REQ_FLIT_W-1:0] raw;
+  task automatic getReq(output chiGlobalsPkg::chiReqFlitT flit,
+                        output chiGlobalsPkg::chiRawFlitT raw);
     getReqFlit(raw);
-    flit = unpackReqFlit(CHI_CFG, {{(CHI_MAX_REQ_FLIT_W-REQ_FLIT_W){1'b0}}, raw});
+    flit = chiGlobalsPkg::unpackReq(raw);
   endtask
 
-  task automatic getData(output chi_dat_flit_t flit);
-    logic [DAT_FLIT_W-1:0] raw;
+  task automatic getDat(output chiGlobalsPkg::chiDatFlitT flit,
+                        output chiGlobalsPkg::chiRawFlitT raw);
     getDatFlit(raw);
-    flit = unpackDatFlit(CHI_CFG, {{(CHI_MAX_DAT_FLIT_W-DAT_FLIT_W){1'b0}}, raw});
+    flit = chiGlobalsPkg::unpackDat(raw);
   endtask
 
-  // The receive RSP channel is credited so that activation can complete, but
-  // the spec shows no protocol response arriving at a Subordinate. Anything
-  // that does arrive is surfaced here so the proxy can flag it rather than
-  // silently dropping it. See OPEN QUESTIONS.
-  task automatic getResponse(output chi_rsp_flit_t flit);
-    logic [RSP_FLIT_W-1:0] raw;
+  task automatic getRsp(output chiGlobalsPkg::chiRspFlitT flit,
+                        output chiGlobalsPkg::chiRawFlitT raw);
     getRspFlit(raw);
-    flit = unpackRspFlit(CHI_CFG, {{(CHI_MAX_RSP_FLIT_W-RSP_FLIT_W){1'b0}}, raw});
+    flit = chiGlobalsPkg::unpackRsp(raw);
   endtask
 
-  // -------------------------------------------------------------------------
-  // Transmit
-  // -------------------------------------------------------------------------
-  task automatic sendResponse(input chi_rsp_flit_t flit);
-    logic [CHI_MAX_RSP_FLIT_W-1:0] packed_;
-    packed_ = packRspFlit(CHI_CFG, flit);
-    sendRspFlit(packed_[RSP_FLIT_W-1:0]);
+  //----------------------------------------------------------------------------
+  // Struct-level transmission
+  //----------------------------------------------------------------------------
+
+  task automatic driveRsp(input chiGlobalsPkg::chiRspFlitT flit);
+    chiGlobalsPkg::chiRspFlitT stampedFlit;
+    stampedFlit = flit;
+    stampedFlit.srcId = chiGlobalsPkg::NODE_IDS[nodeOrdinal];
+    sendRspFlit(chiGlobalsPkg::packRsp(stampedFlit));
   endtask
 
-  task automatic sendData(input chi_dat_flit_t flit);
-    logic [CHI_MAX_DAT_FLIT_W-1:0] packed_;
-    packed_ = packDatFlit(CHI_CFG, flit);
-    sendDatFlit(packed_[DAT_FLIT_W-1:0]);
+  task automatic driveDat(input chiGlobalsPkg::chiDatFlitT flit);
+    chiGlobalsPkg::chiDatFlitT stampedFlit;
+    stampedFlit = flit;
+    stampedFlit.srcId = chiGlobalsPkg::NODE_IDS[nodeOrdinal];
+    sendDatFlit(chiGlobalsPkg::packDat(stampedFlit));
   endtask
 
-  function automatic bit requestPending();
-    return (reqRxQueue.size() != 0);
+  function automatic chiGlobalsPkg::chiNodeIdT ownNodeId();
+    return chiGlobalsPkg::NODE_IDS[nodeOrdinal];
   endfunction
 
-  function automatic bit writeDataPending();
-    return (datRxQueue.size() != 0);
+  function automatic int unsigned ownOrdinal();
+    return nodeOrdinal;
   endfunction
 
-  task automatic waitCycles(input int unsigned count);
-    repeat (count) @(posedge chiPort.CLK);
-  endtask
-endinterface
+  function automatic chiGlobalsPkg::chiNodeClassE ownNodeClass();
+    return nodeClass;
+  endfunction
+
+endinterface : chiSubordinateDriverBfm

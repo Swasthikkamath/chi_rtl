@@ -1,36 +1,54 @@
-// Testbench-wide configuration, derived counts and TB-only types.
+//==============================================================================
+// chiGlobalsPkg
 //
-// This package is imported by both the HDL and the HVL side, so it must stay
-// free of UVM: parameters, typedefs, enums, structs and pure functions only.
-// Anything that needs uvm_object lives in the role packages instead.
+// Why this package exists, and why it is shaped this way:
 //
-// Everything the DUT already defines is reused rather than restated. chi_pkg
-// owns the flit structs, the opcode enumerations, the pack and unpack
-// functions and the NodeID codec, so a second copy here would be a second
-// thing to keep in step. What is left is the configuration the TB owns, the
-// instance counts derived from it, and the handful of types that describe
-// testbench activity rather than protocol content.
-package chiGlobalsPkg;
-  import chi_cfg_pkg::*;
-  import chi_pkg::*;
+// 1. Single configuration source. Both tops need the same CHI configuration,
+//    the same NodeID table, the same placement table and the same address
+//    regions. If each side computed them, a sweep would silently desynchronise
+//    the stimulus from the DUT parameterization. So exactly one function
+//    resolves the configuration (CHI_CFG_DEFAULT, then +define+CHI_TB_*
+//    overrides) and everything else in the testbench derives from it.
+//
+// 2. Testbench-owned protocol model. The flit structs, opcode encodings and
+//    pack/unpack functions here are the testbench's own reading of the CHI
+//    specification. The DUT's chi_pkg is deliberately NOT imported, so that a
+//    disagreement between this model and the DUT shows up as a finding rather
+//    than being defined away. Only chi_cfg_pkg is imported, because the top
+//    module's CFG parameter has a type that lives there [TOP:CFG].
+//
+// 3. UVM-free. Both hdlTop and hvlTop import this package, and hdlTop must
+//    elaborate with no test running, so this file contains nothing but
+//    parameters, typedefs, structs and pure functions.
+//
+// 4. Widths are formulas, not literals. Each flit width is written as an
+//    arithmetic function of the configuration fields, so a swept
+//    configuration resizes the model instead of breaking it. The formulas are
+//    fitted to the DUT's boundary bus widths, which is legitimate black-box
+//    information: the flit buses are on the DUT's own interface. Field
+//    ORDER inside a flit is not observable that way and remains this
+//    package's own spec-derived reading. See OPEN QUESTIONS Q7 and Q22.
+//
+// [SPEC:IHI0050H B13 Flit definitions and link handling]
+//==============================================================================
 
-  // ---------------------------------------------------------------------
-  // Configuration
-  // ---------------------------------------------------------------------
-  // The TB starts from the DUT's own default so that the two cannot drift,
-  // and overrides only what a run asks for. hdlTop passes the result back
-  // into the DUT, which keeps this the single source of truth: there is no
-  // way for the fabric to be built to one configuration and checked against
-  // another.
+package chiGlobalsPkg;
+
+  import chi_cfg_pkg::*;
+
+  //----------------------------------------------------------------------------
+  // 1. Configuration resolution
   //
-  // Node counts are deliberately left at the DUT default. defaultMeshPlacement
-  // enumerates ordinals 0 to 13 only, and the ordinal of every node after the
-  // one being resized shifts, so raising numRnd or numRnf past the default
-  // silently invalidates the default placement table. Changing counts requires
-  // supplying PLACEMENTS explicitly. See OPEN QUESTIONS.
-  function automatic chi_cfg_t buildChiCfg();
-    chi_cfg_t cfg;
-    cfg = CHI_CFG_DEFAULT;
+  // Start from the DUT's own default so that an unswept run matches the
+  // configuration the design was written for, then apply command-line
+  // overrides. Only fields that the top module itself references are
+  // overridable here, plus the four DAT-shaping fields recorded in
+  // OPEN QUESTIONS Q15, which the flit model cannot be built without.
+  //----------------------------------------------------------------------------
+
+  function automatic chi_cfg_pkg::chi_cfg_t buildChiCfg();
+    chi_cfg_pkg::chi_cfg_t cfg;
+    cfg = chi_cfg_pkg::CHI_CFG_DEFAULT;                     // [TOP:CFG]
 `ifdef CHI_TB_NUM_RNF
     cfg.numRnf = `CHI_TB_NUM_RNF;
 `endif
@@ -46,342 +64,1751 @@ package chiGlobalsPkg;
 `ifdef CHI_TB_NUM_SNI
     cfg.numSni = `CHI_TB_NUM_SNI;
 `endif
+`ifdef CHI_TB_NUM_HNF
+    cfg.numHnf = `CHI_TB_NUM_HNF;
+`endif
+`ifdef CHI_TB_NUM_HNI
+    cfg.numHni = `CHI_TB_NUM_HNI;
+`endif
+`ifdef CHI_TB_NUM_MN
+    cfg.numMn = `CHI_TB_NUM_MN;
+`endif
+`ifdef CHI_TB_ADDR_W
+    cfg.addrW = `CHI_TB_ADDR_W;
+`endif
+`ifdef CHI_TB_DATA_W
+    cfg.dataW = `CHI_TB_DATA_W;
+`endif
+`ifdef CHI_TB_NODEID_W
+    cfg.nodeIdW = `CHI_TB_NODEID_W;
+`endif
+`ifdef CHI_TB_TXNID_W
+    cfg.txnIdW = `CHI_TB_TXNID_W;
+`endif
+`ifdef CHI_TB_LPID_W
+    cfg.lpidW = `CHI_TB_LPID_W;
+`endif
+`ifdef CHI_TB_CCID_W
+    cfg.ccidW = `CHI_TB_CCID_W;
+`endif
+`ifdef CHI_TB_GROUPID_W
+    cfg.groupIdW = `CHI_TB_GROUPID_W;
+`endif
+`ifdef CHI_TB_RSVDC_W
+    cfg.rsvdcW = `CHI_TB_RSVDC_W;
+`endif
+`ifdef CHI_TB_MPAM_W
+    cfg.mpamW = `CHI_TB_MPAM_W;
+`endif
+`ifdef CHI_TB_MPAM_EN
+    cfg.mpamEn = `CHI_TB_MPAM_EN;
+`endif
+`ifdef CHI_TB_MEC_EN
+    cfg.mecEn = `CHI_TB_MEC_EN;
+`endif
+`ifdef CHI_TB_CDA_EN
+    cfg.cdaEn = `CHI_TB_CDA_EN;
+`endif
+`ifdef CHI_TB_DCT_EN
+    cfg.dctEn = `CHI_TB_DCT_EN;
+`endif
+`ifdef CHI_TB_DMT_EN
+    cfg.dmtEn = `CHI_TB_DMT_EN;
+`endif
+`ifdef CHI_TB_DWT_EN
+    cfg.dwtEn = `CHI_TB_DWT_EN;
+`endif
+`ifdef CHI_TB_ATOMIC_EN
+    cfg.atomicEn = `CHI_TB_ATOMIC_EN;
+`endif
+`ifdef CHI_TB_STASH_EN
+    cfg.stashEn = `CHI_TB_STASH_EN;
+`endif
+`ifdef CHI_TB_DVM_EN
+    cfg.dvmEn = `CHI_TB_DVM_EN;
+`endif
+`ifdef CHI_TB_EXCL_EN
+    cfg.exclEn = `CHI_TB_EXCL_EN;
+`endif
 `ifdef CHI_TB_LCRD_DEPTH
     cfg.lcrdDepth = `CHI_TB_LCRD_DEPTH;
 `endif
-`ifdef CHI_TB_PARITY_EN
-    cfg.parityEn = 1'b1;
+`ifdef CHI_TB_POS_ENTRIES
+    cfg.posEntries = `CHI_TB_POS_ENTRIES;
 `endif
-    // Stage 1 turns off the three direct transfer optimisations. With DMT or
-    // DWT the Subordinate responds straight to the Requester instead of to the
-    // Home, and with DCT a snooped Requester forwards data to the requesting
-    // one [SPEC:IHI0050H B2.3.3]. Each is a distinct response routing, and a
-    // Subordinate model that answered the Home while the fabric expected it to
-    // answer the Requester would deadlock rather than fail a check. They are
-    // exercised in Stage 2, once the plain Home-mediated flow is known good.
-`ifndef CHI_TB_ENABLE_DIRECT
-    cfg.dmtEn = 1'b0;
-    cfg.dwtEn = 1'b0;
-    cfg.dctEn = 1'b0;
+`ifdef CHI_TB_EXCL_MONITORS
+    cfg.exclMonitors = `CHI_TB_EXCL_MONITORS;
+`endif
+`ifdef CHI_TB_INTERLEAVE_GRANULE
+    cfg.interleaveGranule = `CHI_TB_INTERLEAVE_GRANULE;
+`endif
+`ifdef CHI_TB_SNP_FILTER_ENTRIES
+    cfg.snpFilterEntries = `CHI_TB_SNP_FILTER_ENTRIES;
+`endif
+`ifdef CHI_TB_SNP_FILTER_WAYS
+    cfg.snpFilterWays = `CHI_TB_SNP_FILTER_WAYS;
+`endif
+`ifdef CHI_TB_TOPOLOGY
+    cfg.topology = `CHI_TB_TOPOLOGY;
+`endif
+`ifdef CHI_TB_MESH_X
+    cfg.meshX = `CHI_TB_MESH_X;
+`endif
+`ifdef CHI_TB_MESH_Y
+    cfg.meshY = `CHI_TB_MESH_Y;
+`endif
+`ifdef CHI_TB_DEV_PORTS_PER_XP
+    cfg.numDevPortsPerXp = `CHI_TB_DEV_PORTS_PER_XP;
+`endif
+`ifdef CHI_TB_CFG_ACCESS
+    cfg.cfgAccess = `CHI_TB_CFG_ACCESS;
+`endif
+    // DAT-shaping fields. These are chi_cfg_t members that the top module does
+    // not reference, so INPUT ISOLATION would exclude them, but DataCheck and
+    // Poison change the DAT flit width and the model cannot be built without
+    // them. Each read is isolated here so that a single edit retargets it.
+    // See OPEN QUESTIONS Q15.
+`ifdef CHI_TB_DATA_CHECK_EN
+    cfg.dataCheckEn = `CHI_TB_DATA_CHECK_EN;
+`endif
+`ifdef CHI_TB_POISON_EN
+    cfg.poisonEn = `CHI_TB_POISON_EN;
+`endif
+`ifdef CHI_TB_PARITY_EN
+    cfg.parityEn = `CHI_TB_PARITY_EN;
+`endif
+`ifdef CHI_TB_MTE_EN
+    cfg.mteEn = `CHI_TB_MTE_EN;
+`endif
+`ifdef CHI_TB_PBHA_EN
+    cfg.pbhaEn = `CHI_TB_PBHA_EN;
 `endif
     return cfg;
   endfunction
 
-  parameter chi_cfg_t CHI_CFG = buildChiCfg();
+  localparam chi_cfg_pkg::chi_cfg_t CHI_CFG = buildChiCfg();
 
-  // ---------------------------------------------------------------------
-  // Derived counts and ordinal map
-  // ---------------------------------------------------------------------
-  // NUM_NODES must equal the sum of the eight class counts [CFGDOC:#3.3], and
-  // the ordinal order below is the one nodeClassForOrdinal walks, so the TB
-  // and the fabric agree on which ordinal names which node.
-  localparam int unsigned NUM_NODES = CHI_CFG.numRnf + CHI_CFG.numRnd
-      + CHI_CFG.numRni + CHI_CFG.numSnf + CHI_CFG.numSni
-      + CHI_CFG.numHnf + CHI_CFG.numHni + CHI_CFG.numMn;
+  //----------------------------------------------------------------------------
+  // 2. Derived counts, node ordinals and interface array sizes
+  //
+  // The node ordinal order and the OFF_* offsets mirror the top module exactly
+  // [TOP:OFF_RNF..OFF_MN], because linkUp, linkParityError and linkCreditError
+  // are indexed by ordinal and the scoreboard has to index them the same way.
+  // The *_IF sizes carry the top module's max(count,1) sentinel so that a
+  // configured-out node class still has a one-element interface array with no
+  // agent behind it [TOP:ports].
+  //----------------------------------------------------------------------------
+
+  localparam int unsigned NUM_RNF = CHI_CFG.numRnf;
+  localparam int unsigned NUM_RND = CHI_CFG.numRnd;
+  localparam int unsigned NUM_RNI = CHI_CFG.numRni;
+  localparam int unsigned NUM_SNF = CHI_CFG.numSnf;
+  localparam int unsigned NUM_SNI = CHI_CFG.numSni;
+  localparam int unsigned NUM_HNF = CHI_CFG.numHnf;
+  localparam int unsigned NUM_HNI = CHI_CFG.numHni;
+  localparam int unsigned NUM_MN  = CHI_CFG.numMn;
+
+  localparam int unsigned NUM_NODES =
+    NUM_RNF + NUM_RND + NUM_RNI + NUM_SNF + NUM_SNI + NUM_HNF + NUM_HNI + NUM_MN;
+
+  localparam int unsigned NUM_RNF_IF = (NUM_RNF > 0) ? NUM_RNF : 1;
+  localparam int unsigned NUM_RND_IF = (NUM_RND > 0) ? NUM_RND : 1;
+  localparam int unsigned NUM_RNI_IF = (NUM_RNI > 0) ? NUM_RNI : 1;
+  localparam int unsigned NUM_SNF_IF = (NUM_SNF > 0) ? NUM_SNF : 1;
+  localparam int unsigned NUM_SNI_IF = (NUM_SNI > 0) ? NUM_SNI : 1;
 
   localparam int unsigned OFF_RNF = 0;
-  localparam int unsigned OFF_RND = OFF_RNF + CHI_CFG.numRnf;
-  localparam int unsigned OFF_RNI = OFF_RND + CHI_CFG.numRnd;
-  localparam int unsigned OFF_SNF = OFF_RNI + CHI_CFG.numRni;
-  localparam int unsigned OFF_SNI = OFF_SNF + CHI_CFG.numSnf;
-  localparam int unsigned OFF_HNF = OFF_SNI + CHI_CFG.numSni;
-  localparam int unsigned OFF_HNI = OFF_HNF + CHI_CFG.numHnf;
-  localparam int unsigned OFF_MN  = OFF_HNI + CHI_CFG.numHni;
+  localparam int unsigned OFF_RND = OFF_RNF + NUM_RNF;
+  localparam int unsigned OFF_RNI = OFF_RND + NUM_RND;
+  localparam int unsigned OFF_SNF = OFF_RNI + NUM_RNI;
+  localparam int unsigned OFF_SNI = OFF_SNF + NUM_SNF;
+  localparam int unsigned OFF_HNF = OFF_SNI + NUM_SNI;
+  localparam int unsigned OFF_HNI = OFF_HNF + NUM_HNF;
+  localparam int unsigned OFF_MN  = OFF_HNI + NUM_HNI;
 
-  // Only the five external classes get an agent. HN-F, HN-I and MN are inside
-  // the fabric and have no link, which is why the DUT reports linkUp as zero
-  // for their ordinals.
-  localparam int unsigned NUM_REQUESTER_AGENTS =
-      CHI_CFG.numRnf + CHI_CFG.numRnd + CHI_CFG.numRni;
-  localparam int unsigned NUM_SUBORDINATE_AGENTS =
-      CHI_CFG.numSnf + CHI_CFG.numSni;
-  localparam int unsigned NUM_EXTERNAL_PORTS =
-      NUM_REQUESTER_AGENTS + NUM_SUBORDINATE_AGENTS;
+  // Agent index spaces. Requester agents are numbered across RN-F, RN-D and
+  // RN-I in ordinal order, which makes the requester agent index identical to
+  // the node ordinal because OFF_RND and OFF_RNI follow RN-F contiguously.
+  // Subordinate agents are numbered across SN-F then SN-I.
+  localparam int unsigned NUM_REQUESTER_AGENTS = NUM_RNF + NUM_RND + NUM_RNI;
+  localparam int unsigned NUM_SUBORDINATE_AGENTS = NUM_SNF + NUM_SNI;
 
-  // The DUT declares each interface array as max(count,1) so that a zero
-  // count still elaborates, and the TB has to size its arrays identically or
-  // the port connection is a width mismatch.
-  localparam int unsigned NUM_RNF_IF = (CHI_CFG.numRnf > 0) ? CHI_CFG.numRnf : 1;
-  localparam int unsigned NUM_RND_IF = (CHI_CFG.numRnd > 0) ? CHI_CFG.numRnd : 1;
-  localparam int unsigned NUM_RNI_IF = (CHI_CFG.numRni > 0) ? CHI_CFG.numRni : 1;
-  localparam int unsigned NUM_SNF_IF = (CHI_CFG.numSnf > 0) ? CHI_CFG.numSnf : 1;
-  localparam int unsigned NUM_SNI_IF = (CHI_CFG.numSni > 0) ? CHI_CFG.numSni : 1;
+  typedef enum bit [2:0] {
+    RN_F = 3'd0,
+    RN_D = 3'd1,
+    RN_I = 3'd2,
+    SN_F = 3'd3,
+    SN_I = 3'd4
+  } chiNodeClassE;
 
-  // ---------------------------------------------------------------------
-  // Widths
-  // ---------------------------------------------------------------------
-  function automatic int unsigned chiMaxOf4(input int unsigned a,
-                                            input int unsigned b,
-                                            input int unsigned c,
-                                            input int unsigned d);
-    int unsigned value;
-    value = a;
-    if (b > value) value = b;
-    if (c > value) value = c;
-    if (d > value) value = d;
+  function automatic chiNodeClassE nodeClassOfOrdinal(input int unsigned ordinal);
+    if (ordinal < OFF_RND) return RN_F;
+    if (ordinal < OFF_RNI) return RN_D;
+    if (ordinal < OFF_SNF) return RN_I;
+    if (ordinal < OFF_SNI) return SN_F;
+    return SN_I;
+  endfunction
+
+  function automatic int unsigned requesterAgentOrdinal(input int unsigned agentIndex);
+    return agentIndex;
+  endfunction
+
+  function automatic int unsigned subordinateAgentOrdinal(input int unsigned agentIndex);
+    return OFF_SNF + agentIndex;
+  endfunction
+
+  function automatic bit nodeClassIsRequester(input chiNodeClassE nodeClass);
+    return (nodeClass == RN_F) || (nodeClass == RN_D) || (nodeClass == RN_I);
+  endfunction
+
+  // Class-dependent behaviour, taken from the spec rather than from any
+  // per-instance configuration, so that an agent config object can derive it
+  // from the class alone.
+  // [SPEC:IHI0050H B1.3 Node types]
+  function automatic bit nodeClassHasCache(input chiNodeClassE nodeClass);
+    return (nodeClass == RN_F);
+  endfunction
+
+  function automatic bit nodeClassHasSnoopChannel(input chiNodeClassE nodeClass);
+    // RN-F is coherently snooped. RN-D and RN-I have no coherent snoop, but
+    // the DUT wires the SNP channel on all three requester classes and the MN
+    // DVM-snoops every Requester, so all three must credit and answer SNP.
+    // [TOP:CHI_CONNECT_PORT rnd/rni with IS_REQUESTER=1] See OPEN QUESTIONS Q13, Q14.
+    return nodeClassIsRequester(nodeClass);
+  endfunction
+
+  function automatic bit nodeClassUsesSysCo(input chiNodeClassE nodeClass);
+    // System coherency entry/exit is an RN-F property.
+    // [SPEC:IHI0050H B13.4 System coherency interface] See OPEN QUESTIONS Q4.
+    return (nodeClass == RN_F);
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // 3. NodeID and placement tables
+  //
+  // The testbench builds its own NodeID table so that every SrcID it drives and
+  // every SrcID it receives is a value it computed, not one it has to discover.
+  // The DUT accepts a NodeID only when the routing fields inside it agree with
+  // the placement passed alongside it [TOP:chi_cfg_check], so the encoder and
+  // the placement builder must be two views of one assignment. The field layout
+  // is {meshY, meshX, devicePort, deviceId} with deviceId in the least
+  // significant bits; it was confirmed against the DUT's own default table
+  // rather than assumed. See OPEN QUESTIONS Q5 and Q22.
+  //----------------------------------------------------------------------------
+
+  function automatic int unsigned chiClog2Min1(input int unsigned value);
+    int unsigned bits;
+    bits = $clog2(value);
+    return (bits < 1) ? 1 : bits;
+  endfunction
+
+  localparam int unsigned MESH_Y_W = chiClog2Min1(CHI_CFG.meshY);
+  localparam int unsigned MESH_X_W = chiClog2Min1(CHI_CFG.meshX);
+  localparam int unsigned DEV_PORT_W = chiClog2Min1(CHI_CFG.numDevPortsPerXp);
+  localparam int unsigned ROUTE_W = MESH_Y_W + MESH_X_W + DEV_PORT_W;
+  localparam int unsigned DEVICE_ID_W =
+    (CHI_CFG.nodeIdW > ROUTE_W) ? (CHI_CFG.nodeIdW - ROUTE_W) : 0;
+
+  localparam int unsigned NODE_ID_W = CHI_CFG.nodeIdW;
+  localparam int unsigned NODE_ID_SLOT_W = chi_cfg_pkg::CHI_NODEID_SLOT_W;
+  localparam int unsigned MAX_NODE_ID_W = chi_cfg_pkg::CHI_MAX_NODEID_W;
+
+  typedef logic [MAX_NODE_ID_W-1:0] chiNodeIdT;
+  typedef chiNodeIdT chiNodeIdArrayT [NUM_NODES-1:0];
+  typedef chi_cfg_pkg::chi_mesh_placement_t chiPlacementArrayT [NUM_NODES-1:0];
+
+  function automatic chiNodeIdT chiEncodeNodeId(
+      input int unsigned meshY,
+      input int unsigned meshX,
+      input int unsigned devicePort,
+      input int unsigned deviceId
+  );
+    chiNodeIdT value;
+    value = '0;
+    value |= chiNodeIdT'(deviceId);
+    value |= chiNodeIdT'(devicePort) << DEVICE_ID_W;
+    value |= chiNodeIdT'(meshX) << (DEVICE_ID_W + DEV_PORT_W);
+    value |= chiNodeIdT'(meshY) << (DEVICE_ID_W + DEV_PORT_W + MESH_X_W);
     return value;
   endfunction
 
-  localparam int unsigned CHI_ADDR_W    = CHI_CFG.addrW;
-  localparam int unsigned CHI_DATA_W    = CHI_CFG.dataW;
-  localparam int unsigned CHI_NODEID_W  = CHI_CFG.nodeIdW;
-
-  localparam int unsigned REQ_FLIT_W = reqFlitWidth(CHI_CFG);
-  localparam int unsigned RSP_FLIT_W = rspFlitWidth(CHI_CFG);
-  localparam int unsigned SNP_FLIT_W = snpFlitWidth(CHI_CFG);
-  localparam int unsigned DAT_FLIT_W = datFlitWidth(CHI_CFG);
-
-  // A cache line is 64 bytes and CHI addresses it with the low 6 bits
-  // [SPEC:IHI0050H B2.3.1]. interleaveGranule defaults to the same 64 bytes,
-  // but it selects a Home Node rather than sizing a line, so the two are kept
-  // separate.
-  localparam int unsigned CHI_LINE_BYTES  = 64;
-  localparam int unsigned CHI_LINE_OFF_W  = 6;
-  localparam int unsigned CHI_LINE_ADDR_W = CHI_ADDR_W - CHI_LINE_OFF_W;
-
-  // Packets needed to move one full line over the data bus, which is what
-  // both the driver and the scoreboard count DAT flits against
-  // [SPEC:IHI0050H B2.9.4].
-  localparam int unsigned CHI_DAT_PKTS_PER_LINE =
-      (CHI_LINE_BYTES * 8) / CHI_DATA_W;
-
-  typedef logic [CHI_ADDR_W-1:0]      chiAddrT;
-  typedef logic [CHI_LINE_ADDR_W-1:0] chiLineAddrT;
-  typedef logic [CHI_DATA_W-1:0]      chiDataT;
-  typedef logic [CHI_MAX_NODEID_W-1:0] chiNodeIdT;
-  typedef logic [CHI_TXNID_FLIT_W-1:0] chiTxnIdT;
-  typedef logic [7:0]                  chiByteT;
-  typedef chiByteT                     chiLineBytesT [CHI_LINE_BYTES];
-
-  // TxnID is unique only within the transactions from one source node
-  // [SPEC:IHI0050H B2.3.2], so nothing may be keyed on TxnID alone.
-  typedef struct packed {
-    chiNodeIdT srcId;
-    chiTxnIdT  txnId;
-  } chiTxnKeyT;
-
-  // ---------------------------------------------------------------------
-  // Node classification
-  // ---------------------------------------------------------------------
-  // chi_node_class_e already names the eight classes, so the TB uses it
-  // directly and adds only the predicates that express what a class is allowed
-  // to do. The spec terms: RN-F is fully coherent, RN-D is I/O coherent with
-  // DVM support, RN-I is I/O coherent without it [SPEC:IHI0050H B1.6.1].
-  function automatic bit isRequesterClass(input chi_node_class_e nodeClass);
-    return (nodeClass == NODE_RNF) || (nodeClass == NODE_RND)
-           || (nodeClass == NODE_RNI);
+  // One coordinate per ordinal, device port varying fastest so that the
+  // assignment is a bijection for any mesh geometry that satisfies the DUT's
+  // own capacity check meshX*meshY*numDevPortsPerXp >= NUM_NODES.
+  function automatic int unsigned placementDevicePort(input int unsigned ordinal);
+    return ordinal % CHI_CFG.numDevPortsPerXp;
   endfunction
 
-  function automatic bit isSubordinateClass(input chi_node_class_e nodeClass);
-    return (nodeClass == NODE_SNF) || (nodeClass == NODE_SNI);
+  function automatic int unsigned placementMeshX(input int unsigned ordinal);
+    return (ordinal / CHI_CFG.numDevPortsPerXp) % CHI_CFG.meshX;
   endfunction
 
-  // A fully coherent Requester is the only class that holds cacheable state
-  // and so the only one that can be snooped [SPEC:IHI0050H B1.6.1].
-  function automatic bit isFullyCoherent(input chi_node_class_e nodeClass);
-    return (nodeClass == NODE_RNF);
+  function automatic int unsigned placementMeshY(input int unsigned ordinal);
+    return (ordinal / (CHI_CFG.numDevPortsPerXp * CHI_CFG.meshX)) % CHI_CFG.meshY;
   endfunction
 
-  function automatic bit isIoCoherent(input chi_node_class_e nodeClass);
-    return (nodeClass == NODE_RND) || (nodeClass == NODE_RNI);
+  // Device IDs start at 1 so that no node owns NodeID 0. The DUT routes a
+  // request whose address matches no valid region to target NodeID 0 and
+  // leaves the mapper's unmapped-error output unconnected, so reserving 0
+  // keeps that case distinguishable from a delivery to a real node instead of
+  // quietly landing on whichever node happened to be ordinal 0.
+  // [TOP:chi_sam.unmappedError not connected] See OPEN QUESTIONS Q11.
+  function automatic chiNodeIdArrayT buildNodeIds();
+    chiNodeIdArrayT values;
+    for (int unsigned i = 0; i < NUM_NODES; i++)
+      values[i] = chiEncodeNodeId(placementMeshY(i), placementMeshX(i),
+                                  placementDevicePort(i), i + 1);
+    return values;
   endfunction
 
-  function automatic bit hasDvmSupport(input chi_node_class_e nodeClass);
-    return (nodeClass == NODE_RND) && CHI_CFG.dvmEn;
-  endfunction
-
-  // Agent index to class. Requester and Subordinate agents are numbered
-  // separately, each in the same order as the node ordinals, so that an agent
-  // index can be turned into an ordinal and back.
-  function automatic chi_node_class_e requesterClassOf(input int unsigned agentId);
-    if (agentId < CHI_CFG.numRnf) return NODE_RNF;
-    if (agentId < (CHI_CFG.numRnf + CHI_CFG.numRnd)) return NODE_RND;
-    return NODE_RNI;
-  endfunction
-
-  function automatic chi_node_class_e subordinateClassOf(input int unsigned agentId);
-    if (agentId < CHI_CFG.numSnf) return NODE_SNF;
-    return NODE_SNI;
-  endfunction
-
-  function automatic int unsigned requesterOrdinalOf(input int unsigned agentId);
-    return OFF_RNF + agentId;
-  endfunction
-
-  function automatic int unsigned subordinateOrdinalOf(input int unsigned agentId);
-    return OFF_SNF + agentId;
-  endfunction
-
-  // Index of an agent within its own class, which is what indexes the DUT's
-  // per-class interface arrays.
-  function automatic int unsigned requesterClassIndexOf(input int unsigned agentId);
-    if (agentId < CHI_CFG.numRnf) return agentId;
-    if (agentId < (CHI_CFG.numRnf + CHI_CFG.numRnd))
-      return agentId - CHI_CFG.numRnf;
-    return agentId - CHI_CFG.numRnf - CHI_CFG.numRnd;
-  endfunction
-
-  function automatic int unsigned subordinateClassIndexOf(input int unsigned agentId);
-    if (agentId < CHI_CFG.numSnf) return agentId;
-    return agentId - CHI_CFG.numSnf;
-  endfunction
-
-  function automatic chiNodeIdT nodeIdOf(input int unsigned ordinal);
-    return defaultNodeId(CHI_CFG, ordinal);
-  endfunction
-
-  // ---------------------------------------------------------------------
-  // Channel applicability
-  // ---------------------------------------------------------------------
-  // Which channels a node of a given class actually uses, per direction.
-  // A Requester transmits REQ, RSP and DAT and receives RSP, SNP and DAT; a
-  // Subordinate transmits RSP and DAT and receives REQ, RSP and DAT
-  // [SPEC:IHI0050H B13.3]. The node never transmits snoops in either class.
-  //
-  // Two cases are deliberately wider than the protocol strictly needs, and
-  // they match what the fabric's own link ports do. A Subordinate is given a
-  // receive RSP channel even though the spec shows no protocol RSP arriving at
-  // one, and an RN-I is given a receive SNP channel even though an I/O coherent
-  // Requester is never snooped. In both cases the channel exists at the link
-  // layer and must be credited or activation cannot complete; the protocol
-  // layer treats any real flit on them as an error. See OPEN QUESTIONS.
-  typedef enum bit [1:0] {
-    CHI_DIR_TX = 2'b00,
-    CHI_DIR_RX = 2'b01
-  } chiDirectionE;
-
-  function automatic bit channelApplies(
-    input chi_node_class_e  nodeClass,
-    input chiDirectionE  direction,
-    input chi_channel_e  channel
-  );
-    bit requester;
-    requester = isRequesterClass(nodeClass);
-    if (direction == CHI_DIR_TX) begin
-      case (channel)
-        CHI_CHANNEL_REQ: return requester;
-        CHI_CHANNEL_RSP: return 1'b1;
-        CHI_CHANNEL_SNP: return 1'b0;
-        CHI_CHANNEL_DAT: return 1'b1;
-        default:         return 1'b0;
-      endcase
-    end else begin
-      case (channel)
-        CHI_CHANNEL_REQ: return !requester;
-        CHI_CHANNEL_RSP: return 1'b1;
-        CHI_CHANNEL_SNP: return requester;
-        CHI_CHANNEL_DAT: return 1'b1;
-        default:         return 1'b0;
-      endcase
+  function automatic chiPlacementArrayT buildPlacements();
+    chiPlacementArrayT values;
+    for (int unsigned i = 0; i < NUM_NODES; i++) begin
+      values[i].valid      = 1'b1;
+      values[i].nodeClass  = chi_cfg_pkg::nodeClassForOrdinal(CHI_CFG, i);
+      values[i].nodeIndex  = chi_cfg_pkg::nodeIndexForOrdinal(CHI_CFG, i);
+      values[i].meshX      = placementMeshX(i);
+      values[i].meshY      = placementMeshY(i);
+      values[i].devicePort = placementDevicePort(i);
     end
+    return values;
   endfunction
 
-  // ---------------------------------------------------------------------
-  // Link layer observation
-  // ---------------------------------------------------------------------
-  // The RTL link FSM encodes its states module-locally, so the TB restates
-  // the encoding here to decode the same values [SPEC:IHI0050H B14.5.1
-  // Table B14.1, link/chi_link_fsm.sv].
+  localparam chiNodeIdArrayT NODE_IDS = buildNodeIds();
+  localparam chiPlacementArrayT PLACEMENTS = buildPlacements();
+
+  function automatic chiNodeIdT nodeIdOfOrdinal(input int unsigned ordinal);
+    return NODE_IDS[ordinal];
+  endfunction
+
+  // Reverse lookup, used by the monitor and the scoreboard to name the source
+  // of an observed flit without consulting the DUT.
+  function automatic int unsigned ordinalOfNodeId(input chiNodeIdT nodeId);
+    for (int unsigned i = 0; i < NUM_NODES; i++)
+      if (NODE_IDS[i] == nodeId) return i;
+    return NUM_NODES;   // not a configured node
+  endfunction
+
+  function automatic bit isConfiguredNodeId(input chiNodeIdT nodeId);
+    return ordinalOfNodeId(nodeId) < NUM_NODES;
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // 4. Address regions
+  //
+  // The testbench passes an explicit region table rather than letting the DUT
+  // build its default one, so that the stimulus knows which window is coherent
+  // and hashed across HN-Fs, which is direct to HN-I, and which is the
+  // configuration MMIO window. The three patterns below are the ones the top
+  // module itself writes [TOP:makeRegionBase/Limit/Target/Attributes], so no
+  // new attribute encoding is invented here. Bit 0 of the attributes is the
+  // region valid bit and bit 1 is secureOnly [ASSUMPTION:10].
+  //----------------------------------------------------------------------------
+
+  localparam int unsigned ADDR_W = CHI_CFG.addrW;
+
+  // Matches the top module's NUM_REGIONS default [TOP:NUM_REGIONS].
+`ifdef CHI_TB_NUM_REGIONS
+  localparam int unsigned NUM_REGIONS = `CHI_TB_NUM_REGIONS;
+`else
+  localparam int unsigned NUM_REGIONS = 4;
+`endif
+
+  typedef logic [ADDR_W-1:0] chiAddrT;
+  typedef chiAddrT chiRegionAddrArrayT [NUM_REGIONS-1:0];
+  typedef logic [NODE_ID_SLOT_W-1:0] chiRegionTargetArrayT [NUM_REGIONS-1:0];
+  typedef logic [3:0] chiRegionAttrArrayT [NUM_REGIONS-1:0];
+
+  // Top 4 KiB of the space, exactly as the top module's CFG_MMIO_BASE default
+  // computes it [TOP:CFG_MMIO_BASE].
+  localparam chiAddrT CFG_MMIO_BASE = {ADDR_W{1'b1}} - chiAddrT'(12'hfff);
+
+  localparam chiAddrT COHERENT_REGION_BASE = '0;
+  localparam chiAddrT COHERENT_REGION_LIMIT = {1'b0, {(ADDR_W-1){1'b1}}};
+  localparam chiAddrT DIRECT_REGION_BASE = {1'b1, {(ADDR_W-1){1'b0}}};
+  localparam chiAddrT DIRECT_REGION_LIMIT = CFG_MMIO_BASE - chiAddrT'(1);
+
+  localparam logic [3:0] REGION_ATTR_HNF_HASH =
+    {2'(chi_cfg_pkg::SAM_REGION_HNF_HASH), 1'b0, 1'b1};
+  localparam logic [3:0] REGION_ATTR_DIRECT =
+    {2'(chi_cfg_pkg::SAM_REGION_DIRECT), 1'b0, 1'b1};
+  localparam logic [3:0] REGION_ATTR_MMIO =
+    {2'(chi_cfg_pkg::SAM_REGION_MMIO), 1'b0, 1'b1};
+  localparam logic [3:0] REGION_ATTR_INVALID = 4'h0;
+
+  function automatic chiRegionAddrArrayT buildRegionBase();
+    chiRegionAddrArrayT values;
+    values = '{default:'0};
+    if (NUM_REGIONS > 1) values[1] = DIRECT_REGION_BASE;
+    if (NUM_REGIONS > 2) values[2] = CFG_MMIO_BASE;
+    return values;
+  endfunction
+
+  function automatic chiRegionAddrArrayT buildRegionLimit();
+    chiRegionAddrArrayT values;
+    values = '{default:'0};
+    if (NUM_HNF > 0) values[0] = COHERENT_REGION_LIMIT;
+    if (NUM_REGIONS > 1) values[1] = DIRECT_REGION_LIMIT;
+    if (NUM_REGIONS > 2) values[2] = {ADDR_W{1'b1}};
+    return values;
+  endfunction
+
+  function automatic chiRegionTargetArrayT buildRegionTarget();
+    chiRegionTargetArrayT values;
+    values = '{default:'0};
+    if (NUM_HNI > 0) begin
+      if (NUM_REGIONS > 1) values[1] = NODE_ID_SLOT_W'(NODE_IDS[OFF_HNI]);
+      if (NUM_REGIONS > 2) values[2] = NODE_ID_SLOT_W'(NODE_IDS[OFF_HNI]);
+    end
+    return values;
+  endfunction
+
+  function automatic chiRegionAttrArrayT buildRegionAttributes();
+    chiRegionAttrArrayT values;
+    values = '{default:REGION_ATTR_INVALID};
+    if (NUM_HNF > 0) values[0] = REGION_ATTR_HNF_HASH;
+    if (NUM_HNI > 0) begin
+      if (NUM_REGIONS > 1) values[1] = REGION_ATTR_DIRECT;
+      if (NUM_REGIONS > 2) values[2] = REGION_ATTR_MMIO;
+    end
+    return values;
+  endfunction
+
+  localparam chiRegionAddrArrayT REGION_BASE = buildRegionBase();
+  localparam chiRegionAddrArrayT REGION_LIMIT = buildRegionLimit();
+  localparam chiRegionTargetArrayT REGION_TARGET = buildRegionTarget();
+  localparam chiRegionAttrArrayT REGION_ATTRIBUTES = buildRegionAttributes();
+
+  // Stimulus windows. Kept well inside their regions so that no test can walk
+  // off the end of a region, and away from address 0 so that an accidentally
+  // zeroed address field is obvious. The DUT leaves the address mapper's
+  // unmapped-error output unconnected, so no test may target an unmapped
+  // address [TOP:chi_sam.unmappedError not connected]. See OPEN QUESTIONS Q11.
+  localparam chiAddrT COHERENT_WINDOW_BASE = chiAddrT'(64'h0000_0000_0010_0000);
+  localparam chiAddrT DIRECT_WINDOW_BASE = DIRECT_REGION_BASE + chiAddrT'(64'h0010_0000);
+  localparam int unsigned CACHE_LINE_BYTES = 64;    // [SPEC:IHI0050H B2.2 Cache line size]
+  localparam int unsigned COHERENT_WINDOW_LINES = 256;
+
+  function automatic chiAddrT coherentLineAddr(input int unsigned lineIndex);
+    return COHERENT_WINDOW_BASE + chiAddrT'((lineIndex % COHERENT_WINDOW_LINES) * CACHE_LINE_BYTES);
+  endfunction
+
+  function automatic chiAddrT directLineAddr(input int unsigned lineIndex);
+    return DIRECT_WINDOW_BASE + chiAddrT'((lineIndex % COHERENT_WINDOW_LINES) * CACHE_LINE_BYTES);
+  endfunction
+
+  function automatic chiAddrT lineAlign(input chiAddrT addr);
+    return addr & ~chiAddrT'(CACHE_LINE_BYTES - 1);
+  endfunction
+
+  // The testbench's own model of the DUT's address mapper, written from the
+  // region semantics rather than from the design: attribute bit 0 is valid,
+  // bit 1 is secureOnly, bits 3:2 are the region kind, limits are inclusive,
+  // and the first matching region in ascending index order wins. A Non-secure
+  // access to a secure-only region is rejected outright and does not fall
+  // through to a later region. [ASSUMPTION:10]
+  //
+  // This exists for two reasons, and the second one is the important one.
+  // The scoreboard needs to predict which node a request is routed to. And
+  // every generated address has to be checked before it is driven, because
+  // the DUT leaves the mapper's unmappedError output unconnected: an unmapped
+  // or security-rejected request gets no error response and is routed to
+  // target NodeID 0, which is not a valid node. The result is a hang or a
+  // misdelivery, not a DERR. Until that is fixed no test may generate one.
+  // [TOP:chi_sam unmappedError unconnected] See OPEN QUESTIONS Q11.
+  typedef struct {
+    bit                          hit;
+    bit                          securityReject;
+    int unsigned                 index;
+    logic [NODE_ID_SLOT_W-1:0]   target;
+    logic [1:0]                  kind;
+  } chiSamResultT;
+
+  function automatic chiSamResultT chiSamLookup(input chiAddrT addr,
+                                                input bit nonSecure);
+    chiSamResultT result;
+    result = '{hit:1'b0, securityReject:1'b0, index:NUM_REGIONS,
+               target:'0, kind:2'b00};
+    for (int unsigned r = 0; r < NUM_REGIONS; r++) begin
+      if (REGION_ATTRIBUTES[r][0] &&
+          (addr >= REGION_BASE[r]) && (addr <= REGION_LIMIT[r])) begin
+        result.index = r;
+        result.kind  = REGION_ATTRIBUTES[r][3:2];
+        if (REGION_ATTRIBUTES[r][1] && nonSecure)
+          result.securityReject = 1'b1;
+        else begin
+          result.hit    = 1'b1;
+          result.target = REGION_TARGET[r];
+        end
+        return result;
+      end
+    end
+    return result;
+  endfunction
+
+  // A hashed region has no single target: the interconnect spreads the region
+  // across the HN-Fs with a hash the top module does not expose, built from
+  // interleaveGranule and hnHashShift, neither of which is visible at the
+  // boundary. So result.target is meaningful only for a direct or MMIO
+  // region, and a scoreboard checking a coherent access must accept any HN-F
+  // and learn the address-to-HN-F mapping by observation rather than assume
+  // one. See OPEN QUESTIONS Q10 and Q15.
+  function automatic bit chiRegionIsHashed(input chiSamResultT result);
+    return result.hit && (result.kind == 2'(chi_cfg_pkg::SAM_REGION_HNF_HASH));
+  endfunction
+
+  // True when a request at this address can be delivered somewhere real. No
+  // sequence may drive an address for which this is false.
+  function automatic bit chiAddrIsDeliverable(input chiAddrT addr,
+                                              input bit nonSecure);
+    chiSamResultT result;
+    result = chiSamLookup(addr, nonSecure);
+    return result.hit;
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // 5. Flit widths
+  //
+  // A flit bus width is a property of the DUT's boundary, so it is measured
+  // rather than assumed. Each formula below was fitted by sweeping one
+  // configuration field at a time and reading the resulting bus width off the
+  // interface, which is legitimate black-box information. The measured
+  // coefficients are:
+  //
+  //   nodeIdW   REQ +3  RSP +2  SNP +2  DAT +3   per bit
+  //   addrW     REQ +1          SNP +1           per bit (SNP carries addr-3)
+  //   dataW                             DAT +334 per 256 bits, being
+  //                                     data + data/8 BE + data/8 DataCheck
+  //                                     + data/64 Poison + data/32 Tag
+  //                                     + data/128 TU
+  //   rsvdcW    REQ +1                  DAT +1   per bit
+  //   mpamEn    REQ +15         SNP +15          fixed slot, see below
+  //   mecEn     REQ +16         SNP +16 DAT +16
+  //   cdaEn     REQ +17                          StreamID 16 + SecSID1 1
+  //   pbhaEn    REQ +4
+  //
+  // mecEn and cdaEn are not additive on REQ: enabling both adds 17, not 33,
+  // because MECID and StreamID share one sixteen-bit slot and only SecSID1 is
+  // extra. That is measurable and is why the REQ formula is written the way it
+  // is rather than as a sum of two independent terms.
+  //
+  // txnIdW, lpidW, ccidW, groupIdW and mpamW move no bus at all: those fields
+  // sit in slots fixed at their architectural maximum, so a configuration that
+  // narrows them narrows only the meaningful part of the slot. dataCheckEn and
+  // poisonEn shrink DAT; mteEn does not, because Tag and TU are always carried.
+  // parityEn, and every one of stashEn, dvmEn, atomicEn, exclEn, dctEn, dmtEn
+  // and dwtEn, change no width.
+  //
+  // The constant term of each formula is the total of the fixed-width fields.
+  // Section 6 places as many of them as this package can name; whatever is left
+  // over becomes that channel's reserved region, which is reported rather than
+  // dropped.
+  // [SPEC:IHI0050H B13.9 Flit field summary] See OPEN QUESTIONS Q7.
+  //----------------------------------------------------------------------------
+
+  localparam int unsigned DATA_W = CHI_CFG.dataW;
+  localparam int unsigned TXN_ID_W = chi_cfg_pkg::CHI_MAX_TXNID_W;
+  localparam int unsigned LP_ID_W = chi_cfg_pkg::CHI_MAX_LPID_W;
+  localparam int unsigned CC_ID_W = chi_cfg_pkg::CHI_MAX_CCID_W;
+  localparam int unsigned GROUP_ID_W = chi_cfg_pkg::CHI_MAX_GROUPID_W;
+  localparam int unsigned RSVDC_W = CHI_CFG.rsvdcW;
+
+  // MPAM occupies a fixed fifteen-bit slot whenever mpamEn is set. The
+  // configured mpamW moves no bus bit at any value, so it describes how much
+  // of the slot carries meaning, not how wide the slot is. Recorded as a
+  // finding because it means an mpamW sweep is not a width sweep.
+  // See OPEN QUESTIONS Q15.
+  localparam int unsigned MPAM_SLOT_W = 15;
+  localparam int unsigned MPAM_W = CHI_CFG.mpamEn ? MPAM_SLOT_W : 0;
+  localparam int unsigned MEC_ID_W = chi_cfg_pkg::CHI_MECID_W;
+  localparam int unsigned STREAM_ID_W = chi_cfg_pkg::CHI_STREAMID_W;
+  localparam int unsigned PBHA_W = chi_cfg_pkg::CHI_PBHA_W;
+
+  // Fields the top module does not reference. See OPEN QUESTIONS Q15.
+  localparam bit DATA_CHECK_EN = CHI_CFG.dataCheckEn;
+  localparam bit POISON_EN = CHI_CFG.poisonEn;
+  localparam bit PARITY_EN = CHI_CFG.parityEn;
+  localparam bit MTE_EN = CHI_CFG.mteEn;
+  localparam bit PBHA_EN = CHI_CFG.pbhaEn;
+  localparam bit MEC_EN = CHI_CFG.mecEn;
+  localparam bit CDA_EN = CHI_CFG.cdaEn;
+
+  localparam int unsigned BE_W = DATA_W / 8;
+  localparam int unsigned DATA_CHECK_W = DATA_CHECK_EN ? (DATA_W / 8) : 0;
+  localparam int unsigned POISON_W = POISON_EN ? (DATA_W / 64) : 0;
+  localparam int unsigned TAG_W = DATA_W / 32;          // 4 bits per 16 bytes
+  localparam int unsigned TAG_UPDATE_W = DATA_W / 128;  // 1 bit per 16 bytes
+  localparam int unsigned DAT_PACKETS_PER_LINE = (CACHE_LINE_BYTES * 8) / DATA_W;
+  localparam int unsigned DATA_ID_STEP = DATA_W / 128;
+
+  // Constant terms, measured. Each is the total of that channel's fields whose
+  // width no configuration field moves.
+  localparam int unsigned REQ_FIXED_W = 72;
+  localparam int unsigned RSP_FIXED_W = 57;
+  localparam int unsigned SNP_FIXED_W = 39;
+  localparam int unsigned DAT_FIXED_W = 70;
+
+  // The shared MECID / StreamID slot, and the CDA-only bit above it.
+  localparam int unsigned REQ_MEC_STREAM_W = (MEC_EN || CDA_EN) ? MEC_ID_W : 0;
+  localparam int unsigned REQ_SEC_SID1_W = CDA_EN ? 1 : 0;
+
+  localparam int unsigned REQ_FLIT_W =
+      REQ_FIXED_W + (3 * NODE_ID_W) + ADDR_W + RSVDC_W + MPAM_W
+    + (PBHA_EN ? PBHA_W : 0) + REQ_MEC_STREAM_W + REQ_SEC_SID1_W;
+
+  localparam int unsigned RSP_FLIT_W = RSP_FIXED_W + (2 * NODE_ID_W);
+
+  localparam int unsigned SNP_FLIT_W =
+      SNP_FIXED_W + (2 * NODE_ID_W) + (ADDR_W - 3) + MPAM_W
+    + (MEC_EN ? MEC_ID_W : 0);
+
+  localparam int unsigned DAT_FLIT_W =
+      DAT_FIXED_W + (3 * NODE_ID_W) + RSVDC_W + DATA_W + BE_W + DATA_CHECK_W
+    + POISON_W + TAG_W + TAG_UPDATE_W + (MEC_EN ? MEC_ID_W : 0);
+
+  localparam int unsigned FLIT_MAX_W =
+    (REQ_FLIT_W > RSP_FLIT_W)
+      ? ((REQ_FLIT_W > SNP_FLIT_W)
+          ? ((REQ_FLIT_W > DAT_FLIT_W) ? REQ_FLIT_W : DAT_FLIT_W)
+          : ((SNP_FLIT_W > DAT_FLIT_W) ? SNP_FLIT_W : DAT_FLIT_W))
+      : ((RSP_FLIT_W > SNP_FLIT_W)
+          ? ((RSP_FLIT_W > DAT_FLIT_W) ? RSP_FLIT_W : DAT_FLIT_W)
+          : ((SNP_FLIT_W > DAT_FLIT_W) ? SNP_FLIT_W : DAT_FLIT_W));
+
+  typedef logic [FLIT_MAX_W-1:0] chiRawFlitT;
+  typedef logic [TXN_ID_W-1:0] chiTxnIdT;
+  typedef logic [DATA_W-1:0] chiDataT;
+  typedef logic [BE_W-1:0] chiByteEnableT;
+
+  //----------------------------------------------------------------------------
+  // 6. Flit field placement
+  //
+  // Bit 0 of every channel is the least significant bit of QoS [ASSUMPTION:7],
+  // and fields follow in the spec's field-summary order. Offsets are derived by
+  // cumulative addition so that inserting or resizing one field cannot leave a
+  // stale offset behind. Variable-width fields that the DUT pads to their
+  // architectural maximum (TxnID, LPID, CCID, GroupID) are padded here too, so
+  // that a configuration which narrows them does not move every field above
+  // them.
+  //
+  // Field ORDER is not measurable at the boundary, so it comes from the
+  // specification's own tables: B13.6 for REQ, B13.7 for RSP, B13.8 for SNP
+  // and B13.9 for DAT, each read top to bottom from bit 0. Two properties of
+  // those tables are easy to lose and account for most of the fixed widths:
+  // several rows share one slot, shown in the document as a merged width cell
+  // (ReturnNID with StashNID and DataTarget, ReturnTxnID with StashLPID,
+  // DoDWT with the three GroupIDs and LPID, DBID with the GroupIDs on RSP,
+  // DataSource with FwdState on DAT); and a few fields are wider than they
+  // look, PAS being three bits in Issue H because it replaced NS and NSE with
+  // a six-way Physical Address Space encoding [SPEC:IHI0050H B13.10.68].
+  //
+  // Every channel's field list now sums exactly to the width measured at the
+  // DUT boundary, at every configuration in the sweep. That agreement is the
+  // real check here, because the two sides are independent: the field list is
+  // read off the specification and the width is read off the DUT's bus. The
+  // sums are named *_NAMED_W and hdlTop fails elaboration if one of them
+  // differs from its channel's bus width, so a field this model forgets
+  // cannot be absorbed silently. See OPEN QUESTIONS Q7.
+  //----------------------------------------------------------------------------
+
+  localparam int unsigned QOS_W = 4;
+  localparam int unsigned REQ_OPCODE_W = 7;
+  localparam int unsigned RSP_OPCODE_W = 5;
+  localparam int unsigned SNP_OPCODE_W = 5;
+  localparam int unsigned DAT_OPCODE_W = 4;
+
+  // MultiReq selects what the six-bit slot above it means: Size in the low
+  // three bits when MultiReq is 0, NumReq over the whole slot when it is 1.
+  // The DUT has a multiReqEn field that nothing in the design reads, so this
+  // testbench always drives MultiReq 0 and the NumReq reading is never
+  // exercised — but both are on the bus and both are modelled, because a flit
+  // the DUT sends with either encoding still has to unpack. See OPEN
+  // QUESTIONS Q15. [SPEC:IHI0050H B13.6]
+  localparam int unsigned MULTI_REQ_W = 1;
+  localparam int unsigned SIZE_W = 3;
+  localparam int unsigned REQ_SIZE_SLOT_W = 6;
+  localparam int unsigned NUM_REQ_W = REQ_SIZE_SLOT_W;
+
+  // One eight-bit REQ slot carries whichever of DoDWT, PGroupID, StashGroupID,
+  // TagGroupID and LPID the opcode selects. Modelling it as one slot rather
+  // than as separate fields is what makes the fixed part of the REQ flit come
+  // out at the width the bus actually has [SPEC:IHI0050H B13.6].
+  localparam int unsigned REQ_SHARED_SLOT_W = 8;
+
+  // RSP and DAT have shared slots of their own. On RSP the three-bit slot is
+  // FwdState, or DataPull in its bit 2 position; the GroupIDs share the DBID
+  // slot instead, not this one. On DAT the eight-bit slot is DataSource or
+  // FwdState. [SPEC:IHI0050H B13.7, B13.9] See OPEN QUESTIONS Q7.
+  localparam int unsigned RSP_SHARED_SLOT_W = 3;
+  localparam int unsigned DAT_SHARED_SLOT_W = 8;
+
+  // DBID is a twelve-bit slot on RSP, shared with the GroupIDs, and a
+  // sixteen-bit slot on DAT [SPEC:IHI0050H B13.7, B13.9].
+  localparam int unsigned RSP_DBID_W = 12;
+  localparam int unsigned DAT_DBID_W = 16;
+
+  // PAS is three bits in Issue H: it replaced the NS and NSE bits of earlier
+  // issues and names one of six Physical Address Spaces
+  // [SPEC:IHI0050H B13.10.68].
+  localparam int unsigned PAS_W = 3;
+  localparam int unsigned ORDER_W = 2;
+  localparam int unsigned P_CRD_TYPE_W = 4;
+  localparam int unsigned MEM_ATTR_W = 4;
+  localparam int unsigned RESP_ERR_W = 2;
+  localparam int unsigned RESP_W = 3;
+  localparam int unsigned FWD_STATE_W = 3;
+  localparam int unsigned C_BUSY_W = 3;
+  localparam int unsigned DATA_SOURCE_W = 8;
+  localparam int unsigned DATA_ID_W = 2;
+  localparam int unsigned CACHE_LINE_ID_W = 6;
+  localparam int unsigned NUM_DAT_W = 2;
+  localparam int unsigned TAG_OP_W = 2;
+
+  // PAS encodings. The address map's secure-only regions reject anything that
+  // is not the Secure space, so chiSamLookup() takes the result of
+  // pasIsSecure() rather than a raw PAS [SPEC:IHI0050H B13.47, ASSUMPTION:10].
+  typedef enum logic [PAS_W-1:0] {
+    PAS_SECURE               = 3'b000,
+    PAS_NON_SECURE           = 3'b001,
+    PAS_ROOT                 = 3'b010,
+    PAS_REALM                = 3'b011,
+    PAS_SYSTEM_AGENT         = 3'b100,
+    PAS_NON_SECURE_PROTECTED = 3'b101
+  } chiPasE;
+
+  function automatic bit pasIsSecure(input logic [PAS_W-1:0] pas);
+    return (pas == PAS_SECURE);
+  endfunction
+
+  // REQ
+  localparam int unsigned REQ_OFF_QOS = 0;
+  localparam int unsigned REQ_OFF_TGT_ID = REQ_OFF_QOS + QOS_W;
+  localparam int unsigned REQ_OFF_SRC_ID = REQ_OFF_TGT_ID + NODE_ID_W;
+  localparam int unsigned REQ_OFF_TXN_ID = REQ_OFF_SRC_ID + NODE_ID_W;
+  localparam int unsigned REQ_OFF_RETURN_NID = REQ_OFF_TXN_ID + TXN_ID_W;
+  localparam int unsigned REQ_OFF_STASH_NID_VALID = REQ_OFF_RETURN_NID + NODE_ID_W;
+  localparam int unsigned REQ_OFF_RETURN_TXN_ID = REQ_OFF_STASH_NID_VALID + 1;
+  localparam int unsigned REQ_OFF_OPCODE = REQ_OFF_RETURN_TXN_ID + TXN_ID_W;
+  localparam int unsigned REQ_OFF_MULTI_REQ = REQ_OFF_OPCODE + REQ_OPCODE_W;
+  localparam int unsigned REQ_OFF_SIZE = REQ_OFF_MULTI_REQ + MULTI_REQ_W;
+  localparam int unsigned REQ_OFF_NUM_REQ = REQ_OFF_SIZE;
+  localparam int unsigned REQ_OFF_ADDR = REQ_OFF_SIZE + REQ_SIZE_SLOT_W;
+  localparam int unsigned REQ_OFF_PAS = REQ_OFF_ADDR + ADDR_W;
+  localparam int unsigned REQ_OFF_LIKELY_SHARED = REQ_OFF_PAS + PAS_W;
+  localparam int unsigned REQ_OFF_ALLOW_RETRY = REQ_OFF_LIKELY_SHARED + 1;
+  localparam int unsigned REQ_OFF_ORDER = REQ_OFF_ALLOW_RETRY + 1;
+  localparam int unsigned REQ_OFF_P_CRD_TYPE = REQ_OFF_ORDER + ORDER_W;
+  localparam int unsigned REQ_OFF_MEM_ATTR = REQ_OFF_P_CRD_TYPE + P_CRD_TYPE_W;
+  localparam int unsigned REQ_OFF_SNP_ATTR = REQ_OFF_MEM_ATTR + MEM_ATTR_W;
+  localparam int unsigned REQ_OFF_SHARED_SLOT = REQ_OFF_SNP_ATTR + 1;
+  localparam int unsigned REQ_OFF_EXCL = REQ_OFF_SHARED_SLOT + REQ_SHARED_SLOT_W;
+  localparam int unsigned REQ_OFF_EXP_COMP_ACK = REQ_OFF_EXCL + 1;
+  localparam int unsigned REQ_OFF_TAG_OP = REQ_OFF_EXP_COMP_ACK + 1;
+  localparam int unsigned REQ_OFF_TRACE_TAG = REQ_OFF_TAG_OP + TAG_OP_W;
+  localparam int unsigned REQ_OFF_MPAM = REQ_OFF_TRACE_TAG + 1;
+  localparam int unsigned REQ_OFF_PBHA = REQ_OFF_MPAM + MPAM_W;
+  localparam int unsigned REQ_OFF_MEC_STREAM_ID =
+    REQ_OFF_PBHA + (PBHA_EN ? PBHA_W : 0);
+  localparam int unsigned REQ_OFF_SEC_SID1 =
+    REQ_OFF_MEC_STREAM_ID + REQ_MEC_STREAM_W;
+  localparam int unsigned REQ_OFF_RSVDC = REQ_OFF_SEC_SID1 + REQ_SEC_SID1_W;
+  localparam int unsigned REQ_NAMED_W = REQ_OFF_RSVDC + RSVDC_W;
+
+  // RSP
+  localparam int unsigned RSP_OFF_QOS = 0;
+  localparam int unsigned RSP_OFF_TGT_ID = RSP_OFF_QOS + QOS_W;
+  localparam int unsigned RSP_OFF_SRC_ID = RSP_OFF_TGT_ID + NODE_ID_W;
+  localparam int unsigned RSP_OFF_TXN_ID = RSP_OFF_SRC_ID + NODE_ID_W;
+  localparam int unsigned RSP_OFF_OPCODE = RSP_OFF_TXN_ID + TXN_ID_W;
+  localparam int unsigned RSP_OFF_RESP_ERR = RSP_OFF_OPCODE + RSP_OPCODE_W;
+  localparam int unsigned RSP_OFF_RESP = RSP_OFF_RESP_ERR + RESP_ERR_W;
+  localparam int unsigned RSP_OFF_SHARED_SLOT = RSP_OFF_RESP + RESP_W;
+  localparam int unsigned RSP_OFF_C_BUSY = RSP_OFF_SHARED_SLOT + RSP_SHARED_SLOT_W;
+  localparam int unsigned RSP_OFF_DBID = RSP_OFF_C_BUSY + C_BUSY_W;
+  localparam int unsigned RSP_OFF_P_CRD_TYPE = RSP_OFF_DBID + RSP_DBID_W;
+  localparam int unsigned RSP_OFF_TAG_OP = RSP_OFF_P_CRD_TYPE + P_CRD_TYPE_W;
+  localparam int unsigned RSP_OFF_TRACE_TAG = RSP_OFF_TAG_OP + TAG_OP_W;
+  localparam int unsigned RSP_OFF_CACHE_LINE_ID = RSP_OFF_TRACE_TAG + 1;
+  localparam int unsigned RSP_NAMED_W = RSP_OFF_CACHE_LINE_ID + CACHE_LINE_ID_W;
+
+  // SNP
+  localparam int unsigned SNP_ADDR_W = ADDR_W - 3;
+  localparam int unsigned SNP_OFF_QOS = 0;
+  localparam int unsigned SNP_OFF_SRC_ID = SNP_OFF_QOS + QOS_W;
+  localparam int unsigned SNP_OFF_TXN_ID = SNP_OFF_SRC_ID + NODE_ID_W;
+  localparam int unsigned SNP_OFF_FWD_NID = SNP_OFF_TXN_ID + TXN_ID_W;
+  // The twelve-bit slot above FwdNID is FwdTxnID on a forwarding snoop,
+  // {StashLPIDValid, StashLPID} on a stash and VMIDExt on a DVM snoop
+  // [SPEC:IHI0050H B13.8]. It is one slot, not three fields.
+  localparam int unsigned SNP_OFF_FWD_TXN_ID = SNP_OFF_FWD_NID + NODE_ID_W;
+  localparam int unsigned SNP_OFF_OPCODE = SNP_OFF_FWD_TXN_ID + TXN_ID_W;
+  localparam int unsigned SNP_OFF_ADDR = SNP_OFF_OPCODE + SNP_OPCODE_W;
+  localparam int unsigned SNP_OFF_PAS = SNP_OFF_ADDR + SNP_ADDR_W;
+  localparam int unsigned SNP_OFF_DO_NOT_GO_TO_SD = SNP_OFF_PAS + PAS_W;
+  localparam int unsigned SNP_OFF_RET_TO_SRC = SNP_OFF_DO_NOT_GO_TO_SD + 1;
+  localparam int unsigned SNP_OFF_TRACE_TAG = SNP_OFF_RET_TO_SRC + 1;
+  localparam int unsigned SNP_OFF_MPAM = SNP_OFF_TRACE_TAG + 1;
+  localparam int unsigned SNP_OFF_MEC_ID = SNP_OFF_MPAM + MPAM_W;
+  localparam int unsigned SNP_NAMED_W = SNP_OFF_MEC_ID + (MEC_EN ? MEC_ID_W : 0);
+
+  // DAT
+  localparam int unsigned DAT_OFF_QOS = 0;
+  localparam int unsigned DAT_OFF_TGT_ID = DAT_OFF_QOS + QOS_W;
+  localparam int unsigned DAT_OFF_SRC_ID = DAT_OFF_TGT_ID + NODE_ID_W;
+  localparam int unsigned DAT_OFF_TXN_ID = DAT_OFF_SRC_ID + NODE_ID_W;
+  localparam int unsigned DAT_OFF_HOME_NID = DAT_OFF_TXN_ID + TXN_ID_W;
+  localparam int unsigned DAT_OFF_OPCODE = DAT_OFF_HOME_NID + NODE_ID_W;
+  localparam int unsigned DAT_OFF_RESP_ERR = DAT_OFF_OPCODE + DAT_OPCODE_W;
+  localparam int unsigned DAT_OFF_RESP = DAT_OFF_RESP_ERR + RESP_ERR_W;
+  localparam int unsigned DAT_OFF_SHARED_SLOT = DAT_OFF_RESP + RESP_W;
+  localparam int unsigned DAT_OFF_DATA_PULL = DAT_OFF_SHARED_SLOT + DAT_SHARED_SLOT_W;
+  localparam int unsigned DAT_OFF_C_BUSY = DAT_OFF_DATA_PULL + 1;
+  localparam int unsigned DAT_OFF_MEC_ID = DAT_OFF_C_BUSY + C_BUSY_W;
+  localparam int unsigned DAT_OFF_DBID = DAT_OFF_MEC_ID + (MEC_EN ? MEC_ID_W : 0);
+  localparam int unsigned DAT_OFF_CC_ID = DAT_OFF_DBID + DAT_DBID_W;
+  localparam int unsigned DAT_OFF_DATA_ID = DAT_OFF_CC_ID + CC_ID_W;
+  localparam int unsigned DAT_OFF_CACHE_LINE_ID = DAT_OFF_DATA_ID + DATA_ID_W;
+  localparam int unsigned DAT_OFF_TAG_OP = DAT_OFF_CACHE_LINE_ID + CACHE_LINE_ID_W;
+  localparam int unsigned DAT_OFF_TAG = DAT_OFF_TAG_OP + TAG_OP_W;
+  localparam int unsigned DAT_OFF_TAG_UPDATE = DAT_OFF_TAG + TAG_W;
+  localparam int unsigned DAT_OFF_TRACE_TAG = DAT_OFF_TAG_UPDATE + TAG_UPDATE_W;
+  localparam int unsigned DAT_OFF_CAH = DAT_OFF_TRACE_TAG + 1;
+  localparam int unsigned DAT_OFF_NUM_DAT = DAT_OFF_CAH + 1;
+  localparam int unsigned DAT_OFF_REPLICATE = DAT_OFF_NUM_DAT + NUM_DAT_W;
+  localparam int unsigned DAT_OFF_RSVDC = DAT_OFF_REPLICATE + 1;
+  localparam int unsigned DAT_OFF_BE = DAT_OFF_RSVDC + RSVDC_W;
+  localparam int unsigned DAT_OFF_DATA = DAT_OFF_BE + BE_W;
+  localparam int unsigned DAT_OFF_DATA_CHECK = DAT_OFF_DATA + DATA_W;
+  localparam int unsigned DAT_OFF_POISON = DAT_OFF_DATA_CHECK + DATA_CHECK_W;
+  localparam int unsigned DAT_NAMED_W = DAT_OFF_POISON + POISON_W;
+
+  //----------------------------------------------------------------------------
+  // 7. Opcodes and response encodings
+  //
+  // Every encoding below is the single place it appears in the testbench.
+  // Opcode 0 on each channel is that channel's L-Credit return, which is what
+  // lets the link layer drain credits with an all-zero flit and no dependence
+  // on field placement at all.
+  //
+  // Diffed line by line against Tables B13.12 to B13.16 of the Issue H PDF in
+  // DV/doc/spec, which is what Q19 required before Stage 5. The diff found two
+  // wrong encodings, both now fixed: there is no WriteCleanPtl in Issue H
+  // (REQ 0x16 is Reserved), and SnpQuery is 0x10, not 0x0E. REQ opcodes with
+  // bit 6 set are the right-hand column of Table B13.12, which is why they
+  // read as 0x40 plus the column index. RSP, SNP and DAT otherwise matched,
+  // as did the RespErr and Resp encodings against Tables B13.33 to B13.35.
+  // [SPEC:IHI0050H B13.10.18 Channel opcodes] See OPEN QUESTIONS Q19.
+  //----------------------------------------------------------------------------
+
+  typedef enum logic [REQ_OPCODE_W-1:0] {
+    REQ_LCRD_RETURN          = 7'h00,
+    REQ_READ_SHARED          = 7'h01,
+    REQ_READ_CLEAN           = 7'h02,
+    REQ_READ_ONCE            = 7'h03,
+    REQ_READ_NO_SNP          = 7'h04,
+    REQ_P_CRD_RETURN         = 7'h05,
+    REQ_READ_UNIQUE          = 7'h07,
+    REQ_CLEAN_SHARED         = 7'h08,
+    REQ_CLEAN_INVALID        = 7'h09,
+    REQ_MAKE_INVALID         = 7'h0A,
+    REQ_CLEAN_UNIQUE         = 7'h0B,
+    REQ_MAKE_UNIQUE          = 7'h0C,
+    REQ_EVICT                = 7'h0D,
+    REQ_CLEAN_INVALID_STORAGE = 7'h0E,
+    REQ_READ_NO_SNP_SEP      = 7'h11,
+    REQ_CLEAN_SHARED_PERSIST_SEP = 7'h13,
+    REQ_DVM_OP               = 7'h14,
+    REQ_WRITE_EVICT_FULL     = 7'h15,
+    REQ_WRITE_CLEAN_FULL     = 7'h17,
+    REQ_WRITE_UNIQUE_PTL     = 7'h18,
+    REQ_WRITE_UNIQUE_FULL    = 7'h19,
+    REQ_WRITE_BACK_PTL       = 7'h1A,
+    REQ_WRITE_BACK_FULL      = 7'h1B,
+    REQ_WRITE_NO_SNP_PTL     = 7'h1C,
+    REQ_WRITE_NO_SNP_FULL    = 7'h1D,
+    REQ_WRITE_UNIQUE_FULL_STASH = 7'h20,
+    REQ_WRITE_UNIQUE_PTL_STASH  = 7'h21,
+    REQ_STASH_ONCE_SHARED    = 7'h22,
+    REQ_STASH_ONCE_UNIQUE    = 7'h23,
+    REQ_READ_ONCE_CLEAN_INVALID = 7'h24,
+    REQ_READ_ONCE_MAKE_INVALID  = 7'h25,
+    REQ_READ_NOT_SHARED_DIRTY   = 7'h26,
+    REQ_CLEAN_SHARED_PERSIST = 7'h27,
+    REQ_ATOMIC_STORE_ADD     = 7'h28,
+    REQ_ATOMIC_STORE_CLR     = 7'h29,
+    REQ_ATOMIC_STORE_EOR     = 7'h2A,
+    REQ_ATOMIC_STORE_SET     = 7'h2B,
+    REQ_ATOMIC_STORE_SMAX    = 7'h2C,
+    REQ_ATOMIC_STORE_SMIN    = 7'h2D,
+    REQ_ATOMIC_STORE_UMAX    = 7'h2E,
+    REQ_ATOMIC_STORE_UMIN    = 7'h2F,
+    REQ_ATOMIC_LOAD_ADD      = 7'h30,
+    REQ_ATOMIC_LOAD_CLR      = 7'h31,
+    REQ_ATOMIC_LOAD_EOR      = 7'h32,
+    REQ_ATOMIC_LOAD_SET      = 7'h33,
+    REQ_ATOMIC_LOAD_SMAX     = 7'h34,
+    REQ_ATOMIC_LOAD_SMIN     = 7'h35,
+    REQ_ATOMIC_LOAD_UMAX     = 7'h36,
+    REQ_ATOMIC_LOAD_UMIN     = 7'h37,
+    REQ_ATOMIC_SWAP          = 7'h38,
+    REQ_ATOMIC_COMPARE       = 7'h39,
+    REQ_PREFETCH_TGT         = 7'h3A,
+    REQ_MAKE_READ_UNIQUE     = 7'h41,
+    REQ_WRITE_EVICT_OR_EVICT = 7'h42,
+    REQ_WRITE_UNIQUE_ZERO    = 7'h43,
+    REQ_WRITE_NO_SNP_ZERO    = 7'h44,
+    REQ_STASH_ONCE_SEP_SHARED = 7'h47,
+    REQ_STASH_ONCE_SEP_UNIQUE = 7'h48,
+    REQ_READ_PREFER_UNIQUE   = 7'h4C,
+    REQ_CLEAN_INVALID_POPA   = 7'h4D,
+    REQ_WRITE_NO_SNP_DEF     = 7'h4E,
+    // Combined Write and CMO requests. There is no enable field for these:
+    // they are unconditionally present and the HN-F implements them, so each
+    // is testable and the feature matrix may not call them disabled.
+    // See OPEN QUESTIONS Q15. [SPEC:IHI0050H B13.10.18.1 Table B13.12]
+    REQ_WRITE_NO_SNP_FULL_CLEAN_SH = 7'h50,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV = 7'h51,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_SH_PER_SEP = 7'h52,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_SH = 7'h54,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_SH_PER_SEP = 7'h56,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_INV_STRG = 7'h57,
+    REQ_WRITE_BACK_FULL_CLEAN_SH = 7'h58,
+    REQ_WRITE_BACK_FULL_CLEAN_INV = 7'h59,
+    REQ_WRITE_BACK_FULL_CLEAN_SH_PER_SEP = 7'h5A,
+    REQ_WRITE_BACK_FULL_CLEAN_INV_STRG = 7'h5B,
+    REQ_WRITE_CLEAN_FULL_CLEAN_SH = 7'h5C,
+    REQ_WRITE_CLEAN_FULL_CLEAN_SH_PER_SEP = 7'h5E,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_SH = 7'h60,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_INV = 7'h61,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_SH_PER_SEP = 7'h62,
+    REQ_WRITE_UNIQUE_PTL_CLEAN_SH = 7'h64,
+    REQ_WRITE_UNIQUE_PTL_CLEAN_SH_PER_SEP = 7'h66,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_INV_POPA = 7'h70,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV_POPA = 7'h71,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV_STRG = 7'h72,
+    REQ_WRITE_BACK_FULL_CLEAN_INV_POPA = 7'h79
+  } chiReqOpcodeE;
+
+  typedef enum logic [RSP_OPCODE_W-1:0] {
+    RSP_LCRD_RETURN     = 5'h00,
+    RSP_SNP_RESP        = 5'h01,
+    RSP_COMP_ACK        = 5'h02,
+    RSP_RETRY_ACK       = 5'h03,
+    RSP_COMP            = 5'h04,
+    RSP_COMP_DBID_RESP  = 5'h05,
+    RSP_DBID_RESP       = 5'h06,
+    RSP_P_CRD_GRANT     = 5'h07,
+    RSP_READ_RECEIPT    = 5'h08,
+    RSP_SNP_RESP_FWDED  = 5'h09,
+    RSP_TAG_MATCH       = 5'h0A,
+    RSP_RESP_SEP_DATA   = 5'h0B,
+    RSP_PERSIST         = 5'h0C,
+    RSP_COMP_PERSIST    = 5'h0D,
+    RSP_DBID_RESP_ORD   = 5'h0E,
+    RSP_STASH_DONE      = 5'h10,
+    RSP_COMP_STASH_DONE = 5'h11,
+    RSP_COMP_CMO        = 5'h14
+  } chiRspOpcodeE;
+
+  typedef enum logic [SNP_OPCODE_W-1:0] {
+    SNP_LCRD_RETURN            = 5'h00,
+    SNP_SHARED                 = 5'h01,
+    SNP_CLEAN                  = 5'h02,
+    SNP_ONCE                   = 5'h03,
+    SNP_NOT_SHARED_DIRTY       = 5'h04,
+    SNP_UNIQUE_STASH           = 5'h05,
+    SNP_MAKE_INVALID_STASH     = 5'h06,
+    SNP_UNIQUE                 = 5'h07,
+    SNP_CLEAN_SHARED           = 5'h08,
+    SNP_CLEAN_INVALID          = 5'h09,
+    SNP_MAKE_INVALID           = 5'h0A,
+    SNP_STASH_UNIQUE           = 5'h0B,
+    SNP_STASH_SHARED           = 5'h0C,
+    SNP_DVM_OP                 = 5'h0D,
+    SNP_QUERY                  = 5'h10,
+    SNP_SHARED_FWD             = 5'h11,
+    SNP_CLEAN_FWD              = 5'h12,
+    SNP_ONCE_FWD               = 5'h13,
+    SNP_NOT_SHARED_DIRTY_FWD   = 5'h14,
+    SNP_PREFER_UNIQUE          = 5'h15,
+    SNP_PREFER_UNIQUE_FWD      = 5'h16,
+    SNP_UNIQUE_FWD             = 5'h17
+  } chiSnpOpcodeE;
+
+  typedef enum logic [DAT_OPCODE_W-1:0] {
+    DAT_LCRD_RETURN     = 4'h0,
+    DAT_SNP_RESP_DATA   = 4'h1,
+    DAT_COPY_BACK_WR_DATA = 4'h2,
+    DAT_NON_COPY_BACK_WR_DATA = 4'h3,
+    DAT_COMP_DATA       = 4'h4,
+    DAT_SNP_RESP_DATA_PTL = 4'h5,
+    DAT_SNP_RESP_DATA_FWDED = 4'h6,
+    DAT_WRITE_DATA_CANCEL = 4'h7,
+    DAT_DATA_SEP_RESP   = 4'hB,
+    DAT_NCB_WR_DATA_COMP_ACK = 4'hC
+  } chiDatOpcodeE;
+
+  // Cache state encoding carried in Resp[2:0] of a data or snoop response. The
+  // UC and UD states share encoding 3'b010; which one a receiver should infer
+  // depends on the opcode class, so only one label is defined and the
+  // interpretation is done by the cache model.
+  // [SPEC:IHI0050H B4.8 Response field encodings]
+  typedef enum logic [RESP_W-1:0] {
+    RESP_I     = 3'b000,
+    RESP_SC    = 3'b001,
+    RESP_UC_UD = 3'b010,
+    RESP_SD    = 3'b011,
+    RESP_I_PD  = 3'b100,
+    RESP_SC_PD = 3'b101,
+    RESP_UC_PD = 3'b110,
+    RESP_SD_PD = 3'b111
+  } chiRespE;
+
+  typedef enum logic [RESP_ERR_W-1:0] {
+    RESP_ERR_OK   = 2'b00,
+    RESP_ERR_EXOK = 2'b01,
+    RESP_ERR_DERR = 2'b10,
+    RESP_ERR_NDERR = 2'b11
+  } chiRespErrE;
+
+  // Cache state held by the testbench's own cache model. Kept separate from the
+  // wire encoding above because UCE and the partial-dirty states are model
+  // states, not wire values. [SPEC:IHI0050H B2.4 Cache state model]
+  typedef enum bit [2:0] {
+    CACHE_I   = 3'd0,
+    CACHE_SC  = 3'd1,
+    CACHE_UC  = 3'd2,
+    CACHE_UD  = 3'd3,
+    CACHE_SD  = 3'd4,
+    CACHE_UCE = 3'd5
+  } chiCacheStateE;
+
+  //----------------------------------------------------------------------------
+  // 8. Link layer types
+  //----------------------------------------------------------------------------
+
   typedef enum bit [1:0] {
-    CHI_LINK_STOP       = 2'b00,
-    CHI_LINK_ACTIVATE   = 2'b01,
-    CHI_LINK_RUN        = 2'b10,
-    CHI_LINK_DEACTIVATE = 2'b11
+    CHI_CH_REQ = 2'd0,
+    CHI_CH_RSP = 2'd1,
+    CHI_CH_SNP = 2'd2,
+    CHI_CH_DAT = 2'd3
+  } chiChannelE;
+
+  // TX is node to interconnect and RX is interconnect to node, on every port
+  // class, matching the interface's own pin naming [ASSUMPTION:1].
+  typedef enum bit [0:0] {
+    CHI_DIR_TX = 1'd0,
+    CHI_DIR_RX = 1'd1
+  } chiDirE;
+
+  // [SPEC:IHI0050H B13.5 Link activation and deactivation]
+  typedef enum bit [1:0] {
+    LINK_STOP       = 2'd0,
+    LINK_ACTIVATE   = 2'd1,
+    LINK_RUN        = 2'd2,
+    LINK_DEACTIVATE = 2'd3
   } chiLinkStateE;
 
-  // One monitor analysis port carries both protocol flits and link events, so
-  // a subscriber needs to know which it has been handed before reading any
-  // other field.
-  typedef enum bit [1:0] {
-    CHI_TX_PROTOCOL_FLIT = 2'b00,
-    CHI_TX_LINK_EVENT    = 2'b01
-  } chiTxKindE;
+  // The DUT advertises max(lcrdDepth,2) credits per receive channel and raises
+  // linkCreditError if it is ever given more than its transmitter depth, so
+  // this is an upper bound the testbench must respect, not a convention.
+  // [ASSUMPTION:9]
+  localparam int unsigned LCRD_DEPTH =
+    (CHI_CFG.lcrdDepth > 2) ? CHI_CFG.lcrdDepth : 2;
 
-  typedef enum bit [2:0] {
-    CHI_LINK_EVT_STATE_CHANGE = 3'b000,
-    CHI_LINK_EVT_CREDIT_GRANT = 3'b001,
-    CHI_LINK_EVT_CREDIT_USE   = 3'b010,
-    CHI_LINK_EVT_CREDIT_ERROR = 3'b011,
-    CHI_LINK_EVT_SYSCO        = 3'b100
-  } chiLinkEventKindE;
+  // One observed flit or credit event, as the monitor BFM hands it to its
+  // proxy. Unpacked so that a task can return it by value.
+  typedef struct {
+    int unsigned  nodeOrdinal;
+    chiNodeClassE nodeClass;
+    chiChannelE   channel;
+    chiDirE       direction;
+    bit           lcrdReturn;
+    chiRawFlitT   payload;
+    time          sampleTime;
+  } chiFlitSampleT;
 
   typedef struct {
-    chiLinkEventKindE kind;
-    chiDirectionE     direction;
-    chi_channel_e     channel;
-    chiLinkStateE     state;
-    int unsigned      creditCount;
-    bit               sysCoReq;
-    bit               sysCoAck;
-  } chiLinkEventS;
+    int unsigned  nodeOrdinal;
+    bit           linkUp;
+    bit           parityError;
+    bit           creditError;
+    chiLinkStateE txState;
+    chiLinkStateE rxState;
+    bit           sysCoReq;
+    bit           sysCoAck;
+    time          sampleTime;
+  } chiLinkSampleT;
 
-  // What a monitor BFM hands its proxy for one observed flit. The flit is
-  // carried in a container wide enough for any channel and the proxy unpacks it
-  // with the function for the channel named here, so a narrower channel simply
-  // leaves the upper bits clear.
+  //----------------------------------------------------------------------------
+  // 9. Pack and unpack
   //
-  // The container is sized by the architectural maxima rather than by this
-  // configuration's flit widths, because the unpack functions take a
-  // maximum-width argument and the proxy slices the container to that width
-  // before calling them. Sizing it to the configured DAT width, which is
-  // narrower than CHI_MAX_DAT_FLIT_W whenever the data bus is below its widest
-  // legal value, makes that slice run off the end of the vector and yield X.
-  localparam int unsigned CHI_WIDEST_FLIT_W =
-      chiMaxOf4(CHI_MAX_REQ_FLIT_W, CHI_MAX_RSP_FLIT_W,
-                CHI_MAX_SNP_FLIT_W, CHI_MAX_DAT_FLIT_W);
+  // The structs below are the testbench's working form of a flit. They are
+  // unpacked so that a field can be left alone when an opcode does not use it,
+  // and the pack functions place them at the offsets from section 6.
+  //----------------------------------------------------------------------------
 
   typedef struct {
-    chiDirectionE                direction;
-    chi_channel_e                channel;
-    logic [CHI_WIDEST_FLIT_W-1:0] flit;
-  } chiSampledFlitS;
+    logic [QOS_W-1:0]        qos;
+    chiNodeIdT               tgtId;
+    chiNodeIdT               srcId;
+    chiTxnIdT                txnId;
+    chiNodeIdT               returnNid;
+    bit                      stashNidValid;
+    chiTxnIdT                returnTxnId;
+    chiReqOpcodeE            opcode;
+    // MultiReq picks which reading of the six-bit slot applies. Only the
+    // Size reading is ever driven by this testbench, because the DUT has no
+    // MultiReq logic (finding F-4), but both are unpacked.
+    bit                      multiReq;
+    logic [SIZE_W-1:0]       size;
+    logic [NUM_REQ_W-1:0]    numReq;
+    chiAddrT                 addr;
+    logic [PAS_W-1:0]        pas;
+    bit                      likelyShared;
+    bit                      allowRetry;
+    logic [ORDER_W-1:0]      order;
+    logic [P_CRD_TYPE_W-1:0] pCrdType;
+    logic [MEM_ATTR_W-1:0]   memAttr;
+    bit                      snpAttr;
+    // One eight-bit slot whose meaning the opcode selects: LPID on a normal
+    // request, PGroupID on a persistent CMO, StashGroupID on a stash and
+    // TagGroupID on a tagged access. Build it with reqSlotLpId() or
+    // reqSlotGroupId() rather than assigning it raw, so that which meaning is
+    // intended stays visible at the call site. See OPEN QUESTIONS Q7.
+    logic [REQ_SHARED_SLOT_W-1:0] sharedSlot;
+    bit                      excl;
+    bit                      expCompAck;
+    logic [TAG_OP_W-1:0]     tagOp;
+    bit                      traceTag;
+    logic [15:0]             mpam;
+    logic [PBHA_W-1:0]       pbha;
+    logic [31:0]             mecStreamId;
+    bit                      secSid1;
+    logic [31:0]             rsvdc;
+  } chiReqFlitT;
 
-  // ---------------------------------------------------------------------
-  // Stimulus intent
-  // ---------------------------------------------------------------------
-  // Sequences ask for an access in these terms and the driver proxy decides
-  // which opcode realises it, because the choice depends on cache state that
-  // only the driver can see.
-  typedef enum bit [2:0] {
-    CHI_ACCESS_READ        = 3'b000,
-    CHI_ACCESS_WRITE       = 3'b001,
-    CHI_ACCESS_READ_UNIQUE = 3'b010,
-    CHI_ACCESS_CLEAN       = 3'b011,
-    CHI_ACCESS_EVICT       = 3'b100
-  } chiAccessKindE;
-
-  // What a Requester must do about a snoop: the state its line ends up in,
-  // whether it owes data back, and whether that data carries the dirty
-  // responsibility with it [SPEC:IHI0050H B4.9].
   typedef struct {
-    chi_cache_state_e nextState;
-    chi_resp_e        respState;
-    bit               sendData;
-    bit               passDirty;
-  } chiSnoopActionS;
+    logic [QOS_W-1:0]        qos;
+    chiNodeIdT               tgtId;
+    chiNodeIdT               srcId;
+    chiTxnIdT                txnId;
+    chiRspOpcodeE            opcode;
+    chiRespErrE              respErr;
+    logic [RESP_W-1:0]       resp;
+    // FwdState, or DataPull in its top bit, selected by opcode. Build it with
+    // rspSlotFwdState(). The GroupIDs are not here: they share the DBID slot.
+    logic [RSP_SHARED_SLOT_W-1:0] sharedSlot;
+    logic [C_BUSY_W-1:0]     cBusy;
+    // DBID on an ordinary response, PGroupID / StashGroupID / TagGroupID on a
+    // persistent CMO, stash or tagged response. Build the second reading with
+    // rspSlotGroupId() and read it back with rspSlotAsGroupId().
+    chiTxnIdT                dbId;
+    logic [P_CRD_TYPE_W-1:0] pCrdType;
+    logic [TAG_OP_W-1:0]     tagOp;
+    bit                      traceTag;
+    logic [CACHE_LINE_ID_W-1:0] cacheLineId;
+  } chiRspFlitT;
 
-  // ---------------------------------------------------------------------
-  // Address helpers
-  // ---------------------------------------------------------------------
-  function automatic chiLineAddrT lineAddrOf(input chiAddrT addr);
-    return addr[CHI_ADDR_W-1:CHI_LINE_OFF_W];
+  typedef struct {
+    logic [QOS_W-1:0]        qos;
+    chiNodeIdT               srcId;
+    chiTxnIdT                txnId;
+    chiNodeIdT               fwdNid;
+    // FwdTxnID on a forwarding snoop, {StashLPIDValid, StashLPID} on a stash
+    // snoop, VMIDExt on a DVM snoop. One twelve-bit slot; use
+    // snpSlotStashLpId() / snpSlotVmidExt() and their accessors.
+    chiTxnIdT                fwdTxnId;
+    chiSnpOpcodeE            opcode;
+    logic [ADDR_W-1:0]       addr;          // line address, bit 2:0 always zero
+    logic [PAS_W-1:0]        pas;
+    bit                      doNotGoToSd;
+    bit                      retToSrc;
+    bit                      traceTag;
+    logic [15:0]             mpam;
+    logic [31:0]             mecId;
+  } chiSnpFlitT;
+
+  typedef struct {
+    logic [QOS_W-1:0]         qos;
+    chiNodeIdT                tgtId;
+    chiNodeIdT                srcId;
+    chiTxnIdT                 txnId;
+    chiNodeIdT                homeNid;
+    chiDatOpcodeE             opcode;
+    chiRespErrE               respErr;
+    logic [RESP_W-1:0]        resp;
+    // DataSource, or FwdState in its low three bits, selected by opcode.
+    // Build it with datSlotDataSource() or datSlotFwdState(). DataPull is a
+    // field of its own above the slot, not part of it.
+    logic [DAT_SHARED_SLOT_W-1:0] sharedSlot;
+    bit                       dataPull;
+    logic [C_BUSY_W-1:0]      cBusy;
+    logic [31:0]              mecId;
+    chiTxnIdT                 dbId;
+    logic [CC_ID_W-1:0]       ccId;
+    logic [DATA_ID_W-1:0]     dataId;
+    logic [CACHE_LINE_ID_W-1:0] cacheLineId;
+    logic [TAG_OP_W-1:0]      tagOp;
+    logic [15:0]              tag;
+    logic [3:0]               tagUpdate;
+    bit                       traceTag;
+    bit                       cah;
+    // How many packets this message actually carries. A sender may elide
+    // later packets of a transfer, so a receiver may not assume
+    // datPacketCount(size) flits arrive. See OPEN QUESTIONS Q8.
+    logic [NUM_DAT_W-1:0]     numDat;
+    bit                       replicate;
+    logic [31:0]              rsvdc;
+    chiByteEnableT            be;
+    chiDataT                  data;
+    logic [63:0]              dataCheck;
+    logic [7:0]               poison;
+  } chiDatFlitT;
+
+  // Constructors and accessors for the shared REQ slot. The configuration can
+  // make LPID or GroupID narrower than the slot; the unused high bits are
+  // zero, which is what the specification requires of a reserved field.
+  function automatic logic [REQ_SHARED_SLOT_W-1:0] reqSlotLpId(
+      input logic [LP_ID_W-1:0] lpId);
+    logic [REQ_SHARED_SLOT_W-1:0] slot;
+    slot = '0;
+    for (int unsigned i = 0; i < CHI_CFG.lpidW; i++)
+      if (i < REQ_SHARED_SLOT_W) slot[i] = lpId[i];
+    return slot;
   endfunction
 
-  function automatic chiAddrT lineBaseOf(input chiAddrT addr);
-    chiAddrT base;
-    base = addr;
-    base[CHI_LINE_OFF_W-1:0] = '0;
-    return base;
+  function automatic logic [REQ_SHARED_SLOT_W-1:0] reqSlotGroupId(
+      input logic [GROUP_ID_W-1:0] groupId);
+    logic [REQ_SHARED_SLOT_W-1:0] slot;
+    slot = '0;
+    for (int unsigned i = 0; i < CHI_CFG.groupIdW; i++)
+      if (i < REQ_SHARED_SLOT_W) slot[i] = groupId[i];
+    return slot;
   endfunction
 
-  // Deterministic memory contents, shared by the Subordinate memory model and
-  // the scoreboard's reference copy. Both derive the same byte from the
-  // address instead of exchanging an image, so a mismatch means the fabric
-  // moved the wrong data rather than that the two models were loaded
-  // differently.
-  function automatic chiByteT memInitByte(input chiAddrT addr);
-    chiByteT value;
-    value = chiByteT'(addr[7:0] ^ addr[15:8] ^ addr[23:16] ^ 8'hA5);
+  function automatic logic [LP_ID_W-1:0] reqSlotAsLpId(
+      input logic [REQ_SHARED_SLOT_W-1:0] slot);
+    logic [LP_ID_W-1:0] lpId;
+    lpId = '0;
+    for (int unsigned i = 0; i < CHI_CFG.lpidW; i++)
+      if (i < REQ_SHARED_SLOT_W) lpId[i] = slot[i];
+    return lpId;
+  endfunction
+
+  function automatic logic [GROUP_ID_W-1:0] reqSlotAsGroupId(
+      input logic [REQ_SHARED_SLOT_W-1:0] slot);
+    logic [GROUP_ID_W-1:0] groupId;
+    groupId = '0;
+    for (int unsigned i = 0; i < CHI_CFG.groupIdW; i++)
+      if (i < REQ_SHARED_SLOT_W) groupId[i] = slot[i];
+    return groupId;
+  endfunction
+
+  // The RSP three-bit slot is FwdState, or DataPull in its bit 2 position.
+  // The RSP GroupIDs are not here: they share the twelve-bit DBID slot, so
+  // they are built and read through the dbId field instead.
+  function automatic logic [RSP_SHARED_SLOT_W-1:0] rspSlotFwdState(
+      input logic [FWD_STATE_W-1:0] fwdState);
+    return fwdState[RSP_SHARED_SLOT_W-1:0];
+  endfunction
+
+  function automatic logic [RSP_SHARED_SLOT_W-1:0] rspSlotDataPull(
+      input bit dataPull);
+    logic [RSP_SHARED_SLOT_W-1:0] slot;
+    slot = '0;
+    slot[RSP_SHARED_SLOT_W-1] = dataPull;
+    return slot;
+  endfunction
+
+  function automatic logic [FWD_STATE_W-1:0] rspSlotAsFwdState(
+      input logic [RSP_SHARED_SLOT_W-1:0] slot);
+    return slot;
+  endfunction
+
+  function automatic bit rspSlotAsDataPull(
+      input logic [RSP_SHARED_SLOT_W-1:0] slot);
+    return slot[RSP_SHARED_SLOT_W-1];
+  endfunction
+
+  // The RSP DBID slot, read as one of the GroupIDs.
+  function automatic chiTxnIdT rspSlotGroupId(
+      input logic [GROUP_ID_W-1:0] groupId);
+    chiTxnIdT slot;
+    slot = '0;
+    for (int unsigned i = 0; i < CHI_CFG.groupIdW; i++)
+      if (i < RSP_DBID_W) slot[i] = groupId[i];
+    return slot;
+  endfunction
+
+  function automatic logic [GROUP_ID_W-1:0] rspSlotAsGroupId(
+      input chiTxnIdT slot);
+    logic [GROUP_ID_W-1:0] groupId;
+    groupId = '0;
+    for (int unsigned i = 0; i < CHI_CFG.groupIdW; i++)
+      if (i < RSP_DBID_W) groupId[i] = slot[i];
+    return groupId;
+  endfunction
+
+  // The SNP twelve-bit slot above FwdNID, read as a stash LPID or a DVM
+  // VMIDExt instead of a FwdTxnID.
+  function automatic chiTxnIdT snpSlotStashLpId(
+      input logic [LP_ID_W-1:0] stashLpId, input bit stashLpIdValid);
+    chiTxnIdT slot;
+    slot = '0;
+    for (int unsigned i = 0; i < CHI_CFG.lpidW; i++)
+      if (i < TXN_ID_W) slot[i] = stashLpId[i];
+    slot[LP_ID_W] = stashLpIdValid;
+    return slot;
+  endfunction
+
+  function automatic bit snpSlotAsStashLpIdValid(input chiTxnIdT slot);
+    return slot[LP_ID_W];
+  endfunction
+
+  function automatic chiTxnIdT snpSlotVmidExt(input logic [7:0] vmidExt);
+    chiTxnIdT slot;
+    slot = '0;
+    slot[7:0] = vmidExt;
+    return slot;
+  endfunction
+
+  function automatic logic [7:0] snpSlotAsVmidExt(input chiTxnIdT slot);
+    return slot[7:0];
+  endfunction
+
+  // And on DAT, where the eight-bit slot is DataSource or FwdState. DataPull
+  // is its own field above the slot on this channel.
+  function automatic logic [DAT_SHARED_SLOT_W-1:0] datSlotDataSource(
+      input logic [DATA_SOURCE_W-1:0] dataSource);
+    return dataSource[DAT_SHARED_SLOT_W-1:0];
+  endfunction
+
+  function automatic logic [DAT_SHARED_SLOT_W-1:0] datSlotFwdState(
+      input logic [FWD_STATE_W-1:0] fwdState);
+    logic [DAT_SHARED_SLOT_W-1:0] slot;
+    slot = '0;
+    slot[FWD_STATE_W-1:0] = fwdState;
+    return slot;
+  endfunction
+
+  function automatic logic [DATA_SOURCE_W-1:0] datSlotAsDataSource(
+      input logic [DAT_SHARED_SLOT_W-1:0] slot);
+    return slot;
+  endfunction
+
+  function automatic logic [FWD_STATE_W-1:0] datSlotAsFwdState(
+      input logic [DAT_SHARED_SLOT_W-1:0] slot);
+    return slot[FWD_STATE_W-1:0];
+  endfunction
+
+  function automatic chiRawFlitT packReq(input chiReqFlitT flit);
+    chiRawFlitT raw;
+    raw = '0;
+    raw[REQ_OFF_QOS            +: QOS_W]        = flit.qos;
+    raw[REQ_OFF_TGT_ID         +: NODE_ID_W]    = flit.tgtId[NODE_ID_W-1:0];
+    raw[REQ_OFF_SRC_ID         +: NODE_ID_W]    = flit.srcId[NODE_ID_W-1:0];
+    raw[REQ_OFF_TXN_ID         +: TXN_ID_W]     = flit.txnId;
+    raw[REQ_OFF_RETURN_NID     +: NODE_ID_W]    = flit.returnNid[NODE_ID_W-1:0];
+    raw[REQ_OFF_STASH_NID_VALID]                = flit.stashNidValid;
+    raw[REQ_OFF_RETURN_TXN_ID  +: TXN_ID_W]     = flit.returnTxnId;
+    raw[REQ_OFF_OPCODE         +: REQ_OPCODE_W] = flit.opcode;
+    raw[REQ_OFF_MULTI_REQ]                      = flit.multiReq;
+    if (flit.multiReq)
+      raw[REQ_OFF_NUM_REQ      +: NUM_REQ_W]    = flit.numReq;
+    else
+      raw[REQ_OFF_SIZE         +: SIZE_W]       = flit.size;
+    raw[REQ_OFF_ADDR           +: ADDR_W]       = flit.addr;
+    raw[REQ_OFF_PAS            +: PAS_W]        = flit.pas;
+    raw[REQ_OFF_LIKELY_SHARED]                  = flit.likelyShared;
+    raw[REQ_OFF_ALLOW_RETRY]                    = flit.allowRetry;
+    raw[REQ_OFF_ORDER          +: ORDER_W]      = flit.order;
+    raw[REQ_OFF_P_CRD_TYPE     +: P_CRD_TYPE_W] = flit.pCrdType;
+    raw[REQ_OFF_MEM_ATTR       +: MEM_ATTR_W]   = flit.memAttr;
+    raw[REQ_OFF_SNP_ATTR]                       = flit.snpAttr;
+    raw[REQ_OFF_SHARED_SLOT +: REQ_SHARED_SLOT_W] = flit.sharedSlot;
+    raw[REQ_OFF_EXCL]                           = flit.excl;
+    raw[REQ_OFF_EXP_COMP_ACK]                   = flit.expCompAck;
+    raw[REQ_OFF_TAG_OP         +: TAG_OP_W]     = flit.tagOp;
+    raw[REQ_OFF_TRACE_TAG]                      = flit.traceTag;
+    for (int unsigned i = 0; i < MPAM_W; i++)
+      raw[REQ_OFF_MPAM + i] = flit.mpam[i];
+    for (int unsigned i = 0; i < (PBHA_EN ? PBHA_W : 0); i++)
+      raw[REQ_OFF_PBHA + i] = flit.pbha[i];
+    for (int unsigned i = 0; i < REQ_MEC_STREAM_W; i++)
+      raw[REQ_OFF_MEC_STREAM_ID + i] = flit.mecStreamId[i];
+    if (CDA_EN)
+      raw[REQ_OFF_SEC_SID1] = flit.secSid1;
+    for (int unsigned i = 0; i < RSVDC_W; i++)
+      raw[REQ_OFF_RSVDC + i] = flit.rsvdc[i];
+    return raw;
+  endfunction
+
+  function automatic chiReqFlitT unpackReq(input chiRawFlitT raw);
+    chiReqFlitT flit;
+    flit = '{default:'0, opcode:REQ_LCRD_RETURN};
+    flit.qos           = raw[REQ_OFF_QOS +: QOS_W];
+    flit.tgtId         = chiNodeIdT'(raw[REQ_OFF_TGT_ID +: NODE_ID_W]);
+    flit.srcId         = chiNodeIdT'(raw[REQ_OFF_SRC_ID +: NODE_ID_W]);
+    flit.txnId         = raw[REQ_OFF_TXN_ID +: TXN_ID_W];
+    flit.returnNid     = chiNodeIdT'(raw[REQ_OFF_RETURN_NID +: NODE_ID_W]);
+    flit.stashNidValid = raw[REQ_OFF_STASH_NID_VALID];
+    flit.returnTxnId   = raw[REQ_OFF_RETURN_TXN_ID +: TXN_ID_W];
+    flit.opcode        = chiReqOpcodeE'(raw[REQ_OFF_OPCODE +: REQ_OPCODE_W]);
+    flit.multiReq      = raw[REQ_OFF_MULTI_REQ];
+    flit.size          = raw[REQ_OFF_SIZE +: SIZE_W];
+    flit.numReq        = raw[REQ_OFF_NUM_REQ +: NUM_REQ_W];
+    flit.addr          = raw[REQ_OFF_ADDR +: ADDR_W];
+    flit.pas           = raw[REQ_OFF_PAS +: PAS_W];
+    flit.likelyShared  = raw[REQ_OFF_LIKELY_SHARED];
+    flit.allowRetry    = raw[REQ_OFF_ALLOW_RETRY];
+    flit.order         = raw[REQ_OFF_ORDER +: ORDER_W];
+    flit.pCrdType      = raw[REQ_OFF_P_CRD_TYPE +: P_CRD_TYPE_W];
+    flit.memAttr       = raw[REQ_OFF_MEM_ATTR +: MEM_ATTR_W];
+    flit.snpAttr       = raw[REQ_OFF_SNP_ATTR];
+    flit.sharedSlot    = raw[REQ_OFF_SHARED_SLOT +: REQ_SHARED_SLOT_W];
+    flit.excl          = raw[REQ_OFF_EXCL];
+    flit.expCompAck    = raw[REQ_OFF_EXP_COMP_ACK];
+    flit.tagOp         = raw[REQ_OFF_TAG_OP +: TAG_OP_W];
+    flit.traceTag      = raw[REQ_OFF_TRACE_TAG];
+    for (int unsigned i = 0; i < MPAM_W; i++)
+      flit.mpam[i] = raw[REQ_OFF_MPAM + i];
+    for (int unsigned i = 0; i < (PBHA_EN ? PBHA_W : 0); i++)
+      flit.pbha[i] = raw[REQ_OFF_PBHA + i];
+    for (int unsigned i = 0; i < REQ_MEC_STREAM_W; i++)
+      flit.mecStreamId[i] = raw[REQ_OFF_MEC_STREAM_ID + i];
+    if (CDA_EN)
+      flit.secSid1 = raw[REQ_OFF_SEC_SID1];
+    for (int unsigned i = 0; i < RSVDC_W; i++)
+      flit.rsvdc[i] = raw[REQ_OFF_RSVDC + i];
+    return flit;
+  endfunction
+
+  function automatic chiRawFlitT packRsp(input chiRspFlitT flit);
+    chiRawFlitT raw;
+    raw = '0;
+    raw[RSP_OFF_QOS        +: QOS_W]        = flit.qos;
+    raw[RSP_OFF_TGT_ID     +: NODE_ID_W]    = flit.tgtId[NODE_ID_W-1:0];
+    raw[RSP_OFF_SRC_ID     +: NODE_ID_W]    = flit.srcId[NODE_ID_W-1:0];
+    raw[RSP_OFF_TXN_ID     +: TXN_ID_W]     = flit.txnId;
+    raw[RSP_OFF_OPCODE     +: RSP_OPCODE_W] = flit.opcode;
+    raw[RSP_OFF_RESP_ERR   +: RESP_ERR_W]   = flit.respErr;
+    raw[RSP_OFF_RESP       +: RESP_W]       = flit.resp;
+    raw[RSP_OFF_SHARED_SLOT +: RSP_SHARED_SLOT_W] = flit.sharedSlot;
+    raw[RSP_OFF_C_BUSY     +: C_BUSY_W]     = flit.cBusy;
+    raw[RSP_OFF_DBID       +: RSP_DBID_W]   = RSP_DBID_W'(flit.dbId);
+    raw[RSP_OFF_P_CRD_TYPE +: P_CRD_TYPE_W] = flit.pCrdType;
+    raw[RSP_OFF_TAG_OP     +: TAG_OP_W]     = flit.tagOp;
+    raw[RSP_OFF_TRACE_TAG]                  = flit.traceTag;
+    raw[RSP_OFF_CACHE_LINE_ID +: CACHE_LINE_ID_W] = flit.cacheLineId;
+    return raw;
+  endfunction
+
+  function automatic chiRspFlitT unpackRsp(input chiRawFlitT raw);
+    chiRspFlitT flit;
+    flit = '{default:'0, opcode:RSP_LCRD_RETURN, respErr:RESP_ERR_OK};
+    flit.qos      = raw[RSP_OFF_QOS +: QOS_W];
+    flit.tgtId    = chiNodeIdT'(raw[RSP_OFF_TGT_ID +: NODE_ID_W]);
+    flit.srcId    = chiNodeIdT'(raw[RSP_OFF_SRC_ID +: NODE_ID_W]);
+    flit.txnId    = raw[RSP_OFF_TXN_ID +: TXN_ID_W];
+    flit.opcode   = chiRspOpcodeE'(raw[RSP_OFF_OPCODE +: RSP_OPCODE_W]);
+    flit.respErr  = chiRespErrE'(raw[RSP_OFF_RESP_ERR +: RESP_ERR_W]);
+    flit.resp     = raw[RSP_OFF_RESP +: RESP_W];
+    flit.sharedSlot = raw[RSP_OFF_SHARED_SLOT +: RSP_SHARED_SLOT_W];
+    flit.cBusy    = raw[RSP_OFF_C_BUSY +: C_BUSY_W];
+    flit.dbId     = chiTxnIdT'(raw[RSP_OFF_DBID +: RSP_DBID_W]);
+    flit.pCrdType = raw[RSP_OFF_P_CRD_TYPE +: P_CRD_TYPE_W];
+    flit.tagOp    = raw[RSP_OFF_TAG_OP +: TAG_OP_W];
+    flit.traceTag = raw[RSP_OFF_TRACE_TAG];
+    flit.cacheLineId = raw[RSP_OFF_CACHE_LINE_ID +: CACHE_LINE_ID_W];
+    return flit;
+  endfunction
+
+  function automatic chiRawFlitT packSnp(input chiSnpFlitT flit);
+    chiRawFlitT raw;
+    raw = '0;
+    raw[SNP_OFF_QOS      +: QOS_W]        = flit.qos;
+    raw[SNP_OFF_SRC_ID   +: NODE_ID_W]    = flit.srcId[NODE_ID_W-1:0];
+    raw[SNP_OFF_TXN_ID   +: TXN_ID_W]     = flit.txnId;
+    raw[SNP_OFF_FWD_NID  +: NODE_ID_W]    = flit.fwdNid[NODE_ID_W-1:0];
+    raw[SNP_OFF_FWD_TXN_ID +: TXN_ID_W]   = flit.fwdTxnId;
+    raw[SNP_OFF_OPCODE   +: SNP_OPCODE_W] = flit.opcode;
+    raw[SNP_OFF_ADDR     +: SNP_ADDR_W]   = flit.addr[ADDR_W-1:3];
+    raw[SNP_OFF_PAS      +: PAS_W]        = flit.pas;
+    raw[SNP_OFF_DO_NOT_GO_TO_SD]          = flit.doNotGoToSd;
+    raw[SNP_OFF_RET_TO_SRC]               = flit.retToSrc;
+    raw[SNP_OFF_TRACE_TAG]                = flit.traceTag;
+    for (int unsigned i = 0; i < MPAM_W; i++)
+      raw[SNP_OFF_MPAM + i] = flit.mpam[i];
+    for (int unsigned i = 0; i < (MEC_EN ? MEC_ID_W : 0); i++)
+      raw[SNP_OFF_MEC_ID + i] = flit.mecId[i];
+    return raw;
+  endfunction
+
+  function automatic chiSnpFlitT unpackSnp(input chiRawFlitT raw);
+    chiSnpFlitT flit;
+    flit = '{default:'0, opcode:SNP_LCRD_RETURN};
+    flit.qos            = raw[SNP_OFF_QOS +: QOS_W];
+    flit.srcId          = chiNodeIdT'(raw[SNP_OFF_SRC_ID +: NODE_ID_W]);
+    flit.txnId          = raw[SNP_OFF_TXN_ID +: TXN_ID_W];
+    flit.fwdNid         = chiNodeIdT'(raw[SNP_OFF_FWD_NID +: NODE_ID_W]);
+    flit.fwdTxnId       = raw[SNP_OFF_FWD_TXN_ID +: TXN_ID_W];
+    flit.opcode         = chiSnpOpcodeE'(raw[SNP_OFF_OPCODE +: SNP_OPCODE_W]);
+    flit.addr           = chiAddrT'({raw[SNP_OFF_ADDR +: SNP_ADDR_W], 3'b000});
+    flit.pas            = raw[SNP_OFF_PAS +: PAS_W];
+    flit.doNotGoToSd    = raw[SNP_OFF_DO_NOT_GO_TO_SD];
+    flit.retToSrc       = raw[SNP_OFF_RET_TO_SRC];
+    flit.traceTag       = raw[SNP_OFF_TRACE_TAG];
+    for (int unsigned i = 0; i < MPAM_W; i++)
+      flit.mpam[i] = raw[SNP_OFF_MPAM + i];
+    for (int unsigned i = 0; i < (MEC_EN ? MEC_ID_W : 0); i++)
+      flit.mecId[i] = raw[SNP_OFF_MEC_ID + i];
+    return flit;
+  endfunction
+
+  function automatic chiRawFlitT packDat(input chiDatFlitT flit);
+    chiRawFlitT raw;
+    raw = '0;
+    raw[DAT_OFF_QOS         +: QOS_W]         = flit.qos;
+    raw[DAT_OFF_TGT_ID      +: NODE_ID_W]     = flit.tgtId[NODE_ID_W-1:0];
+    raw[DAT_OFF_SRC_ID      +: NODE_ID_W]     = flit.srcId[NODE_ID_W-1:0];
+    raw[DAT_OFF_TXN_ID      +: TXN_ID_W]      = flit.txnId;
+    raw[DAT_OFF_HOME_NID    +: NODE_ID_W]     = flit.homeNid[NODE_ID_W-1:0];
+    raw[DAT_OFF_OPCODE      +: DAT_OPCODE_W]  = flit.opcode;
+    raw[DAT_OFF_RESP_ERR    +: RESP_ERR_W]    = flit.respErr;
+    raw[DAT_OFF_RESP        +: RESP_W]        = flit.resp;
+    raw[DAT_OFF_SHARED_SLOT +: DAT_SHARED_SLOT_W] = flit.sharedSlot;
+    raw[DAT_OFF_DATA_PULL]                    = flit.dataPull;
+    raw[DAT_OFF_C_BUSY      +: C_BUSY_W]      = flit.cBusy;
+    for (int unsigned i = 0; i < (MEC_EN ? MEC_ID_W : 0); i++)
+      raw[DAT_OFF_MEC_ID + i] = flit.mecId[i];
+    raw[DAT_OFF_DBID        +: DAT_DBID_W]    = DAT_DBID_W'(flit.dbId);
+    raw[DAT_OFF_CC_ID       +: CC_ID_W]       = flit.ccId;
+    raw[DAT_OFF_DATA_ID     +: DATA_ID_W]     = flit.dataId;
+    raw[DAT_OFF_CACHE_LINE_ID +: CACHE_LINE_ID_W] = flit.cacheLineId;
+    raw[DAT_OFF_TAG_OP      +: TAG_OP_W]      = flit.tagOp;
+    for (int unsigned i = 0; i < TAG_W; i++)
+      raw[DAT_OFF_TAG + i] = flit.tag[i];
+    for (int unsigned i = 0; i < TAG_UPDATE_W; i++)
+      raw[DAT_OFF_TAG_UPDATE + i] = flit.tagUpdate[i];
+    raw[DAT_OFF_TRACE_TAG]                    = flit.traceTag;
+    raw[DAT_OFF_CAH]                          = flit.cah;
+    raw[DAT_OFF_NUM_DAT     +: NUM_DAT_W]     = flit.numDat;
+    raw[DAT_OFF_REPLICATE]                    = flit.replicate;
+    for (int unsigned i = 0; i < RSVDC_W; i++)
+      raw[DAT_OFF_RSVDC + i] = flit.rsvdc[i];
+    raw[DAT_OFF_BE   +: BE_W]   = flit.be;
+    raw[DAT_OFF_DATA +: DATA_W] = flit.data;
+    for (int unsigned i = 0; i < DATA_CHECK_W; i++)
+      raw[DAT_OFF_DATA_CHECK + i] = flit.dataCheck[i];
+    for (int unsigned i = 0; i < POISON_W; i++)
+      raw[DAT_OFF_POISON + i] = flit.poison[i];
+    return raw;
+  endfunction
+
+  function automatic chiDatFlitT unpackDat(input chiRawFlitT raw);
+    chiDatFlitT flit;
+    flit = '{default:'0, opcode:DAT_LCRD_RETURN, respErr:RESP_ERR_OK};
+    flit.qos        = raw[DAT_OFF_QOS +: QOS_W];
+    flit.tgtId      = chiNodeIdT'(raw[DAT_OFF_TGT_ID +: NODE_ID_W]);
+    flit.srcId      = chiNodeIdT'(raw[DAT_OFF_SRC_ID +: NODE_ID_W]);
+    flit.txnId      = raw[DAT_OFF_TXN_ID +: TXN_ID_W];
+    flit.homeNid    = chiNodeIdT'(raw[DAT_OFF_HOME_NID +: NODE_ID_W]);
+    flit.opcode     = chiDatOpcodeE'(raw[DAT_OFF_OPCODE +: DAT_OPCODE_W]);
+    flit.respErr    = chiRespErrE'(raw[DAT_OFF_RESP_ERR +: RESP_ERR_W]);
+    flit.resp       = raw[DAT_OFF_RESP +: RESP_W];
+    flit.sharedSlot = raw[DAT_OFF_SHARED_SLOT +: DAT_SHARED_SLOT_W];
+    flit.dataPull   = raw[DAT_OFF_DATA_PULL];
+    flit.cBusy      = raw[DAT_OFF_C_BUSY +: C_BUSY_W];
+    for (int unsigned i = 0; i < (MEC_EN ? MEC_ID_W : 0); i++)
+      flit.mecId[i] = raw[DAT_OFF_MEC_ID + i];
+    flit.dbId       = chiTxnIdT'(raw[DAT_OFF_DBID +: DAT_DBID_W]);
+    flit.ccId       = raw[DAT_OFF_CC_ID +: CC_ID_W];
+    flit.dataId     = raw[DAT_OFF_DATA_ID +: DATA_ID_W];
+    flit.cacheLineId = raw[DAT_OFF_CACHE_LINE_ID +: CACHE_LINE_ID_W];
+    flit.tagOp      = raw[DAT_OFF_TAG_OP +: TAG_OP_W];
+    for (int unsigned i = 0; i < TAG_W; i++)
+      flit.tag[i] = raw[DAT_OFF_TAG + i];
+    for (int unsigned i = 0; i < TAG_UPDATE_W; i++)
+      flit.tagUpdate[i] = raw[DAT_OFF_TAG_UPDATE + i];
+    flit.traceTag   = raw[DAT_OFF_TRACE_TAG];
+    flit.cah        = raw[DAT_OFF_CAH];
+    flit.numDat     = raw[DAT_OFF_NUM_DAT +: NUM_DAT_W];
+    flit.replicate  = raw[DAT_OFF_REPLICATE];
+    for (int unsigned i = 0; i < RSVDC_W; i++)
+      flit.rsvdc[i] = raw[DAT_OFF_RSVDC + i];
+    flit.be   = raw[DAT_OFF_BE +: BE_W];
+    flit.data = raw[DAT_OFF_DATA +: DATA_W];
+    for (int unsigned i = 0; i < DATA_CHECK_W; i++)
+      flit.dataCheck[i] = raw[DAT_OFF_DATA_CHECK + i];
+    for (int unsigned i = 0; i < POISON_W; i++)
+      flit.poison[i] = raw[DAT_OFF_POISON + i];
+    return flit;
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // Data packet accounting
+  //
+  // A DAT message covers only the bytes named by Addr and Size, not a whole
+  // cache line, so a 16-byte read is one packet even at a data width that
+  // could carry more. DataID names the packet's position inside the line in
+  // 16-byte units, which makes consecutive packets differ by dataW/128.
+  //
+  // The DUT also honours NumDat, so a sender may elide later packets and a
+  // receiver must accept a message shorter than a full line's worth. Nothing
+  // in the testbench may assume 512/dataW packets. [ASSUMPTION:8]
+  //----------------------------------------------------------------------------
+
+  localparam int unsigned DAT_BYTES_PER_PACKET = DATA_W / 8;
+
+  function automatic int unsigned datTransferBytes(input logic [SIZE_W-1:0] size);
+    return 1 << size;
+  endfunction
+
+  function automatic int unsigned datPacketCount(input logic [SIZE_W-1:0] size);
+    int unsigned bytes;
+    bytes = datTransferBytes(size);
+    if (bytes <= DAT_BYTES_PER_PACKET) return 1;
+    return bytes / DAT_BYTES_PER_PACKET;
+  endfunction
+
+  function automatic logic [DATA_ID_W-1:0] datDataId(
+      input chiAddrT addr, input int unsigned packetIndex);
+    int unsigned offsetInLine;
+    offsetInLine = (addr % CACHE_LINE_BYTES) + (packetIndex * DAT_BYTES_PER_PACKET);
+    return DATA_ID_W'((offsetInLine % CACHE_LINE_BYTES) / 16);
+  endfunction
+
+  // An all-zero flit is that channel's L-Credit return on every channel,
+  // because opcode 0 is *LCrdReturn and no other field is meaningful for it.
+  // This is what lets the link layer drain credits before the field placement
+  // in section 6 has been confirmed.
+  // [SPEC:IHI0050H B13.7 L-Credit return]
+  function automatic chiRawFlitT lcrdReturnFlit();
+    return '0;
+  endfunction
+
+  // A Protocol credit is granted by one node to another for one credit type,
+  // and is only good for that pair. Both the granting side and the spending
+  // side keep a table, so the key lives here rather than in either agent.
+  // [SPEC:IHI0050H B2.12 Transaction retry]
+  typedef struct packed {
+    chiNodeIdT srcId;
+    logic [P_CRD_TYPE_W-1:0] pcrdType;
+  } chiPcrdKeyT;
+
+  function automatic bit isLcrdReturn(input chiChannelE channel,
+                                      input chiRawFlitT raw);
+    case (channel)
+      CHI_CH_REQ: return raw[REQ_OFF_OPCODE +: REQ_OPCODE_W] == REQ_LCRD_RETURN;
+      CHI_CH_RSP: return raw[RSP_OFF_OPCODE +: RSP_OPCODE_W] == RSP_LCRD_RETURN;
+      CHI_CH_SNP: return raw[SNP_OFF_OPCODE +: SNP_OPCODE_W] == SNP_LCRD_RETURN;
+      default:    return raw[DAT_OFF_OPCODE +: DAT_OPCODE_W] == DAT_LCRD_RETURN;
+    endcase
+  endfunction
+
+  function automatic int unsigned flitWidthOfChannel(input chiChannelE channel);
+    case (channel)
+      CHI_CH_REQ: return REQ_FLIT_W;
+      CHI_CH_RSP: return RSP_FLIT_W;
+      CHI_CH_SNP: return SNP_FLIT_W;
+      default:    return DAT_FLIT_W;
+    endcase
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // 10. Flit parity
+  //
+  // The DUT checks TX<x>FLITCHK per byte with even parity, which differs from
+  // my reading of the specification. Both the compliant and the observed
+  // conventions are provided so that a directed test can drive either and the
+  // difference can be reported rather than argued about.
+  // [SPEC:IHI0050H B13.6 Flit protection] See OPEN QUESTIONS Q17.
+  //----------------------------------------------------------------------------
+
+  localparam int unsigned CHK_MAX_W = (FLIT_MAX_W + 7) / 8;
+
+  function automatic logic [CHK_MAX_W-1:0] flitCheckEven(
+      input chiRawFlitT raw, input int unsigned flitWidth);
+    logic [CHK_MAX_W-1:0] chk;
+    logic parity;
+    chk = '0;
+    for (int unsigned byteIndex = 0; byteIndex < ((flitWidth + 7) / 8); byteIndex++) begin
+      parity = 1'b0;
+      for (int unsigned bitIndex = 0; bitIndex < 8; bitIndex++)
+        if (((byteIndex * 8) + bitIndex) < flitWidth)
+          parity ^= raw[(byteIndex * 8) + bitIndex];
+      chk[byteIndex] = parity;
+    end
+    return chk;
+  endfunction
+
+  function automatic logic [CHK_MAX_W-1:0] flitCheckOdd(
+      input chiRawFlitT raw, input int unsigned flitWidth);
+    logic [CHK_MAX_W-1:0] chk;
+    chk = ~flitCheckEven(raw, flitWidth);
+    for (int unsigned byteIndex = ((flitWidth + 7) / 8); byteIndex < CHK_MAX_W; byteIndex++)
+      chk[byteIndex] = 1'b0;
+    return chk;
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // 11. Memory initialisation pattern
+  //
+  // Deterministic and address-derived so that the Subordinate memory model and
+  // the scoreboard's independent memory model agree on the value of a location
+  // that has never been written, without either seeding the other.
+  //----------------------------------------------------------------------------
+
+  function automatic logic [63:0] chiMemInitData(input chiAddrT addr);
+    logic [63:0] value;
+    value = {addr[31:0] ^ 32'hA5A5_5A5A, addr[31:0] + 32'h1234_5678};
+    value[2:0] = 3'b0;
+    value[2:0] = addr[5:3];
     return value;
   endfunction
-endpackage
+
+  function automatic string nodeClassName(input chiNodeClassE nodeClass);
+    case (nodeClass)
+      RN_F: return "RN-F";
+      RN_D: return "RN-D";
+      RN_I: return "RN-I";
+      SN_F: return "SN-F";
+      default: return "SN-I";
+    endcase
+  endfunction
+
+  function automatic string channelName(input chiChannelE channel);
+    case (channel)
+      CHI_CH_REQ: return "REQ";
+      CHI_CH_RSP: return "RSP";
+      CHI_CH_SNP: return "SNP";
+      default: return "DAT";
+    endcase
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // 12. config_db key contract
+  //
+  // Both tops build their keys from these functions so that a typo cannot make
+  // one side publish a key the other never looks up. Every get failure on the
+  // HVL side raises uvm_fatal naming the key it asked for.
+  //----------------------------------------------------------------------------
+
+  function automatic string clkRstBfmKey();
+    return "chiClkRstBfm";
+  endfunction
+
+  function automatic string requesterDriverBfmKey(input int unsigned ordinal);
+    return $sformatf("chiRequesterDriverBfm[%0d]", ordinal);
+  endfunction
+
+  function automatic string subordinateDriverBfmKey(input int unsigned ordinal);
+    return $sformatf("chiSubordinateDriverBfm[%0d]", ordinal);
+  endfunction
+
+  function automatic string monitorBfmKey(input int unsigned ordinal);
+    return $sformatf("chiMonitorBfm[%0d]", ordinal);
+  endfunction
+
+endpackage : chiGlobalsPkg

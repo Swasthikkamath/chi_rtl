@@ -1,288 +1,394 @@
-// Passive pin observer for one CHI port.
+//==============================================================================
+// chiMonitorBfm
 //
-// One implementation serves both roles. A monitor only reads pins, and the
-// pins of a Requester port and a Subordinate port are the same interface; what
-// differs is which channels ever carry a flit, and an idle channel simply
-// produces nothing. Splitting this per role would be two copies of identical
-// sampling code.
+// Why the monitor is a separate BFM from the drivers:
 //
-// Nothing here is shared with the driver BFM. The monitor reconstructs what
-// happened from the wires alone, so a driver that builds a malformed flit is
-// still reported as what it actually sent rather than as what it meant to
-// send.
+// The scoreboard has to be able to see a port that no driver owns. A passive
+// agent, a port whose driver is disabled, and the sentinel port of a
+// configured-out node class all need observation without stimulus, so the
+// monitor cannot be a mode of the driver BFM. It also has to see what the
+// drivers cannot: linkUp, linkParityError and linkCreditError are top-level
+// DUT outputs indexed by node ordinal, not members of chi_if [TOP:ports], so
+// they arrive here as ordinary interface ports from hdlTop.
+//
+// This interface drives nothing. Every signal is sampled, and the two error
+// outputs are pulses rather than sticky bits [ASSUMPTION:17], so they are
+// latched here; a proxy that polled them would miss them.
+//
+// Both directions of every channel are observed, including the channels a
+// given port class does not use, so that traffic appearing where it should not
+// is a finding the scoreboard can act on rather than something nobody watches.
+//==============================================================================
+
 interface chiMonitorBfm (
-  chi_if chiPort
+    input logic CLK,
+    input logic RESETn,
+
+    input logic TXLINKACTIVEREQ,
+    input logic TXLINKACTIVEACK,
+    input logic RXLINKACTIVEREQ,
+    input logic RXLINKACTIVEACK,
+    input logic TXSACTIVE,
+    input logic RXSACTIVE,
+    input logic SYSCOREQ,
+    input logic SYSCOACK,
+
+    input logic TXREQFLITV,
+    input logic [chiGlobalsPkg::REQ_FLIT_W-1:0] TXREQFLIT,
+    input logic TXREQLCRDV,
+    input logic TXRSPFLITV,
+    input logic [chiGlobalsPkg::RSP_FLIT_W-1:0] TXRSPFLIT,
+    input logic TXRSPLCRDV,
+    input logic TXDATFLITV,
+    input logic [chiGlobalsPkg::DAT_FLIT_W-1:0] TXDATFLIT,
+    input logic TXDATLCRDV,
+
+    input logic RXREQFLITV,
+    input logic [chiGlobalsPkg::REQ_FLIT_W-1:0] RXREQFLIT,
+    input logic RXREQLCRDV,
+    input logic RXRSPFLITV,
+    input logic [chiGlobalsPkg::RSP_FLIT_W-1:0] RXRSPFLIT,
+    input logic RXRSPLCRDV,
+    input logic RXDATFLITV,
+    input logic [chiGlobalsPkg::DAT_FLIT_W-1:0] RXDATFLIT,
+    input logic RXDATLCRDV,
+    input logic RXSNPFLITV,
+    input logic [chiGlobalsPkg::SNP_FLIT_W-1:0] RXSNPFLIT,
+    input logic RXSNPLCRDV,
+
+    // Per-node status, which is a top-level DUT output rather than a chi_if
+    // member [TOP:linkUp, linkParityError, linkCreditError]. The two error
+    // outputs are pulses, so they are latched below [ASSUMPTION:17].
+    input logic linkUp,
+    input logic linkParityError,
+    input logic linkCreditError
 );
-  import chi_cfg_pkg::*;
-  import chi_pkg::*;
+
   import chiGlobalsPkg::*;
 
-  int unsigned     agentId   = 0;
-  chi_node_class_e nodeClass = NODE_RNF;
+  // Identity is configured at time 0 rather than parameterized, for the same
+  // reason as the driver BFMs: one `virtual chiMonitorBfm` type has to be able
+  // to hold a handle to any port's monitor.
+  int unsigned                 nodeOrdinal;
+  chiGlobalsPkg::chiNodeClassE nodeClass;
+  bit                          isRequesterPort;
+  bit                          configured;
 
-  function automatic void configure(input int unsigned id,
-                                    input chi_node_class_e cls);
-    agentId   = id;
-    nodeClass = cls;
-  endfunction
+  task automatic configure(input int unsigned ordinal,
+                           input chiGlobalsPkg::chiNodeClassE portClass);
+    nodeOrdinal     = ordinal;
+    nodeClass       = portClass;
+    isRequesterPort = chiGlobalsPkg::nodeClassIsRequester(portClass);
+    configured      = 1'b1;
+  endtask
 
-  localparam logic [REQ_FLIT_W-1:0] REQ_OPCODE_MASK = reqOpcodeMask(CHI_CFG);
-  localparam logic [RSP_FLIT_W-1:0] RSP_OPCODE_MASK = rspOpcodeMask(CHI_CFG);
-  localparam logic [SNP_FLIT_W-1:0] SNP_OPCODE_MASK = snpOpcodeMask(CHI_CFG);
-  localparam logic [DAT_FLIT_W-1:0] DAT_OPCODE_MASK = datOpcodeMask(CHI_CFG);
+  task automatic waitConfigured();
+    wait (configured == 1'b1);
+  endtask
 
-  chiSampledFlitS flitQueue [$];
-  chiLinkEventS   eventQueue [$];
+  chiGlobalsPkg::chiFlitSampleT flitQueue [$];
+  chiGlobalsPkg::chiLinkSampleT linkQueue [$];
 
-  // -------------------------------------------------------------------------
-  // Link state
-  // -------------------------------------------------------------------------
-  // The spec defines the four link states directly as the two handshake
-  // signals, so they are decoded rather than tracked with a second FSM
-  // [SPEC:IHI0050H B14.5.1 Table B14.1].
-  function automatic chiLinkStateE decodeLinkState(input bit req, input bit ack);
-    case ({req, ack})
-      2'b00:   return CHI_LINK_STOP;
-      2'b10:   return CHI_LINK_ACTIVATE;
-      2'b11:   return CHI_LINK_RUN;
-      default: return CHI_LINK_DEACTIVATE;
-    endcase
-  endfunction
+  // Latched error pulses, cleared only when the proxy takes them.
+  bit parityErrorLatched;
+  bit creditErrorLatched;
+  int unsigned parityErrorCount;
+  int unsigned creditErrorCount;
 
-  chiLinkStateE txState;
-  chiLinkStateE rxState;
+  // Credit events, counted per channel and direction so that the link
+  // reference model can compare what was advertised against what was used
+  // without the drivers telling it anything.
+  int unsigned txReqCreditCount;
+  int unsigned txRspCreditCount;
+  int unsigned txDatCreditCount;
+  int unsigned rxReqCreditCount;
+  int unsigned rxRspCreditCount;
+  int unsigned rxDatCreditCount;
+  int unsigned rxSnpCreditCount;
 
-  always_comb begin
-    txState = decodeLinkState(chiPort.TXLINKACTIVEREQ, chiPort.TXLINKACTIVEACK);
-    rxState = decodeLinkState(chiPort.RXLINKACTIVEREQ, chiPort.RXLINKACTIVEACK);
+  int unsigned flitCount;
+
+  chiGlobalsPkg::chiLinkStateE observedTxState;
+  chiGlobalsPkg::chiLinkStateE observedRxState;
+  bit started;
+
+  initial begin
+    parityErrorLatched = 1'b0;
+    creditErrorLatched = 1'b0;
+    parityErrorCount = 0;
+    creditErrorCount = 0;
+    txReqCreditCount = 0;
+    txRspCreditCount = 0;
+    txDatCreditCount = 0;
+    rxReqCreditCount = 0;
+    rxRspCreditCount = 0;
+    rxDatCreditCount = 0;
+    rxSnpCreditCount = 0;
+    flitCount = 0;
+    observedTxState = chiGlobalsPkg::LINK_STOP;
+    observedRxState = chiGlobalsPkg::LINK_STOP;
+    started = 1'b0;
   end
 
-  // Every field is named explicitly rather than defaulted, because a struct
-  // holding enumerations cannot be zero-filled without violating strong
-  // typing: zero is not necessarily a legal member of each enumeration.
-  function automatic chiLinkEventS emptyEvent();
-    chiLinkEventS event_;
-    event_.kind        = CHI_LINK_EVT_STATE_CHANGE;
-    event_.direction   = CHI_DIR_TX;
-    event_.channel     = CHI_CHANNEL_REQ;
-    event_.state       = CHI_LINK_STOP;
-    event_.creditCount = 0;
-    event_.sysCoReq    = 1'b0;
-    event_.sysCoAck    = 1'b0;
-    return event_;
-  endfunction
+  task automatic monitorStart();
+    if (started) return;
+    started = 1'b1;
+    fork
+      flitSampleLoop();
+      creditSampleLoop();
+      linkStatusLoop();
+    join_none
+  endtask
 
-  function automatic void pushLinkState(input chiDirectionE direction,
-                                        input chiLinkStateE state);
-    chiLinkEventS event_;
-    event_             = emptyEvent();
-    event_.kind        = CHI_LINK_EVT_STATE_CHANGE;
-    event_.direction   = direction;
-    event_.state       = state;
-    eventQueue.push_back(event_);
-  endfunction
-
-  function automatic void pushCredit(input chiDirectionE direction,
-                                     input chi_channel_e channel,
-                                     input int unsigned count);
-    chiLinkEventS event_;
-    event_             = emptyEvent();
-    event_.kind        = CHI_LINK_EVT_CREDIT_GRANT;
-    event_.direction   = direction;
-    event_.channel     = channel;
-    event_.creditCount = count;
-    eventQueue.push_back(event_);
-  endfunction
-
-  function automatic void pushSysCo();
-    chiLinkEventS event_;
-    event_          = emptyEvent();
-    event_.kind     = CHI_LINK_EVT_SYSCO;
-    event_.sysCoReq = chiPort.SYSCOREQ;
-    event_.sysCoAck = chiPort.SYSCOACK;
-    eventQueue.push_back(event_);
-  endfunction
-
-  chiLinkStateE txStatePrev;
-  chiLinkStateE rxStatePrev;
-  bit           sysCoReqPrev;
-  bit           sysCoAckPrev;
-
-  // Credits currently held, per channel and direction: one is gained when the
-  // receiver grants it and spent when a flit is presented. This balance is the
-  // quantity the channel depth bounds, not the running total of grants, which
-  // rises without limit as credits are spent and replaced
-  // [SPEC:IHI0050H B14.6.3].
+  //----------------------------------------------------------------------------
+  // Flit sampling
   //
-  // Every valid flit spends a credit, including an L-Credit return, which is
-  // why the decrement does not filter on opcode the way the flit stream does
-  // [link/chi_link_rx.sv peerCredits].
-  int unsigned txCreditBalance [4];
-  int unsigned rxCreditBalance [4];
+  // A flit is recorded whenever FLITV is high, with no reference to credits, so
+  // that a flit sent with no credit is captured and can be reported instead of
+  // vanishing.
+  //----------------------------------------------------------------------------
 
-  function automatic int unsigned creditDelta(input bit granted,
-                                              input bit spent,
-                                              input int unsigned balance);
-    int unsigned value;
-    value = balance;
-    if (granted) value = value + 1;
-    if (spent && (value > 0)) value = value - 1;
-    return value;
+  function automatic chiGlobalsPkg::chiFlitSampleT makeSample(
+      input chiGlobalsPkg::chiChannelE channel,
+      input chiGlobalsPkg::chiDirE direction,
+      input chiGlobalsPkg::chiRawFlitT payload);
+    chiGlobalsPkg::chiFlitSampleT sample;
+    sample.nodeOrdinal = nodeOrdinal;
+    sample.nodeClass   = nodeClass;
+    sample.channel     = channel;
+    sample.direction   = direction;
+    sample.lcrdReturn  = chiGlobalsPkg::isLcrdReturn(channel, payload);
+    sample.payload     = payload;
+    sample.sampleTime  = $time;
+    return sample;
   endfunction
 
-  always_ff @(posedge chiPort.CLK) begin
-    if (!chiPort.RESETn) begin
-      txStatePrev  <= CHI_LINK_STOP;
-      rxStatePrev  <= CHI_LINK_STOP;
-      sysCoReqPrev <= 1'b0;
-      sysCoAckPrev <= 1'b0;
-      for (int unsigned c = 0; c < 4; c++) begin
-        txCreditBalance[c] <= 0;
-        rxCreditBalance[c] <= 0;
-      end
-    end else begin
-      if (txState != txStatePrev) begin
-        pushLinkState(CHI_DIR_TX, txState);
-        txStatePrev <= txState;
-      end
-      if (rxState != rxStatePrev) begin
-        pushLinkState(CHI_DIR_RX, rxState);
-        rxStatePrev <= rxState;
-      end
-
-      if ((chiPort.SYSCOREQ != sysCoReqPrev)
-          || (chiPort.SYSCOACK != sysCoAckPrev)) begin
-        pushSysCo();
-        sysCoReqPrev <= chiPort.SYSCOREQ;
-        sysCoAckPrev <= chiPort.SYSCOACK;
-      end
-
-      // A credit on a TX channel is one the fabric granted to this node; a
-      // credit on an RX channel is one this node granted to the fabric. Both
-      // are reported only when the balance moves, which is on a grant: a flit
-      // being sent is already visible as a flit, and reporting that twice
-      // would double the traffic the scoreboard has to sift.
-      if (chiPort.TXREQLCRDV || chiPort.TXREQFLITV) begin
-        txCreditBalance[CHI_CHANNEL_REQ] <= creditDelta(
-            chiPort.TXREQLCRDV, chiPort.TXREQFLITV,
-            txCreditBalance[CHI_CHANNEL_REQ]);
-        if (chiPort.TXREQLCRDV)
-          pushCredit(CHI_DIR_TX, CHI_CHANNEL_REQ,
-                     creditDelta(chiPort.TXREQLCRDV, chiPort.TXREQFLITV,
-                                 txCreditBalance[CHI_CHANNEL_REQ]));
-      end
-      if (chiPort.TXRSPLCRDV || chiPort.TXRSPFLITV) begin
-        txCreditBalance[CHI_CHANNEL_RSP] <= creditDelta(
-            chiPort.TXRSPLCRDV, chiPort.TXRSPFLITV,
-            txCreditBalance[CHI_CHANNEL_RSP]);
-        if (chiPort.TXRSPLCRDV)
-          pushCredit(CHI_DIR_TX, CHI_CHANNEL_RSP,
-                     creditDelta(chiPort.TXRSPLCRDV, chiPort.TXRSPFLITV,
-                                 txCreditBalance[CHI_CHANNEL_RSP]));
-      end
-      if (chiPort.TXDATLCRDV || chiPort.TXDATFLITV) begin
-        txCreditBalance[CHI_CHANNEL_DAT] <= creditDelta(
-            chiPort.TXDATLCRDV, chiPort.TXDATFLITV,
-            txCreditBalance[CHI_CHANNEL_DAT]);
-        if (chiPort.TXDATLCRDV)
-          pushCredit(CHI_DIR_TX, CHI_CHANNEL_DAT,
-                     creditDelta(chiPort.TXDATLCRDV, chiPort.TXDATFLITV,
-                                 txCreditBalance[CHI_CHANNEL_DAT]));
-      end
-      if (chiPort.RXREQLCRDV || chiPort.RXREQFLITV) begin
-        rxCreditBalance[CHI_CHANNEL_REQ] <= creditDelta(
-            chiPort.RXREQLCRDV, chiPort.RXREQFLITV,
-            rxCreditBalance[CHI_CHANNEL_REQ]);
-        if (chiPort.RXREQLCRDV)
-          pushCredit(CHI_DIR_RX, CHI_CHANNEL_REQ,
-                     creditDelta(chiPort.RXREQLCRDV, chiPort.RXREQFLITV,
-                                 rxCreditBalance[CHI_CHANNEL_REQ]));
-      end
-      if (chiPort.RXRSPLCRDV || chiPort.RXRSPFLITV) begin
-        rxCreditBalance[CHI_CHANNEL_RSP] <= creditDelta(
-            chiPort.RXRSPLCRDV, chiPort.RXRSPFLITV,
-            rxCreditBalance[CHI_CHANNEL_RSP]);
-        if (chiPort.RXRSPLCRDV)
-          pushCredit(CHI_DIR_RX, CHI_CHANNEL_RSP,
-                     creditDelta(chiPort.RXRSPLCRDV, chiPort.RXRSPFLITV,
-                                 rxCreditBalance[CHI_CHANNEL_RSP]));
-      end
-      if (chiPort.RXSNPLCRDV || chiPort.RXSNPFLITV) begin
-        rxCreditBalance[CHI_CHANNEL_SNP] <= creditDelta(
-            chiPort.RXSNPLCRDV, chiPort.RXSNPFLITV,
-            rxCreditBalance[CHI_CHANNEL_SNP]);
-        if (chiPort.RXSNPLCRDV)
-          pushCredit(CHI_DIR_RX, CHI_CHANNEL_SNP,
-                     creditDelta(chiPort.RXSNPLCRDV, chiPort.RXSNPFLITV,
-                                 rxCreditBalance[CHI_CHANNEL_SNP]));
-      end
-      if (chiPort.RXDATLCRDV || chiPort.RXDATFLITV) begin
-        rxCreditBalance[CHI_CHANNEL_DAT] <= creditDelta(
-            chiPort.RXDATLCRDV, chiPort.RXDATFLITV,
-            rxCreditBalance[CHI_CHANNEL_DAT]);
-        if (chiPort.RXDATLCRDV)
-          pushCredit(CHI_DIR_RX, CHI_CHANNEL_DAT,
-                     creditDelta(chiPort.RXDATLCRDV, chiPort.RXDATFLITV,
-                                 rxCreditBalance[CHI_CHANNEL_DAT]));
+  task automatic flitSampleLoop();
+    forever begin
+      @(posedge CLK);
+      if (RESETn === 1'b1) begin
+        if (TXREQFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_REQ,
+                                         chiGlobalsPkg::CHI_DIR_TX,
+                                         chiGlobalsPkg::chiRawFlitT'(TXREQFLIT)));
+          flitCount++;
+        end
+        if (TXRSPFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_RSP,
+                                         chiGlobalsPkg::CHI_DIR_TX,
+                                         chiGlobalsPkg::chiRawFlitT'(TXRSPFLIT)));
+          flitCount++;
+        end
+        if (TXDATFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_DAT,
+                                         chiGlobalsPkg::CHI_DIR_TX,
+                                         chiGlobalsPkg::chiRawFlitT'(TXDATFLIT)));
+          flitCount++;
+        end
+        if (RXREQFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_REQ,
+                                         chiGlobalsPkg::CHI_DIR_RX,
+                                         chiGlobalsPkg::chiRawFlitT'(RXREQFLIT)));
+          flitCount++;
+        end
+        if (RXRSPFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_RSP,
+                                         chiGlobalsPkg::CHI_DIR_RX,
+                                         chiGlobalsPkg::chiRawFlitT'(RXRSPFLIT)));
+          flitCount++;
+        end
+        if (RXDATFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_DAT,
+                                         chiGlobalsPkg::CHI_DIR_RX,
+                                         chiGlobalsPkg::chiRawFlitT'(RXDATFLIT)));
+          flitCount++;
+        end
+        if (RXSNPFLITV === 1'b1) begin
+          flitQueue.push_back(makeSample(chiGlobalsPkg::CHI_CH_SNP,
+                                         chiGlobalsPkg::CHI_DIR_RX,
+                                         chiGlobalsPkg::chiRawFlitT'(RXSNPFLIT)));
+          flitCount++;
+        end
       end
     end
-  end
+  endtask
 
-  // -------------------------------------------------------------------------
-  // Flits
-  // -------------------------------------------------------------------------
-  // L-Credit returns are filtered out. They carry no message and are link
-  // mechanics rather than protocol content [SPEC:IHI0050H B13.11]; the credit
-  // accounting above already reports them.
-  function automatic void pushFlit(input chiDirectionE direction,
-                                   input chi_channel_e channel,
-                                   input logic [CHI_WIDEST_FLIT_W-1:0] flit);
-    chiSampledFlitS sample;
-    sample.direction = direction;
-    sample.channel   = channel;
-    sample.flit      = flit;
-    flitQueue.push_back(sample);
+  task automatic creditSampleLoop();
+    forever begin
+      @(posedge CLK);
+      if (RESETn === 1'b1) begin
+        if (TXREQLCRDV === 1'b1) txReqCreditCount++;
+        if (TXRSPLCRDV === 1'b1) txRspCreditCount++;
+        if (TXDATLCRDV === 1'b1) txDatCreditCount++;
+        if (RXREQLCRDV === 1'b1) rxReqCreditCount++;
+        if (RXRSPLCRDV === 1'b1) rxRspCreditCount++;
+        if (RXDATLCRDV === 1'b1) rxDatCreditCount++;
+        if (RXSNPLCRDV === 1'b1) rxSnpCreditCount++;
+      end
+    end
+  endtask
+
+  //----------------------------------------------------------------------------
+  // Link status
+  //
+  // The activation state is reconstructed from the two handshake pins on each
+  // side, which is the only black-box view of it, and is pushed as a sample
+  // whenever it changes so that the link reference model sees a transition
+  // sequence rather than having to poll.
+  //----------------------------------------------------------------------------
+
+  function automatic chiGlobalsPkg::chiLinkStateE decodeLinkState(
+      input logic activeReq, input logic activeAck);
+    if ((activeReq === 1'b0) && (activeAck === 1'b0)) return chiGlobalsPkg::LINK_STOP;
+    if ((activeReq === 1'b1) && (activeAck === 1'b0)) return chiGlobalsPkg::LINK_ACTIVATE;
+    if ((activeReq === 1'b1) && (activeAck === 1'b1)) return chiGlobalsPkg::LINK_RUN;
+    return chiGlobalsPkg::LINK_DEACTIVATE;
   endfunction
 
-  always_ff @(posedge chiPort.CLK) begin
-    if (chiPort.RESETn) begin
-      // Node to interconnect.
-      if (chiPort.TXREQFLITV && ((chiPort.TXREQFLIT & REQ_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_TX, CHI_CHANNEL_REQ,
-                 CHI_WIDEST_FLIT_W'(chiPort.TXREQFLIT));
-      if (chiPort.TXRSPFLITV && ((chiPort.TXRSPFLIT & RSP_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_TX, CHI_CHANNEL_RSP,
-                 CHI_WIDEST_FLIT_W'(chiPort.TXRSPFLIT));
-      if (chiPort.TXDATFLITV && ((chiPort.TXDATFLIT & DAT_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_TX, CHI_CHANNEL_DAT,
-                 CHI_WIDEST_FLIT_W'(chiPort.TXDATFLIT));
-
-      // Interconnect to node.
-      if (chiPort.RXREQFLITV && ((chiPort.RXREQFLIT & REQ_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_RX, CHI_CHANNEL_REQ,
-                 CHI_WIDEST_FLIT_W'(chiPort.RXREQFLIT));
-      if (chiPort.RXRSPFLITV && ((chiPort.RXRSPFLIT & RSP_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_RX, CHI_CHANNEL_RSP,
-                 CHI_WIDEST_FLIT_W'(chiPort.RXRSPFLIT));
-      if (chiPort.RXSNPFLITV && ((chiPort.RXSNPFLIT & SNP_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_RX, CHI_CHANNEL_SNP,
-                 CHI_WIDEST_FLIT_W'(chiPort.RXSNPFLIT));
-      if (chiPort.RXDATFLITV && ((chiPort.RXDATFLIT & DAT_OPCODE_MASK) != '0))
-        pushFlit(CHI_DIR_RX, CHI_CHANNEL_DAT,
-                 CHI_WIDEST_FLIT_W'(chiPort.RXDATFLIT));
+  task automatic linkStatusLoop();
+    chiGlobalsPkg::chiLinkStateE nextTx;
+    chiGlobalsPkg::chiLinkStateE nextRx;
+    chiGlobalsPkg::chiLinkSampleT sample;
+    bit changed;
+    forever begin
+      @(posedge CLK);
+      if (RESETn !== 1'b1) begin
+        observedTxState = chiGlobalsPkg::LINK_STOP;
+        observedRxState = chiGlobalsPkg::LINK_STOP;
+      end
+      else begin
+        nextTx = decodeLinkState(TXLINKACTIVEREQ, TXLINKACTIVEACK);
+        nextRx = decodeLinkState(RXLINKACTIVEREQ, RXLINKACTIVEACK);
+        changed = (nextTx != observedTxState) || (nextRx != observedRxState);
+        if (linkParityError === 1'b1) begin
+          parityErrorLatched = 1'b1;
+          parityErrorCount++;
+          changed = 1'b1;
+        end
+        if (linkCreditError === 1'b1) begin
+          creditErrorLatched = 1'b1;
+          creditErrorCount++;
+          changed = 1'b1;
+        end
+        observedTxState = nextTx;
+        observedRxState = nextRx;
+        if (changed) begin
+          sample.nodeOrdinal = nodeOrdinal;
+          sample.linkUp      = (linkUp === 1'b1);
+          sample.parityError = (linkParityError === 1'b1);
+          sample.creditError = (linkCreditError === 1'b1);
+          sample.txState     = observedTxState;
+          sample.rxState     = observedRxState;
+          sample.sysCoReq    = (SYSCOREQ === 1'b1);
+          sample.sysCoAck    = (SYSCOACK === 1'b1);
+          sample.sampleTime  = $time;
+          linkQueue.push_back(sample);
+        end
+      end
     end
-  end
+  endtask
 
-  // -------------------------------------------------------------------------
-  // Services offered to the monitor proxy
-  // -------------------------------------------------------------------------
-  task automatic getFlit(output chiSampledFlitS sample);
-    while (flitQueue.size() == 0) @(posedge chiPort.CLK);
+  //----------------------------------------------------------------------------
+  // Accessors used by chiRequesterMonitorProxy, chiSubordinateMonitorProxy and
+  // the end-of-test checks
+  //----------------------------------------------------------------------------
+
+  task automatic getFlitSample(output chiGlobalsPkg::chiFlitSampleT sample);
+    wait (flitQueue.size() > 0);
     sample = flitQueue.pop_front();
   endtask
 
-  task automatic getLinkEvent(output chiLinkEventS event_);
-    while (eventQueue.size() == 0) @(posedge chiPort.CLK);
-    event_ = eventQueue.pop_front();
+  task automatic getLinkSample(output chiGlobalsPkg::chiLinkSampleT sample);
+    wait (linkQueue.size() > 0);
+    sample = linkQueue.pop_front();
   endtask
-endinterface
+
+  // Non-blocking pops. check_phase is a function, so it cannot call the
+  // waiting tasks above. Leftover samples, including L-Credit returns from
+  // link deactivation, are already queued by then.
+  function automatic bit tryGetFlitSample(output chiGlobalsPkg::chiFlitSampleT sample);
+    if (flitQueue.size() == 0)
+      return 1'b0;
+    sample = flitQueue.pop_front();
+    return 1'b1;
+  endfunction
+
+  function automatic bit tryGetLinkSample(output chiGlobalsPkg::chiLinkSampleT sample);
+    if (linkQueue.size() == 0)
+      return 1'b0;
+    sample = linkQueue.pop_front();
+    return 1'b1;
+  endfunction
+
+  function automatic int unsigned pendingFlitSamples();
+    return flitQueue.size();
+  endfunction
+
+  function automatic int unsigned pendingLinkSamples();
+    return linkQueue.size();
+  endfunction
+
+  function automatic bit sawParityError();
+    return parityErrorLatched;
+  endfunction
+
+  function automatic bit sawCreditError();
+    return creditErrorLatched;
+  endfunction
+
+  function automatic int unsigned parityErrors();
+    return parityErrorCount;
+  endfunction
+
+  function automatic int unsigned creditErrors();
+    return creditErrorCount;
+  endfunction
+
+  function automatic bit linkIsUp();
+    return linkUp === 1'b1;
+  endfunction
+
+  function automatic int unsigned observedFlitCount();
+    return flitCount;
+  endfunction
+
+  function automatic int unsigned ownOrdinal();
+    return nodeOrdinal;
+  endfunction
+
+  function automatic chiGlobalsPkg::chiNodeClassE ownNodeClass();
+    return nodeClass;
+  endfunction
+
+  function automatic chiGlobalsPkg::chiLinkStateE currentTxState();
+    return observedTxState;
+  endfunction
+
+  function automatic chiGlobalsPkg::chiLinkStateE currentRxState();
+    return observedRxState;
+  endfunction
+
+  // Grants seen on LCRDV. The link model compares these with the flits
+  // and L-Credit returns it counted, after the link is back in STOP.
+  // [ASSUMPTION:9]
+  function automatic int unsigned creditGrants(
+    input chiGlobalsPkg::chiChannelE channel,
+    input chiGlobalsPkg::chiDirE direction
+  );
+    if (direction == chiGlobalsPkg::CHI_DIR_TX) begin
+      case (channel)
+        chiGlobalsPkg::CHI_CH_REQ: return txReqCreditCount;
+        chiGlobalsPkg::CHI_CH_RSP: return txRspCreditCount;
+        chiGlobalsPkg::CHI_CH_DAT: return txDatCreditCount;
+        default: return 0;
+      endcase
+    end
+    case (channel)
+      chiGlobalsPkg::CHI_CH_REQ: return rxReqCreditCount;
+      chiGlobalsPkg::CHI_CH_RSP: return rxRspCreditCount;
+      chiGlobalsPkg::CHI_CH_DAT: return rxDatCreditCount;
+      default: return rxSnpCreditCount;
+    endcase
+  endfunction
+
+endinterface : chiMonitorBfm

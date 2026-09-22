@@ -147,18 +147,29 @@ simulator would check that this flow cannot.
 
 ## Verification environment
 
-`DV/` holds a protocol-checking UVM environment that drives the fabric through
-`chi_if` with configurable Requester and Subordinate agents, checks it against
-independent address-map, directory and memory models, and collects functional
-coverage. It runs under Xcelium:
+`DV/` holds a black-box UVM environment for `chi_interconnect_top`. Sequences
+state intent; the requester driver picks opcodes from its cache model; the
+subordinate answers whatever request arrives from a shared memory. Four
+independent reference models check link, lifecycle, directory, and memory.
+Nothing is marked Verified until an Xcelium run passes.
 
 ```sh
 cd DV/sim/xcelium
 make compile
-make run TEST=chiCoherentTrafficTest
+make run TEST=chiLinkBringUpTest
 ```
 
-`DV/doc/chi_dv_specification.md` is the verification specification: environment
-architecture, agent and checker behaviour, the test and coverage plan, and the
-traceability rules. `DV/doc/iteration-log.md` records the bring-up, including
-the RTL bugs the environment found.
+`TEST` selects the UVM test name. `chiCoherentTrafficTest` is the coherent
+smoke test. The licence-free structural check is:
+
+```sh
+make -C DV/sim/xcelium check SLANG=/path/to/slang UVM_HOME=/path/to/uvm-core-2020.3.1
+```
+
+`check` elaborates `hdlTop` and `hvlTop` against this repository's `filelist.f`.
+It does not execute a test. Xcelium remains the sign-off path.
+
+`DV/doc/dv-spec.md` is the verification specification, including the feature
+matrix. `DV/doc/traceability.md` lists every opcode, Resp, RespErr, link state,
+and PAS encoding. `DV/doc/open-questions.md` records the Stage 0 answers.
+`DV/doc/iteration-log.md` is the findings register and the bring-up log.

@@ -1,18 +1,14 @@
-// Top environment: the CHI environment plus the checking and coverage that
-// span every agent.
-//
-// The scoreboard and the cross-agent coverage live here rather than inside the
-// agents because both need to see all ports at once. A per-agent scoreboard
-// could check that one Requester's own transactions completed, but not that
-// two Requesters never held the same line Unique, which is the property that
-// actually matters.
+// Integration environment. One chiEnv holds every requester and
+// subordinate agent. The scoreboard owns the four reference models.
+// The virtual sequencer collects the active sequencers only.
+// [ASSUMPTION:18] [ASSUMPTION:18a]
+
 class topEnv extends uvm_env;
-
   topEnvConfig cfg;
-
-  chiEnv        chiEnvironment;
+  chiEnv agents;
   topScoreboard scoreboard;
-  topCoverage   coverage;
+  topCoverage cov;
+  chiVirtualSequencer virtualSequencer;
 
   `uvm_component_utils(topEnv)
 
@@ -22,39 +18,71 @@ class topEnv extends uvm_env;
 
   function void build_phase(uvm_phase phase);
     super.build_phase(phase);
-
-    if (!uvm_config_db #(topEnvConfig)::get(this, "", "topEnvConfig", cfg))
-      `uvm_fatal(get_type_name(), "no topEnvConfig")
-
-    uvm_config_db #(chiEnvConfig)::set(this, "*", "chiEnvConfig", cfg.chiCfg);
-
-    chiEnvironment = chiEnv::type_id::create("chiEnvironment", this);
-
-    if (cfg.hasScoreboard)
-      scoreboard = topScoreboard::type_id::create("scoreboard", this);
-    if (cfg.hasCoverage)
-      coverage = topCoverage::type_id::create("coverage", this);
+    if (!uvm_config_db#(topEnvConfig)::get(this, "", "topEnvConfig", cfg)) begin
+      cfg = topEnvConfig::type_id::create("topEnvConfig");
+      uvm_config_db#(topEnvConfig)::set(this, "", "topEnvConfig", cfg);
+    end
+    uvm_config_db#(topEnvConfig)::set(this, "agents", "topEnvConfig", cfg);
+    uvm_config_db#(topEnvConfig)::set(this, "scoreboard", "topEnvConfig", cfg);
+    agents = chiEnv::type_id::create("agents", this);
+    scoreboard = topScoreboard::type_id::create("scoreboard", this);
+    cov = topCoverage::type_id::create("cov", this);
+    virtualSequencer = chiVirtualSequencer::type_id::create("virtualSequencer", this);
   endfunction
 
-  // Each monitor's single analysis port fans out to both the scoreboard and
-  // the cross-agent coverage. This is what the one-port arrangement buys: a
-  // second port would need connecting twice here and unpacking twice in both
-  // subscribers.
   function void connect_phase(uvm_phase phase);
     super.connect_phase(phase);
+    scoreboard.cov = cov;
+    foreach (agents.rnfAgent[i])
+      chiConnectRequester(agents.rnfAgent[i]);
+    foreach (agents.rndAgent[i])
+      chiConnectRequester(agents.rndAgent[i]);
+    foreach (agents.rniAgent[i])
+      chiConnectRequester(agents.rniAgent[i]);
+    foreach (agents.snfAgent[i])
+      chiConnectSubordinate(agents.snfAgent[i]);
+    foreach (agents.sniAgent[i])
+      chiConnectSubordinate(agents.sniAgent[i]);
+  endfunction
 
-    for (int unsigned i = 0; i < cfg.chiCfg.numRequesterAgents; i++) begin
-      if (cfg.hasScoreboard)
-        chiEnvironment.requesterAgent[i].monitorProxy.analysisPort.connect(
-            scoreboard.requesterFifo[i].analysis_export);
-      if (cfg.hasCoverage)
-        chiEnvironment.requesterAgent[i].monitorProxy.analysisPort.connect(
-            coverage.requesterFifo[i].analysis_export);
-    end
+  function void chiConnectRequester(input chiRequesterAgent agent);
+    int unsigned ordinal;
+    if ((agent == null) || (agent.monitor == null))
+      return;
+    ordinal = agent.cfg.nodeOrdinal;
+    agent.monitor.txReqPort.connect(scoreboard.txReqSink[ordinal].analysis_export);
+    agent.monitor.rxReqPort.connect(scoreboard.rxReqSink[ordinal].analysis_export);
+    agent.monitor.txRspPort.connect(scoreboard.txRspSink[ordinal].analysis_export);
+    agent.monitor.rxRspPort.connect(scoreboard.rxRspSink[ordinal].analysis_export);
+    agent.monitor.txDatPort.connect(scoreboard.txDatSink[ordinal].analysis_export);
+    agent.monitor.rxDatPort.connect(scoreboard.rxDatSink[ordinal].analysis_export);
+    agent.monitor.rxSnpPort.connect(scoreboard.rxSnpSink[ordinal].analysis_export);
+    agent.monitor.linkPort.connect(scoreboard.linkSink[ordinal].analysis_export);
+    if (agent.sequencer == null)
+      return;
+    if (agent.cfg.nodeClass == RN_D)
+      virtualSequencer.rndSeqr.push_back(agent.sequencer);
+    else if (agent.cfg.nodeClass == RN_I)
+      virtualSequencer.rniSeqr.push_back(agent.sequencer);
+    else
+      virtualSequencer.rnfSeqr.push_back(agent.sequencer);
+  endfunction
 
-    if (cfg.hasScoreboard)
-      for (int unsigned i = 0; i < cfg.chiCfg.numSubordinateAgents; i++)
-        chiEnvironment.subordinateAgent[i].monitorProxy.analysisPort.connect(
-            scoreboard.subordinateFifo[i].analysis_export);
+  function void chiConnectSubordinate(input chiSubordinateAgent agent);
+    int unsigned ordinal;
+    if ((agent == null) || (agent.monitor == null))
+      return;
+    ordinal = agent.cfg.nodeOrdinal;
+    // flitPort is every sample, including CompAck and L-Credit returns that
+    // have no typed port. Connecting the typed ports as well would count
+    // those flits twice.
+    agent.monitor.flitPort.connect(scoreboard.flitSink[ordinal].analysis_export);
+    agent.monitor.linkPort.connect(scoreboard.linkSink[ordinal].analysis_export);
+    if (agent.sequencer == null)
+      return;
+    if (agent.cfg.nodeClass == SN_I)
+      virtualSequencer.sniSeqr.push_back(agent.sequencer);
+    else
+      virtualSequencer.snfSeqr.push_back(agent.sequencer);
   endfunction
 endclass

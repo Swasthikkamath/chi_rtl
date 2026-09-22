@@ -1,10 +1,14 @@
-// Configuration for the top environment.
+// Build-time knobs for the integration environment. Counts and feature
+// enables stay in CHI_CFG. A passive requester is holdQuiet: the driver
+// holds the pins at STOP and issues nothing.
+// [ASSUMPTION:18]
+
 class topEnvConfig extends uvm_object;
-
-  chiEnvConfig chiCfg;
-
-  bit hasScoreboard = 1'b1;
-  bit hasCoverage   = 1'b1;
+  bit holdQuietRnf[int unsigned];
+  bit holdQuietRnd[int unsigned];
+  bit holdQuietRni[int unsigned];
+  bit holdQuietSnf[int unsigned];
+  bit holdQuietSni[int unsigned];
 
   `uvm_object_utils(topEnvConfig)
 
@@ -12,8 +16,13 @@ class topEnvConfig extends uvm_object;
     super.new(name);
   endfunction
 
-  function void initialise();
-    chiCfg = chiEnvConfig::type_id::create("chiCfg");
-    chiCfg.initialise();
+  function bit chiHoldQuiet(input chiNodeClassE nodeClass, input int unsigned index);
+    case (nodeClass)
+      RN_F: return holdQuietRnf.exists(index);
+      RN_D: return holdQuietRnd.exists(index);
+      RN_I: return holdQuietRni.exists(index);
+      SN_F: return holdQuietSnf.exists(index);
+      default: return holdQuietSni.exists(index);
+    endcase
   endfunction
 endclass
