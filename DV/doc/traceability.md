@@ -1,5 +1,54 @@
 # Traceability
 
+Two tables and then the encodings. The first says where each finding is
+demonstrated, the second where each specification rule the testbench
+enforces is enforced. The feature-to-test matrix is §4 of the DV
+specification and is not repeated here.
+
+## Findings to evidence
+
+Every row names the thing that would fail if the finding were wrong, not
+the thing that describes it. A finding whose evidence is a waiver says so.
+
+| ID | Kind | What demonstrates it |
+| --- | --- | --- |
+| F-1 | DUT, parity polarity | `chiParityTest` drives spec-odd parity and expects `linkParityError`. Needs `parityEn=1`; the default configuration cannot show it |
+| F-2 | DUT, TXSACTIVE ownership | Waiver. `topLinkModel` checks `RXSACTIVE` only, and the testbench never drives `TXSACTIVE`. `chiLinkBringUpTest` is where it would surface |
+| F-3 | DUT, one-directional `linkUp` | `topLinkModel` compares `linkUp` against TX RUN alone. `chiLinkBringUpTest` fails if that correspondence breaks |
+| F-4 | DUT, `multiReqEn` unused | `chiMultiReqTest` reports SKIP and drives nothing. The requester driver pins MultiReq to 0 |
+| F-5 | DUT, SnpDVMOp to RN-I | `chiDvmTest` with `allowRniDvmSnoop` 1 counts a warning per occurrence; setting it to 0 turns each into an error |
+| F-6 | DUT, missing DVM DBIDResp phase | `chiDvmTest` with `expectDvmDbidResp` 0 tolerates and counts; setting it to 1 makes the absent phase an error |
+| F-7 | DUT, `unmappedError` unconnected | `chiAddrIsDeliverable` is checked in `hdlTop` at time 0 against both stimulus windows. `chiUnmappedTest` reports SKIP rather than hanging |
+| F-8 | DUT, `numMn = 0` indexes out of range | `hdlTop` rejects the configuration at elaboration by name. The raw failure is the `slang` run recorded in the iteration log |
+| F-9 | DUT, `mpamW` sizes nothing | The boundary width sweep in `make check-sweep`. `chiMpamTest` exercises the field; it is not a width test |
+| F-10 | TB, flit fields missing | Closed. `hdlTop` fails elaboration if any channel's named fields stop summing to its bus width |
+| F-11 | DUT, drives node-side `*CHK` | Waiver. The testbench leaves them alone; the multi-bit `TX<x>FLITCHK` it does drive carries the parity test |
+| F-12 | TB, five wrong Subordinate flows | Closed. Each flow now cites the figure it came from, and the Subordinate reports any request outside the permitted Home-to-Subordinate set |
+| F-13 | TB, PrefetchTgt unimplemented | Closed. `chiPrefetchTest` fails if the hint reaches no SN-F, and the read after it would not complete if the driver still waited |
+| F-14 | TB, AllowRetry randomised | Closed. Constrained to 1 on a first send; the Subordinate's credit check is what would have reported it |
+| F-15 | TB, response-shape coverage lied | Closed. The flag comes from the response opcode, and `chiRespShapeTest` fails if no separate pair was driven |
+
+## Specification rules the testbench enforces
+
+Each of these is a rule the DUT could break without breaking anything
+else, so each has a check rather than only a covergroup.
+
+| Rule | Citation | Where it is checked |
+| --- | --- | --- |
+| A line is Unique at one node or Shared at many, never both | B2.2, B4.8 | `topDirectoryModel.chiCheckInvariant` |
+| Taking a line Unique requires every other holder to have been snooped | B4.8 | `topDirectoryModel.chiAcquire` |
+| A snoop response must answer a snoop that was sent | B2.4 | `topDirectoryModel.chiApplyResp` |
+| An ordered read returns ReadReceipt before data and before Comp | B2.7.5 | `topLifecycleModel.chiNoteRsp`, `chiNoteDat` |
+| Every transaction retires; none is outstanding at end of test | B2.3 | `topLifecycleModel.chiCheckEnd` |
+| An error completion reaches the transaction it belongs to | B9.4 | `topLifecycleModel.rnErrByLine`, `chiDataErrTest` |
+| Read data is the last value written, wherever it came from | B2.3 | `topMemoryModel.chiRnCheckRead`, proven live by `chiDataCorruptTest` |
+| A flit is sent only against a credit, and only in RUN | B14.2 | `topLinkModel` |
+| PrefetchTgt carries TxnID 0 and gets no response | B4.2.6.2, B2.4.2 | `topLifecycleModel.chiNoteReq`, `chiSubordinateDriverProxy`, `chiPrefetchTest` |
+| AllowRetry is 1 on a first send, 0 only against a granted P-Credit | B2.10.2.1 | `chiRequesterTx` constraint; `chiSubordinateDriverProxy.chiConsumeCredit` |
+| A Home sends a Subordinate only the requests Tables B4.2/B4.3 permit | B4.2 | `chiSubordinateDriverProxy.chiIsLegalHere` |
+
+## Encodings
+
 Opcodes, responses, link states, and PAS encodings are defined once, in
 `chiGlobalsPkg`. Widths are formulas in that package (`REQ_FLIT_W`,
 `RSP_FLIT_W`, `SNP_FLIT_W`, `DAT_FLIT_W`, and the field offsets). They are
