@@ -31,3 +31,8 @@ $CHI_TB_ROOT/src/hdlTop/chiRequesterAgentBfm/chiRequesterDriverBfm.sv
 $CHI_TB_ROOT/src/hdlTop/chiSubordinateAgentBfm/chiSubordinateDriverBfm.sv
 $CHI_TB_ROOT/src/hdlTop/chiMonitor/chiMonitorBfm.sv
 $CHI_TB_ROOT/src/hdlTop/hdlTop.sv
+
+// Requester agent. hvlTop, which imports the test package, is added with
+// the tests. Include path covers the classes this package pulls in.
++incdir+$CHI_TB_ROOT/src/hvlTop/chiRequester
+$CHI_TB_ROOT/src/hvlTop/chiRequester/chiRequesterPkg.sv

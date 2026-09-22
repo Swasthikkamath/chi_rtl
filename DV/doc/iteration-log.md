@@ -26,3 +26,4 @@ each is demonstrated (or refuted) by a simulation before the DV spec is finalize
 | Date | Stage | Symptom | Classification | Root cause | Fix |
 |------|-------|---------|----------------|------------|-----|
 | — | — | — (no failures yet) | — | — | — |
+| 2026-09-22 | 2 | Requester agent added on the flat-port BFM API. `xrun` is not installed. `make check` with slang 11.0.0 elaborates `hdlTop` and `chiRequesterPkg`: 0 errors. Three warnings are pre-existing (SVA sequence never matched, UVM string escape). | environment | Q20: no Xcelium in this image. | Sign-off remains `make compile`, which also names `hvlTop` (Stage 5). No new assumption. |

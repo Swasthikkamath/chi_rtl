@@ -3,33 +3,36 @@
 Black-box UVM environment for `chi_interconnect_top`. The DUT sources stay
 in the `chi_rtl` checkout. This tree is only the testbench and the DV spec.
 
-Stage 1 elaborates the HDL top with no UVM test. The clock, link, driver,
-and monitor BFMs are in place. Requester and subordinate agents, the
-scoreboard, and the tests are not in this snapshot yet.
+Stage 1 elaborates the HDL top. Stage 2 adds the requester agent:
+sequences state intent, and the driver proxy chooses the opcode from
+its cache model. The subordinate agent, scoreboard, and tests are not
+in this snapshot yet.
 
 ## Layout
 
 - `DV/src/globals/chiGlobalsPkg.sv` owns the configuration and the flit model.
 - `DV/src/hdlTop` holds the DUT, the BFMs, and `hdlTop`.
-- `DV/sim/xcelium` is the Xcelium flow.
+- `DV/src/hvlTop/chiRequester` is the RN-F, RN-D, and RN-I agent.
+- `DV/sim/xcelium` is the Xcelium flow. `make check` elaborates it with slang.
 - `DV/doc/open-questions.md` records the confirmed Stage 0 answers.
 
 ## Elaborate
 
-From any directory, with Xcelium on `PATH`:
+Sign-off, with Xcelium on `PATH`:
 
 ```
 make -C DV/sim/xcelium compile
 ```
 
-That runs:
+That elaborates `hdlTop` and `hvlTop`. `hvlTop` is added with the tests,
+so until then the licence-free check is the command that passes:
 
 ```
-xrun -sv -uvm -elaborate -access +rwc -top hdlTop -F DV/sim/xcelium/chiFileList.f
+make -C DV/sim/xcelium check SLANG=/path/to/slang UVM_HOME=/path/to/uvm-core-2020.3.1
 ```
 
-`-F` is required. `chiFileList.f` points `-F` at `chi_rtl/filelist.f`, and
-paths inside that list resolve from the `chi_rtl` directory.
+`check` elaborates `hdlTop` and type-checks `chiRequesterPkg`. The DUT
+list is generated from `chi_rtl/filelist.f` on each build.
 
 The `chi_rtl` checkout is expected at the workspace root, next to `DV/`.
 Clone it with `gh repo clone Swasthikkamath/chi_rtl` if it is not there.
