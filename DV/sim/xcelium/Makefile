@@ -109,7 +109,7 @@ ifeq ($(COVERAGE),1)
 XRUN_COMMON += -coverage all -covoverwrite
 endif
 
-.PHONY: all compile run regress check check-sweep dutlist clean help
+.PHONY: all compile run regress reseed testlist check check-sweep dutlist clean help
 
 all: run
 
@@ -203,8 +203,51 @@ check-sweep:
 	done
 	@echo "check-sweep: every configuration elaborates"
 
-regress: | $(LOGDIR)
-	@for seed in 1 2 3; do \
+# ---------------------------------------------------------------------------
+# Regression
+#
+# The list of tests is not written here. It is derived from chiTestPkg.sv,
+# which is the file that has to name every test anyway, so a test that
+# compiles is a test the regression runs. Anything ending in Test is one;
+# the virtual sequence and the base class's helpers are not.
+#
+# xrun's exit status does not follow UVM_ERROR, so the log is read for the
+# report summary. A run that produced no summary at all is a failure too:
+# that is what a compile error or a timeout looks like here.
+# ---------------------------------------------------------------------------
+
+TESTPKG  := $(CHI_TB_ROOT)/src/hvlTop/test/chiTestPkg.sv
+TESTLIST := $(GENDIR)/chiTestList.f
+SEEDS    ?= 1 2 3
+
+$(TESTLIST): $(TESTPKG) | $(GENDIR)
+	@sed -n 's/^[[:space:]]*`include[[:space:]]*"\(chi[A-Za-z0-9_]*Test\)\.sv".*/\1/p' \
+		$(TESTPKG) > $@
+	@echo "testlist: $$(wc -l < $@) tests from $(notdir $(TESTPKG))"
+
+testlist: $(TESTLIST)
+	@cat $(TESTLIST)
+
+regress: $(TESTLIST) $(CHI_DUT_FILELIST) | $(LOGDIR)
+	@fail=0; pass=0; \
+	for test in $$(cat $(TESTLIST)); do \
+		for seed in $(SEEDS); do \
+			log=$(LOGDIR)/$${test}_$${seed}.log; \
+			$(MAKE) --no-print-directory run TEST=$$test SEED=$$seed > /dev/null 2>&1; \
+			if $(CHI_TB_ROOT)/sim/xcelium/chiVerdict.sh $$log; then \
+				pass=$$((pass+1)); \
+			else \
+				fail=$$((fail+1)); \
+				echo "FAIL $$test seed $$seed  $$log"; \
+			fi; \
+		done; \
+	done; \
+	echo "regress: $$pass passed, $$fail failed"; \
+	test $$fail -eq 0
+
+# One test over the seeds, for when a regression failure is being chased.
+reseed: $(CHI_DUT_FILELIST) | $(LOGDIR)
+	@for seed in $(SEEDS); do \
 		$(MAKE) run TEST=$(TEST) SEED=$$seed || exit 1; \
 	done
 
@@ -216,10 +259,12 @@ help:
 	@echo "make run TEST=<name>      run one test"
 	@echo "make check                elaborate with the licence-free front end"
 	@echo "make check-sweep          re-elaborate over the configuration sweep"
-	@echo "make regress TEST=<name>  run one test over three seeds"
+	@echo "make regress              run every test in chiTestPkg over SEEDS"
+	@echo "make reseed TEST=<name>   run one test over SEEDS"
+	@echo "make testlist             print the tests the regression will run"
 	@echo "make dutlist              regenerate the sanitised DUT file list"
 	@echo ""
-	@echo "knobs: SEED VERBOSITY TIMEOUT WAVES=1 SVA=0 COVERAGE=1"
+	@echo "knobs: SEED SEEDS VERBOSITY TIMEOUT WAVES=1 SVA=0 COVERAGE=1"
 	@echo "       CFG_DEFINES='+define+CHI_TB_NUM_RNF=2 +define+CHI_TB_DATA_W=512'"
 	@echo "       SVA=0 drops the DUT assertion binds from the compile"
 	@echo "       CHI_DUT_FILELIST=<path> supplies an explicit DUT file list"

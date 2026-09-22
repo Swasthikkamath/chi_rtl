@@ -155,9 +155,25 @@ ask for them directly.
 
 ## 5. Sign-off
 
-`make -C DV/sim/xcelium compile` is the Xcelium elaboration. `make run
-TEST=<name>` runs one test. Neither `xrun` nor any other simulator is
-installed here. The local check is:
+`make -C DV/sim/xcelium compile` is the Xcelium elaboration and `make run
+TEST=<name>` runs one test. `make regress` runs every test over `SEEDS`,
+which defaults to 1 2 3.
+
+The regression does not keep its own list of tests. It derives one from
+`chiTestPkg.sv`, which has to name every test anyway, so a test that
+compiles is a test the regression runs and the two cannot drift.
+`make testlist` prints it.
+
+The verdict comes from `chiVerdict.sh` rather than from xrun's exit
+status, which reports whether the simulator ran and not whether the test
+passed. A log fails on a non-zero UVM_ERROR or UVM_FATAL count, on an
+xrun error line, or on having no UVM report summary at all. The last one
+matters most: a test that hung until the timeout, or died before
+`run_test`, leaves a log with no errors in it, and treating that as a
+pass would make the quietest failure the easiest to miss.
+
+Neither `xrun` nor any other simulator is installed here. The local
+check is:
 
 ```
 make -C DV/sim/xcelium check SLANG=/path/to/slang UVM_HOME=/path/to/uvm-core-2020.3.1
