@@ -885,11 +885,19 @@ package chiGlobalsPkg;
   //----------------------------------------------------------------------------
   // 7. Opcodes and response encodings
   //
-  // Every encoding below is this package's own reading of the specification and
-  // is the single place any of them appears. Opcode 0 on each channel is that
-  // channel's L-Credit return, which is what lets the link layer drain credits
-  // with an all-zero flit and no dependence on field placement at all.
-  // [SPEC:IHI0050H B13.8 Channel opcode encodings] See OPEN QUESTIONS Q19.
+  // Every encoding below is the single place it appears in the testbench.
+  // Opcode 0 on each channel is that channel's L-Credit return, which is what
+  // lets the link layer drain credits with an all-zero flit and no dependence
+  // on field placement at all.
+  //
+  // Diffed line by line against Tables B13.12 to B13.16 of the Issue H PDF in
+  // DV/doc/spec, which is what Q19 required before Stage 5. The diff found two
+  // wrong encodings, both now fixed: there is no WriteCleanPtl in Issue H
+  // (REQ 0x16 is Reserved), and SnpQuery is 0x10, not 0x0E. REQ opcodes with
+  // bit 6 set are the right-hand column of Table B13.12, which is why they
+  // read as 0x40 plus the column index. RSP, SNP and DAT otherwise matched,
+  // as did the RespErr and Resp encodings against Tables B13.33 to B13.35.
+  // [SPEC:IHI0050H B13.10.18 Channel opcodes] See OPEN QUESTIONS Q19.
   //----------------------------------------------------------------------------
 
   typedef enum logic [REQ_OPCODE_W-1:0] {
@@ -906,11 +914,11 @@ package chiGlobalsPkg;
     REQ_CLEAN_UNIQUE         = 7'h0B,
     REQ_MAKE_UNIQUE          = 7'h0C,
     REQ_EVICT                = 7'h0D,
+    REQ_CLEAN_INVALID_STORAGE = 7'h0E,
     REQ_READ_NO_SNP_SEP      = 7'h11,
     REQ_CLEAN_SHARED_PERSIST_SEP = 7'h13,
     REQ_DVM_OP               = 7'h14,
     REQ_WRITE_EVICT_FULL     = 7'h15,
-    REQ_WRITE_CLEAN_PTL      = 7'h16,
     REQ_WRITE_CLEAN_FULL     = 7'h17,
     REQ_WRITE_UNIQUE_PTL     = 7'h18,
     REQ_WRITE_UNIQUE_FULL    = 7'h19,
@@ -951,7 +959,34 @@ package chiGlobalsPkg;
     REQ_WRITE_NO_SNP_ZERO    = 7'h44,
     REQ_STASH_ONCE_SEP_SHARED = 7'h47,
     REQ_STASH_ONCE_SEP_UNIQUE = 7'h48,
-    REQ_READ_PREFER_UNIQUE   = 7'h4C
+    REQ_READ_PREFER_UNIQUE   = 7'h4C,
+    REQ_CLEAN_INVALID_POPA   = 7'h4D,
+    REQ_WRITE_NO_SNP_DEF     = 7'h4E,
+    // Combined Write and CMO requests. There is no enable field for these:
+    // they are unconditionally present and the HN-F implements them, so each
+    // is testable and the feature matrix may not call them disabled.
+    // See OPEN QUESTIONS Q15. [SPEC:IHI0050H B13.10.18.1 Table B13.12]
+    REQ_WRITE_NO_SNP_FULL_CLEAN_SH = 7'h50,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV = 7'h51,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_SH_PER_SEP = 7'h52,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_SH = 7'h54,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_SH_PER_SEP = 7'h56,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_INV_STRG = 7'h57,
+    REQ_WRITE_BACK_FULL_CLEAN_SH = 7'h58,
+    REQ_WRITE_BACK_FULL_CLEAN_INV = 7'h59,
+    REQ_WRITE_BACK_FULL_CLEAN_SH_PER_SEP = 7'h5A,
+    REQ_WRITE_BACK_FULL_CLEAN_INV_STRG = 7'h5B,
+    REQ_WRITE_CLEAN_FULL_CLEAN_SH = 7'h5C,
+    REQ_WRITE_CLEAN_FULL_CLEAN_SH_PER_SEP = 7'h5E,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_SH = 7'h60,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_INV = 7'h61,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_SH_PER_SEP = 7'h62,
+    REQ_WRITE_UNIQUE_PTL_CLEAN_SH = 7'h64,
+    REQ_WRITE_UNIQUE_PTL_CLEAN_SH_PER_SEP = 7'h66,
+    REQ_WRITE_NO_SNP_PTL_CLEAN_INV_POPA = 7'h70,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV_POPA = 7'h71,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV_STRG = 7'h72,
+    REQ_WRITE_BACK_FULL_CLEAN_INV_POPA = 7'h79
   } chiReqOpcodeE;
 
   typedef enum logic [RSP_OPCODE_W-1:0] {
@@ -990,7 +1025,7 @@ package chiGlobalsPkg;
     SNP_STASH_UNIQUE           = 5'h0B,
     SNP_STASH_SHARED           = 5'h0C,
     SNP_DVM_OP                 = 5'h0D,
-    SNP_QUERY                  = 5'h0E,
+    SNP_QUERY                  = 5'h10,
     SNP_SHARED_FWD             = 5'h11,
     SNP_CLEAN_FWD              = 5'h12,
     SNP_ONCE_FWD               = 5'h13,
