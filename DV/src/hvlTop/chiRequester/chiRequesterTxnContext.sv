@@ -1,10 +1,9 @@
 // One in-flight request. Routers write the fields; the worker waits on
 // the ping mailbox so a response that arrives before the wait is not lost.
-
-typedef struct packed {
-  chiNodeIdT srcId;
-  logic [P_CRD_TYPE_W-1:0] pcrdType;
-} chiPcrdKeyT;
+//
+// The P-credit key moved to chiGlobalsPkg once the Subordinate needed it
+// too: a credit is granted by one node to another for one credit type, and
+// both ends of that agreement have to key their table the same way.
 
 class chiRequesterTxnContext;
   chiRequesterTx item;

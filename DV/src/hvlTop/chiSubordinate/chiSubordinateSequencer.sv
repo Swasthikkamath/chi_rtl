@@ -1,5 +1,6 @@
-// Carries the port configuration so a sequence can read the policy it
-// is about to update.
+// Carries response-policy rules to one Subordinate driver. There is no
+// response channel back: a rule is advice the driver applies to whatever
+// arrives, not a request that completes.
 
 class chiSubordinateSequencer extends uvm_sequencer#(chiSubordinateTx);
   chiSubordinateConfig cfg;

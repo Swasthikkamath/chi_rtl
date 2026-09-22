@@ -32,11 +32,9 @@ $CHI_TB_ROOT/src/hdlTop/chiSubordinateAgentBfm/chiSubordinateDriverBfm.sv
 $CHI_TB_ROOT/src/hdlTop/chiMonitor/chiMonitorBfm.sv
 $CHI_TB_ROOT/src/hdlTop/hdlTop.sv
 
-// Requester agent. hvlTop, which imports the test package, is added with
-// the tests. Include path covers the classes this package pulls in.
+// Agents. hvlTop, which imports the test package, is added with the tests.
+// Each include path covers the classes that package pulls in.
 +incdir+$CHI_TB_ROOT/src/hvlTop/chiRequester
 $CHI_TB_ROOT/src/hvlTop/chiRequester/chiRequesterPkg.sv
-
-// Subordinate agent. Same include-path rule as the requester package.
 +incdir+$CHI_TB_ROOT/src/hvlTop/chiSubordinate
 $CHI_TB_ROOT/src/hvlTop/chiSubordinate/chiSubordinatePkg.sv

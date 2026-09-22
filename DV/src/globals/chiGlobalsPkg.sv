@@ -1688,6 +1688,15 @@ package chiGlobalsPkg;
     return '0;
   endfunction
 
+  // A Protocol credit is granted by one node to another for one credit type,
+  // and is only good for that pair. Both the granting side and the spending
+  // side keep a table, so the key lives here rather than in either agent.
+  // [SPEC:IHI0050H B2.12 Transaction retry]
+  typedef struct packed {
+    chiNodeIdT srcId;
+    logic [P_CRD_TYPE_W-1:0] pcrdType;
+  } chiPcrdKeyT;
+
   function automatic bit isLcrdReturn(input chiChannelE channel,
                                       input chiRawFlitT raw);
     case (channel)

@@ -1,9 +1,14 @@
-// One agent covers SN-F and SN-I. The node class lives in the config,
-// not in a subclass, so a passive port and an active port share the
-// same code. An inactive port builds nothing.
+// One agent covers SN-F and SN-I, with the node class in the config rather
+// than in a subclass, matching the requester agent.
+//
+// A passive Subordinate is a real configuration and not only a debug aid:
+// with the driver absent nothing answers the interconnect, which is how a
+// test proves the DUT does not depend on a response arriving before it can
+// make progress elsewhere.
 
 class chiSubordinateAgent extends uvm_agent;
   chiSubordinateConfig cfg;
+  chiSubordinateMemory mem;
   chiSubordinateSequencer sequencer;
   chiSubordinateDriverProxy driver;
   chiSubordinateMonitorProxy monitor;
@@ -30,10 +35,15 @@ class chiSubordinateAgent extends uvm_agent;
     uvm_config_db#(chiSubordinateConfig)::set(this, "monitor", "chiSubordinateConfig", cfg);
     uvm_config_db#(chiSubordinateConfig)::set(this, "cov", "chiSubordinateConfig", cfg);
     if (is_active == UVM_ACTIVE) begin
+      // The store is created by whoever builds the agents and shared across
+      // all of them, because the DUT decides which port an address reaches.
+      if (!uvm_config_db#(chiSubordinateMemory)::get(this, "", "chiSubordinateMemory", mem))
+        `uvm_fatal("chiSubordinateMemory", "config_db get failed for key chiSubordinateMemory")
       sequencer = chiSubordinateSequencer::type_id::create("sequencer", this);
       driver = chiSubordinateDriverProxy::type_id::create("driver", this);
       sequencer.cfg = cfg;
       uvm_config_db#(chiSubordinateConfig)::set(this, "driver", "chiSubordinateConfig", cfg);
+      uvm_config_db#(chiSubordinateMemory)::set(this, "driver", "chiSubordinateMemory", mem);
     end
   endfunction
 

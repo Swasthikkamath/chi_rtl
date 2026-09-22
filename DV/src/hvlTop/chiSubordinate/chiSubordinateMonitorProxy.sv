@@ -1,31 +1,32 @@
-// Observes one subordinate port through the monitor BFM. The analysis
-// ports are what the scoreboard will subscribe to. This class never
-// drives a pin.
+// Observes one Subordinate port through the monitor BFM. Mirror image of
+// the requester monitor: a Subordinate receives REQ and never sends it, and
+// has no snoop channel in either direction, so those ports do not exist
+// here. [TOP:CHI_CONNECT_PORT with IS_REQUESTER=0]
+//
+// flitPort carries the raw sample with its node ordinal still attached.
+// The typed ports lose that, and the scoreboard needs to know which port a
+// flit crossed, not only what the flit said about itself.
 
 class chiSubordinateMonitorProxy extends uvm_monitor;
   virtual chiMonitorBfm bfm;
   chiSubordinateConfig cfg;
 
-  uvm_analysis_port#(chiReqFlitT) txReqPort;
   uvm_analysis_port#(chiRspFlitT) txRspPort;
   uvm_analysis_port#(chiDatFlitT) txDatPort;
   uvm_analysis_port#(chiReqFlitT) rxReqPort;
-  uvm_analysis_port#(chiRspFlitT) rxRspPort;
   uvm_analysis_port#(chiDatFlitT) rxDatPort;
-  uvm_analysis_port#(chiSnpFlitT) rxSnpPort;
+  uvm_analysis_port#(chiFlitSampleT) flitPort;
   uvm_analysis_port#(chiLinkSampleT) linkPort;
 
   `uvm_component_utils(chiSubordinateMonitorProxy)
 
   function new(string name, uvm_component parent);
     super.new(name, parent);
-    txReqPort = new("txReqPort", this);
     txRspPort = new("txRspPort", this);
     txDatPort = new("txDatPort", this);
     rxReqPort = new("rxReqPort", this);
-    rxRspPort = new("rxRspPort", this);
     rxDatPort = new("rxDatPort", this);
-    rxSnpPort = new("rxSnpPort", this);
+    flitPort = new("flitPort", this);
     linkPort = new("linkPort", this);
   endfunction
 
@@ -46,25 +47,25 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
     fork
       chiWatchFlits();
       chiWatchLink();
-    join
+    join_none
   endtask
 
   task automatic chiWatchFlits();
     chiFlitSampleT sample;
     forever begin
       bfm.getFlitSample(sample);
+      flitPort.write(sample);
       case (sample.channel)
         CHI_CH_REQ: begin
-          if (sample.direction == CHI_DIR_TX)
-            txReqPort.write(unpackReq(sample.payload));
-          else
+          if (sample.direction == CHI_DIR_RX)
             rxReqPort.write(unpackReq(sample.payload));
+          else
+            `uvm_error("chiSubordinateMonitorProxy",
+              "REQ observed leaving a Subordinate port, which has no TX request channel")
         end
         CHI_CH_RSP: begin
           if (sample.direction == CHI_DIR_TX)
             txRspPort.write(unpackRsp(sample.payload));
-          else
-            rxRspPort.write(unpackRsp(sample.payload));
         end
         CHI_CH_DAT: begin
           if (sample.direction == CHI_DIR_TX)
@@ -72,7 +73,10 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
           else
             rxDatPort.write(unpackDat(sample.payload));
         end
-        default: rxSnpPort.write(unpackSnp(sample.payload));
+        default: begin
+          `uvm_error("chiSubordinateMonitorProxy",
+            "SNP observed on a Subordinate port, which has no snoop channel")
+        end
       endcase
     end
   endtask
