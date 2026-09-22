@@ -55,6 +55,9 @@ class chiRequesterTx extends uvm_sequence_item;
   rand logic [63:0] be;
   rand logic [63:0] dataCheck;
   rand logic [7:0] poison;
+  rand logic [14:0] mpam;
+  rand logic [PBHA_W-1:0] pbha;
+  rand logic [TAG_OP_W-1:0] tagOp;
 
   chiReqOpcodeE issuedOpcode;
   chiCacheStateE initialState;
@@ -91,6 +94,9 @@ class chiRequesterTx extends uvm_sequence_item;
     be = src.be;
     dataCheck = src.dataCheck;
     poison = src.poison;
+    mpam = src.mpam;
+    pbha = src.pbha;
+    tagOp = src.tagOp;
     issuedOpcode = src.issuedOpcode;
     initialState = src.initialState;
     localOnly = src.localOnly;
@@ -102,8 +108,11 @@ class chiRequesterTx extends uvm_sequence_item;
   endfunction
 
   constraint chiLegalIntent {
-    poison == '0;
-    dataCheck == '0;
+    soft poison == '0;
+    soft dataCheck == '0;
+    soft mpam == '0;
+    soft pbha == '0;
+    soft tagOp == '0;
     size inside {[3'd0:3'd6]};
     // Issue H replaced the NS and NSE bits with a three-bit PAS naming one of
     // six Physical Address Spaces [SPEC:IHI0050H B13.10.68]. Stimulus stays in

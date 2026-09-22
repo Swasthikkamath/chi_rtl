@@ -24,4 +24,5 @@ package chiSubordinatePkg;
   `include "chiSubordinateMonitorProxy.sv"
   `include "chiSubordinateAgent.sv"
   `include "chiSubordinateSeq.sv"
+  `include "chiSubordinateRespErrSeq.sv"
 endpackage

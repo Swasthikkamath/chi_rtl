@@ -53,6 +53,10 @@ class chiRequesterDriverProxy extends uvm_driver#(chiRequesterTx);
   task run_phase(uvm_phase phase);
     bfm.waitConfigured();
     bfm.linkInit();
+    if (cfg.holdQuiet) begin
+      wait(0);
+      return;
+    end
     bfm.linkStart();
     bfm.linkActivate();
     if (cfg.useSysCo && nodeClassUsesSysCo(cfg.nodeClass)) begin
@@ -73,9 +77,14 @@ class chiRequesterDriverProxy extends uvm_driver#(chiRequesterTx);
         end
       join_none
     end
+    // Stay in this phase so the threads above are not killed when the
+    // task returns. The test dropping its objection ends the phase.
+    wait(0);
   endtask
 
   task shutdown_phase(uvm_phase phase);
+    if (cfg.holdQuiet)
+      return;
     if (sysCoOn) begin
       bfm.sysCoExit();
       sysCoOn = 1'b0;
@@ -206,6 +215,9 @@ class chiRequesterDriverProxy extends uvm_driver#(chiRequesterTx);
     flit.sharedSlot = reqSlotLpId(item.sharedSlot);
     flit.excl = item.excl;
     flit.expCompAck = item.expCompAck;
+    flit.mpam = item.mpam;
+    flit.pbha = item.pbha;
+    flit.tagOp = item.tagOp;
     // [TOP:reqToNoc] AllowRetry 0 keeps the TgtID this requester drives.
     bfm.sendReqFlit(packReq(flit));
   endtask
@@ -298,6 +310,9 @@ class chiRequesterDriverProxy extends uvm_driver#(chiRequesterTx);
       else
         flit.be = ctx.item.be[BE_W-1:0];
       flit.data = ctx.item.data[beat * DATA_W +: DATA_W];
+      flit.dataCheck = ctx.item.dataCheck;
+      flit.poison = ctx.item.poison;
+      flit.tagOp = ctx.item.tagOp;
       bfm.sendDatFlit(packDat(flit));
     end
   endtask

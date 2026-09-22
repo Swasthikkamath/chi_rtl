@@ -38,3 +38,11 @@ $CHI_TB_ROOT/src/hdlTop/hdlTop.sv
 $CHI_TB_ROOT/src/hvlTop/chiRequester/chiRequesterPkg.sv
 +incdir+$CHI_TB_ROOT/src/hvlTop/chiSubordinate
 $CHI_TB_ROOT/src/hvlTop/chiSubordinate/chiSubordinatePkg.sv
+
+// Integration environment, tests, and the HVL top. hvlTop imports only
+// chiTestPkg, which re-exports uvm_pkg so run_test is visible.
++incdir+$CHI_TB_ROOT/src/hvlTop/topEnv
+$CHI_TB_ROOT/src/hvlTop/topEnv/topEnvPkg.sv
++incdir+$CHI_TB_ROOT/src/hvlTop/test
+$CHI_TB_ROOT/src/hvlTop/test/chiTestPkg.sv
+$CHI_TB_ROOT/src/hvlTop/hvlTop.sv

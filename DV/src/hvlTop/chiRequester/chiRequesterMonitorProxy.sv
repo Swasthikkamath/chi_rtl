@@ -47,6 +47,7 @@ class chiRequesterMonitorProxy extends uvm_monitor;
       chiWatchFlits();
       chiWatchLink();
     join_none
+    wait(0);
   endtask
 
   task automatic chiWatchFlits();

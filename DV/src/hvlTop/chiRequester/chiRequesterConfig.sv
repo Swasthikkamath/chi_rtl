@@ -15,6 +15,9 @@ class chiRequesterConfig extends uvm_object;
   bit allowRniDvmSnoop;
   // [ASSUMPTION:14] Default does not require the missing DVM DBIDResp phase.
   bit expectDvmDbidResp;
+  // Passive port: drive the link pins to STOP so they are not X, and
+  // do not activate or issue requests. See OPEN QUESTIONS Q18.
+  bit holdQuiet;
 
   `uvm_object_utils(chiRequesterConfig)
 
@@ -29,6 +32,7 @@ class chiRequesterConfig extends uvm_object;
     useSysCo = 1'b1;
     allowRniDvmSnoop = 1'b1;
     expectDvmDbidResp = 1'b0;
+    holdQuiet = 1'b0;
   endfunction
 
   function void chiNormalize();

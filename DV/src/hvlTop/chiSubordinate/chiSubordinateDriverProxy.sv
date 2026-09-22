@@ -68,6 +68,10 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
   task run_phase(uvm_phase phase);
     bfm.waitConfigured();
     bfm.linkInit();
+    if (cfg.holdQuiet) begin
+      wait(0);
+      return;
+    end
     bfm.linkStart();
     bfm.linkActivate();
     fork
@@ -83,9 +87,12 @@ class chiSubordinateDriverProxy extends uvm_driver#(chiSubordinateTx);
         end
       join_none
     end
+    wait(0);
   endtask
 
   task shutdown_phase(uvm_phase phase);
+    if (cfg.holdQuiet)
+      return;
     bfm.linkDeactivate();
   endtask
 

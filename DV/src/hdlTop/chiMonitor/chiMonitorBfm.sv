@@ -303,6 +303,23 @@ interface chiMonitorBfm (
     sample = linkQueue.pop_front();
   endtask
 
+  // Non-blocking pops. check_phase is a function, so it cannot call the
+  // waiting tasks above. Leftover samples, including L-Credit returns from
+  // link deactivation, are already queued by then.
+  function automatic bit tryGetFlitSample(output chiGlobalsPkg::chiFlitSampleT sample);
+    if (flitQueue.size() == 0)
+      return 1'b0;
+    sample = flitQueue.pop_front();
+    return 1'b1;
+  endfunction
+
+  function automatic bit tryGetLinkSample(output chiGlobalsPkg::chiLinkSampleT sample);
+    if (linkQueue.size() == 0)
+      return 1'b0;
+    sample = linkQueue.pop_front();
+    return 1'b1;
+  endfunction
+
   function automatic int unsigned pendingFlitSamples();
     return flitQueue.size();
   endfunction
@@ -341,6 +358,37 @@ interface chiMonitorBfm (
 
   function automatic chiGlobalsPkg::chiNodeClassE ownNodeClass();
     return nodeClass;
+  endfunction
+
+  function automatic chiGlobalsPkg::chiLinkStateE currentTxState();
+    return observedTxState;
+  endfunction
+
+  function automatic chiGlobalsPkg::chiLinkStateE currentRxState();
+    return observedRxState;
+  endfunction
+
+  // Grants seen on LCRDV. The link model compares these with the flits
+  // and L-Credit returns it counted, after the link is back in STOP.
+  // [ASSUMPTION:9]
+  function automatic int unsigned creditGrants(
+    input chiGlobalsPkg::chiChannelE channel,
+    input chiGlobalsPkg::chiDirE direction
+  );
+    if (direction == chiGlobalsPkg::CHI_DIR_TX) begin
+      case (channel)
+        chiGlobalsPkg::CHI_CH_REQ: return txReqCreditCount;
+        chiGlobalsPkg::CHI_CH_RSP: return txRspCreditCount;
+        chiGlobalsPkg::CHI_CH_DAT: return txDatCreditCount;
+        default: return 0;
+      endcase
+    end
+    case (channel)
+      chiGlobalsPkg::CHI_CH_REQ: return rxReqCreditCount;
+      chiGlobalsPkg::CHI_CH_RSP: return rxRspCreditCount;
+      chiGlobalsPkg::CHI_CH_DAT: return rxDatCreditCount;
+      default: return rxSnpCreditCount;
+    endcase
   endfunction
 
 endinterface : chiMonitorBfm

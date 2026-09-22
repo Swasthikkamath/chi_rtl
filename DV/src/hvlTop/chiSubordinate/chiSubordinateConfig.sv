@@ -47,6 +47,10 @@ class chiSubordinateConfig extends uvm_object;
   // [SPEC:IHI0050H B2.12 Transaction retry]
   bit enableRetry;
 
+  // Passive port: drive the link pins to STOP so they are not X, and do
+  // not activate or answer. See OPEN QUESTIONS Q18.
+  bit holdQuiet;
+
   // Whether this port answers PrefetchTgt at all. The specification gives
   // PrefetchTgt no response, so the default is to silently drop it, and the
   // knob exists only so a test can prove the DUT does not wait for one.
@@ -69,6 +73,7 @@ class chiSubordinateConfig extends uvm_object;
     maxRespDelay = 4;
     defaultRespErr = RESP_ERR_OK;
     enableRetry = 1'b0;
+    holdQuiet = 1'b0;
     dropPrefetchTgt = 1'b1;
   endfunction
 

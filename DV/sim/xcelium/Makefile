@@ -168,6 +168,7 @@ SLANG_ARGS := \
 	$(UVM_HOME)/src/uvm_pkg.sv \
 	-F $(FILELIST) \
 	--top hdlTop \
+	--top hvlTop \
 	$(CFG_DEFINES)
 
 check: $(CHI_DUT_FILELIST)

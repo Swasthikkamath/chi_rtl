@@ -20,4 +20,6 @@ package chiRequesterPkg;
   `include "chiRequesterMonitorProxy.sv"
   `include "chiRequesterAgent.sv"
   `include "chiRequesterSeq.sv"
+  `include "chiOneIntentSeq.sv"
+  `include "chiBurstIntentSeq.sv"
 endpackage

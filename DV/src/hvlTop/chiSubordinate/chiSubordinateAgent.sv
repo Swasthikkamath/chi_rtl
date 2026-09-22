@@ -29,21 +29,25 @@ class chiSubordinateAgent extends uvm_agent;
       is_active = UVM_PASSIVE;
       return;
     end
+    if (cfg.holdQuiet)
+      is_active = UVM_PASSIVE;
     monitor = chiSubordinateMonitorProxy::type_id::create("monitor", this);
     cov = chiSubordinateCoverage::type_id::create("cov", this);
     cov.cfg = cfg;
     uvm_config_db#(chiSubordinateConfig)::set(this, "monitor", "chiSubordinateConfig", cfg);
     uvm_config_db#(chiSubordinateConfig)::set(this, "cov", "chiSubordinateConfig", cfg);
-    if (is_active == UVM_ACTIVE) begin
-      // The store is created by whoever builds the agents and shared across
-      // all of them, because the DUT decides which port an address reaches.
-      if (!uvm_config_db#(chiSubordinateMemory)::get(this, "", "chiSubordinateMemory", mem))
-        `uvm_fatal("chiSubordinateMemory", "config_db get failed for key chiSubordinateMemory")
+    // The store is created by whoever builds the agents and shared across
+    // all of them, because the DUT decides which port an address reaches.
+    // The driver is built even when the port is quiet, so the pins are
+    // driven to STOP instead of X. It does not take sequences then.
+    if (!uvm_config_db#(chiSubordinateMemory)::get(this, "", "chiSubordinateMemory", mem))
+      `uvm_fatal("chiSubordinateMemory", "config_db get failed for key chiSubordinateMemory")
+    driver = chiSubordinateDriverProxy::type_id::create("driver", this);
+    uvm_config_db#(chiSubordinateConfig)::set(this, "driver", "chiSubordinateConfig", cfg);
+    uvm_config_db#(chiSubordinateMemory)::set(this, "driver", "chiSubordinateMemory", mem);
+    if (!cfg.holdQuiet) begin
       sequencer = chiSubordinateSequencer::type_id::create("sequencer", this);
-      driver = chiSubordinateDriverProxy::type_id::create("driver", this);
       sequencer.cfg = cfg;
-      uvm_config_db#(chiSubordinateConfig)::set(this, "driver", "chiSubordinateConfig", cfg);
-      uvm_config_db#(chiSubordinateMemory)::set(this, "driver", "chiSubordinateMemory", mem);
     end
   endfunction
 
@@ -51,7 +55,7 @@ class chiSubordinateAgent extends uvm_agent;
     super.connect_phase(phase);
     if (!cfg.portActive)
       return;
-    if (is_active == UVM_ACTIVE) begin
+    if (sequencer != null) begin
       driver.seq_item_port.connect(sequencer.seq_item_export);
       driver.cov = cov;
     end
