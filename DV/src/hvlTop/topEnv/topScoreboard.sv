@@ -187,6 +187,8 @@ class topScoreboard extends uvm_component;
     lifecycleModel.chiNoteRsp(ordinal, nodeClass, isTx, flit);
     memoryModel.chiNoteRsp(ordinal, nodeClass, isTx, flit);
     directoryModel.chiNoteRsp(ordinal, nodeClass, isTx, flit);
+    if (cov != null)
+      cov.chiSampleRsp(nodeClass, isTx, flit);
   endfunction
 
   function void chiNoteDat(
@@ -200,6 +202,8 @@ class topScoreboard extends uvm_component;
     lifecycleModel.chiNoteDat(ordinal, nodeClass, isTx, flit);
     memoryModel.chiNoteDat(ordinal, nodeClass, isTx, flit);
     directoryModel.chiNoteDat(ordinal, nodeClass, isTx, flit);
+    if (cov != null)
+      cov.chiSampleDat(nodeClass, isTx, flit);
   endfunction
 
   function void chiNoteSnp(
@@ -211,6 +215,8 @@ class topScoreboard extends uvm_component;
     linkModel.chiNoteFlit(ordinal, CHI_CH_SNP,
       isTx ? CHI_DIR_TX : CHI_DIR_RX, flit.opcode == SNP_LCRD_RETURN);
     directoryModel.chiNoteSnp(ordinal, nodeClass, isTx, flit);
+    if (cov != null)
+      cov.chiSampleSnp(nodeClass, isTx, flit);
   endfunction
 
   function void chiNoteLink(input chiLinkSampleT sample);

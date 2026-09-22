@@ -50,12 +50,42 @@ class topLifecycleModel extends uvm_component;
   int unsigned rnPrefetchCount;
   int unsigned snPrefetchCount;
 
+  // Error completions seen arriving at a Requester, split by the two error
+  // encodings. An error injected at a Subordinate has to come back out at
+  // the other end of the interconnect or it was swallowed, and a lifecycle
+  // that retires normally cannot tell the difference.
+  // [SPEC:IHI0050H B9.4 Error response]
+  int unsigned rnDataErrSeen;
+  int unsigned rnNonDataErrSeen;
+
+  // The same errors by line, which is what says an error injected for one
+  // address reached the Requester that asked for that address and nobody
+  // else. A total on its own cannot distinguish a correctly delivered
+  // error from one that also leaked onto an unrelated transaction.
+  int unsigned rnErrByLine[chiAddrT];
+
   `uvm_component_utils(topLifecycleModel)
 
   function new(string name, uvm_component parent);
     super.new(name, parent);
     rnPrefetchCount = 0;
     snPrefetchCount = 0;
+    rnDataErrSeen = 0;
+    rnNonDataErrSeen = 0;
+  endfunction
+
+  function void chiNoteErr(input chiRespErrE respErr, input chiAddrT addr);
+    chiAddrT line;
+    if ((respErr != RESP_ERR_DERR) && (respErr != RESP_ERR_NDERR))
+      return;
+    if (respErr == RESP_ERR_DERR)
+      rnDataErrSeen++;
+    else
+      rnNonDataErrSeen++;
+    line = lineAlign(addr);
+    if (!rnErrByLine.exists(line))
+      rnErrByLine[line] = 0;
+    rnErrByLine[line]++;
   endfunction
 
   function topTxnKeyT chiKey(input int unsigned ordinal, input chiTxnIdT txnId);
@@ -276,6 +306,7 @@ class topLifecycleModel extends uvm_component;
             ordinal, flit.opcode.name(), flit.txnId)})
         return;
       end
+      chiNoteErr(flit.respErr, rnTxn[key].addr);
       chiApplyRsp(rnTxn[key], flit);
       if ((rnTxn[key].order != '0) && rnTxn[key].sawReceipt == 1'b0
           && rnTxn[key].gotComp && chiNeedsRead(rnTxn[key].opcode))
@@ -343,6 +374,7 @@ class topLifecycleModel extends uvm_component;
         return;
       end
       txn = rnTxn[key];
+      chiNoteErr(flit.respErr, txn.addr);
       if (txn.readLeft > 0)
         txn.readLeft--;
       if ((txn.order != '0) && !txn.sawReceipt)

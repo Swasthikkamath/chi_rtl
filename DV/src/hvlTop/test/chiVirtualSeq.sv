@@ -22,13 +22,15 @@ typedef enum int unsigned {
   CHI_VSEQ_RESP_ERR,
   CHI_VSEQ_SEPARATE_RESP,
   CHI_VSEQ_CORRUPT,
-  CHI_VSEQ_PREFETCH
+  CHI_VSEQ_PREFETCH,
+  CHI_VSEQ_DATA_ERR
 } chiVirtualSeqModeE;
 
-// The line the corruption mode targets. Named here so the test that arms
-// the rule and the test that checks the result agree without either one
-// reaching into the other.
+// Lines a mode targets and its test then checks. Named here so the two
+// agree without either one reaching into the other.
 localparam int unsigned CHI_CORRUPT_LINE_INDEX = 40;
+localparam int unsigned CHI_ERR_LINE_INDEX = 42;
+localparam int unsigned CHI_CLEAN_LINE_INDEX = 43;
 
 class chiVirtualSeq extends uvm_sequence;
   chiVirtualSeqModeE mode;
@@ -182,6 +184,26 @@ class chiVirtualSeq extends uvm_sequence;
     end
   endtask
 
+  // A data error on one line only. Armed on every Subordinate because the
+  // testbench does not choose which one the line lands on, and with a use
+  // count so it covers one request rather than becoming the new default.
+  task chiAllLineError(input chiAddrT line, input chiRespErrE kind);
+    foreach (p_sequencer.snfSeqr[i]) begin
+      chiSubordinateErrorSeq seq;
+      seq = chiSubordinateErrorSeq::type_id::create($sformatf("errSnf%0d", i));
+      seq.errorLine = line;
+      seq.errorKind = kind;
+      seq.start(p_sequencer.snfSeqr[i]);
+    end
+    foreach (p_sequencer.sniSeqr[i]) begin
+      chiSubordinateErrorSeq seq;
+      seq = chiSubordinateErrorSeq::type_id::create($sformatf("errSni%0d", i));
+      seq.errorLine = line;
+      seq.errorKind = kind;
+      seq.start(p_sequencer.sniSeqr[i]);
+    end
+  endtask
+
   task body();
     case (mode)
       CHI_VSEQ_COHERENT: begin
@@ -244,6 +266,13 @@ class chiVirtualSeq extends uvm_sequence;
         chiRnf(0, CHI_INTENT_WRITE_NO_SNP, coherentLineAddr(CHI_CORRUPT_LINE_INDEX));
         chiAllCorrupt(coherentLineAddr(CHI_CORRUPT_LINE_INDEX));
         chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(CHI_CORRUPT_LINE_INDEX));
+      end
+      CHI_VSEQ_DATA_ERR: begin
+        chiAllLineError(coherentLineAddr(CHI_ERR_LINE_INDEX), RESP_ERR_DERR);
+        chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(CHI_ERR_LINE_INDEX));
+        // A second read of an untouched line, so a DERR that spread beyond
+        // the line it was injected for has somewhere to show up.
+        chiRnf(0, CHI_INTENT_READ_NO_SNP, coherentLineAddr(CHI_CLEAN_LINE_INDEX));
       end
       CHI_VSEQ_PREFETCH: begin
         // The hint, then a real read of the same line. The read is what
