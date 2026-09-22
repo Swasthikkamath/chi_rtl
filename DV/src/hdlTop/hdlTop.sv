@@ -342,29 +342,26 @@ module hdlTop;
              chiGlobalsPkg::NODE_ID_W, chiGlobalsPkg::TXN_ID_W,
              chiGlobalsPkg::LCRD_DEPTH);
     $display({"[hdlTop] Flit widths, testbench model against interface:\n",
-              "[hdlTop]   REQ model %0d  interface %0d  unmodelled %0d\n",
-              "[hdlTop]   RSP model %0d  interface %0d  unmodelled %0d\n",
-              "[hdlTop]   SNP model %0d  interface %0d  unmodelled %0d\n",
-              "[hdlTop]   DAT model %0d  interface %0d  unmodelled %0d"},
-             chiGlobalsPkg::REQ_MODEL_W, ifReqW,
-             ifReqW - chiGlobalsPkg::REQ_MODEL_W,
-             chiGlobalsPkg::RSP_MODEL_W, ifRspW,
-             ifRspW - chiGlobalsPkg::RSP_MODEL_W,
-             chiGlobalsPkg::SNP_MODEL_W, ifSnpW,
-             ifSnpW - chiGlobalsPkg::SNP_MODEL_W,
-             chiGlobalsPkg::DAT_MODEL_W, ifDatW,
-             ifDatW - chiGlobalsPkg::DAT_MODEL_W);
+              "[hdlTop]   REQ interface %0d  named %0d  reserved %0d\n",
+              "[hdlTop]   RSP interface %0d  named %0d  reserved %0d\n",
+              "[hdlTop]   SNP interface %0d  named %0d  reserved %0d\n",
+              "[hdlTop]   DAT interface %0d  named %0d  reserved %0d"},
+             ifReqW, chiGlobalsPkg::REQ_OFF_RESERVED, chiGlobalsPkg::REQ_RESERVED_W,
+             ifRspW, chiGlobalsPkg::RSP_OFF_RESERVED, chiGlobalsPkg::RSP_RESERVED_W,
+             ifSnpW, chiGlobalsPkg::SNP_OFF_RESERVED, chiGlobalsPkg::SNP_RESERVED_W,
+             ifDatW, chiGlobalsPkg::DAT_OFF_RESERVED, chiGlobalsPkg::DAT_RESERVED_W);
 
     // Two different failures are possible here and they are not equally bad.
     //
-    // A BFM flit port narrower or wider than the chi_if bus means every flit
-    // is resized by the port connection, silently, in both directions. That is
+    // A model width that disagrees with the chi_if bus means every flit is
+    // resized by the port connection, silently, in both directions. That is
     // unrecoverable, so it is fatal.
     //
-    // A model that accounts for fewer bits than the bus carries means there
-    // are fields this testbench does not yet place. Packing still lands inside
-    // the wire, the link layer still works, and transaction traffic is
-    // suspect. That is a finding, reported and carried, not a stop.
+    // A non-empty reserved region means there are bits the bus carries that
+    // this model does not name. Packing still lands inside the wire and the
+    // link layer still works, but any transaction-level check that depends on
+    // a field inside that region is worthless. That is a finding, reported and
+    // carried, not a stop. See OPEN QUESTIONS Q7.
     if ((chiGlobalsPkg::REQ_FLIT_W != ifReqW) ||
         (chiGlobalsPkg::RSP_FLIT_W != ifRspW) ||
         (chiGlobalsPkg::SNP_FLIT_W != ifSnpW) ||
@@ -373,12 +370,15 @@ module hdlTop;
                  " REQ %0d/%0d RSP %0d/%0d SNP %0d/%0d DAT %0d/%0d"},
              chiGlobalsPkg::REQ_FLIT_W, ifReqW, chiGlobalsPkg::RSP_FLIT_W, ifRspW,
              chiGlobalsPkg::SNP_FLIT_W, ifSnpW, chiGlobalsPkg::DAT_FLIT_W, ifDatW);
-    if ((chiGlobalsPkg::REQ_MODEL_W != chiGlobalsPkg::REQ_FLIT_W) ||
-        (chiGlobalsPkg::RSP_MODEL_W != chiGlobalsPkg::RSP_FLIT_W) ||
-        (chiGlobalsPkg::SNP_MODEL_W != chiGlobalsPkg::SNP_FLIT_W) ||
-        (chiGlobalsPkg::DAT_MODEL_W != chiGlobalsPkg::DAT_FLIT_W))
-      $display({"[hdlTop] FINDING: the testbench flit model does not account",
-                " for every bit of every channel. See OPEN QUESTIONS Q7."});
+    if ((chiGlobalsPkg::REQ_RESERVED_W != 0) ||
+        (chiGlobalsPkg::RSP_RESERVED_W != 0) ||
+        (chiGlobalsPkg::SNP_RESERVED_W != 0) ||
+        (chiGlobalsPkg::DAT_RESERVED_W != 0))
+      $display({"[hdlTop] FINDING: REQ %0d, RSP %0d, SNP %0d and DAT %0d bits",
+                " are carried but not named by the testbench flit model.",
+                " See OPEN QUESTIONS Q7."},
+               chiGlobalsPkg::REQ_RESERVED_W, chiGlobalsPkg::RSP_RESERVED_W,
+               chiGlobalsPkg::SNP_RESERVED_W, chiGlobalsPkg::DAT_RESERVED_W);
 
     for (int unsigned i = 0; i < chiGlobalsPkg::NUM_NODES; i++)
       $display({"[hdlTop] node %0d  %s  nodeId 0x%0h  mesh (%0d,%0d)",

@@ -81,7 +81,7 @@ ifeq ($(COVERAGE),1)
 XRUN_COMMON += -coverage all -covoverwrite
 endif
 
-.PHONY: all compile run regress check clean help
+.PHONY: all compile run regress check check-sweep clean help
 
 all: run
 
@@ -106,11 +106,19 @@ run: | $(LOGDIR)
 SLANG    ?= $(abspath $(CHI_TB_ROOT)/../tools)/slang
 UVM_HOME ?= $(abspath $(CHI_TB_ROOT)/../tools)/uvm-core-2020.3.1
 
+# -Wport-width-* is the whole point of the flat signal ports on the BFMs. A
+# port connection resizes silently in SystemVerilog, so without these two a
+# BFM flit port that disagreed with the chi_if bus would compile clean and
+# corrupt every flit. With them, chiGlobalsPkg's flit widths are checked
+# against the DUT's own buses at compile time, for whatever configuration is
+# being swept. Neither one may be demoted to a warning we tolerate.
 SLANG_ARGS := \
 	--std 1800-2017 \
 	--single-unit \
 	--relax-enum-conversions \
 	--timescale 1ns/1ps \
+	-Wport-width-trunc \
+	-Wport-width-expand \
 	-I $(UVM_HOME)/src \
 	$(UVM_HOME)/src/uvm_pkg.sv \
 	-F $(FILELIST) \
@@ -120,7 +128,34 @@ SLANG_ARGS := \
 check:
 	@test -x $(SLANG) || { echo "no static front end at $(SLANG); set SLANG="; exit 1; }
 	@test -d $(UVM_HOME)/src || { echo "no UVM source at $(UVM_HOME); set UVM_HOME="; exit 1; }
-	$(SLANG) $(SLANG_ARGS)
+	@$(SLANG) $(SLANG_ARGS) > $(CURDIR)/check.log 2>&1; \
+		status=$$?; cat $(CURDIR)/check.log; test $$status -eq 0
+	@if grep -q "port connection" $(CURDIR)/check.log; then \
+		echo "check: a port connection was resized; the flit model disagrees with the DUT bus"; \
+		exit 1; \
+	fi
+
+# Sweeps the configuration and re-checks elaboration at each point, which is
+# what proves the flit widths are formulas rather than constants fitted to one
+# configuration.
+CHECK_SWEEP ?= \
+	"" \
+	"+define+CHI_TB_DATA_W=128" \
+	"+define+CHI_TB_DATA_W=512" \
+	"+define+CHI_TB_NODEID_W=13 +define+CHI_TB_ADDR_W=40" \
+	"+define+CHI_TB_RSVDC_W=8 +define+CHI_TB_PBHA_EN=1" \
+	"+define+CHI_TB_MPAM_EN=1 +define+CHI_TB_MEC_EN=1 +define+CHI_TB_CDA_EN=1" \
+	"+define+CHI_TB_DATA_CHECK_EN=0 +define+CHI_TB_POISON_EN=0" \
+	"+define+CHI_TB_PARITY_EN=1" \
+	"+define+CHI_TB_NUM_RNF=2 +define+CHI_TB_NUM_SNF=1 +define+CHI_TB_NUM_HNF=2"
+
+check-sweep:
+	@for cfg in $(CHECK_SWEEP); do \
+		echo "=== $$cfg"; \
+		$(MAKE) --no-print-directory check CFG_DEFINES="$$cfg" > /dev/null || \
+			{ echo "FAILED: $$cfg"; exit 1; }; \
+	done
+	@echo "check-sweep: every configuration elaborates"
 
 regress: | $(LOGDIR)
 	@for seed in 1 2 3; do \
@@ -128,7 +163,7 @@ regress: | $(LOGDIR)
 	done
 
 clean:
-	rm -rf xcelium.d INCA_libs waves.shm cov_work $(LOGDIR) *.log *.history
+	rm -rf xcelium.d INCA_libs waves.shm cov_work $(LOGDIR) *.log *.history check.log
 
 help:
 	@echo "make compile              elaborate with Xcelium"
