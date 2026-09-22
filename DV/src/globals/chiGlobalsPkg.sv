@@ -33,7 +33,7 @@ package chiGlobalsPkg;
     CHI_LINK_STATE_RUN = 2'b11
   } chiLinkStateE;
 
-  // [ASSUMPTION:3] Class values confirmed for nodeClassForOrdinal.
+  // [ASSUMPTION:5] Class values confirmed for nodeClassForOrdinal.
   typedef enum logic [2:0] {
     CHI_NODE_CLASS_RNF = 3'd0,
     CHI_NODE_CLASS_RND = 3'd1,
@@ -248,7 +248,7 @@ package chiGlobalsPkg;
   // Logical flits. Overlaid wire slots are single fields:
   // opcodeCtrl is StashNIDValid, Endian, Deep, or PrefetchTgtHint;
   // snpAttr is also DoDWT; excl is also SnoopMe or CAH;
-  // groupSlot is the opaque 8-bit LPID/group byte [ASSUMPTION:5];
+  // groupSlot is the opaque 8-bit LPID/group byte [ASSUMPTION:7];
   // returnNid also carries StashNID; fwdState also carries DataPull on RSP;
   // dataSource also carries {5'b0, FwdState} on DAT.
   typedef struct {
@@ -491,7 +491,7 @@ package chiGlobalsPkg;
     return chiOffHni(cfg) + cfg.numHni;
   endfunction
 
-  // [ASSUMPTION:3] Minimum width is 1, matching clog2Min1.
+  // [ASSUMPTION:5] Minimum width is 1, matching clog2Min1.
   function automatic int unsigned chiClog2Min1(input int unsigned value);
     int unsigned width;
     int unsigned remaining;
@@ -632,7 +632,7 @@ package chiGlobalsPkg;
     return mask;
   endfunction
 
-  // [ASSUMPTION:3] deviceId is the ordinal. LSB-first packing.
+  // [ASSUMPTION:5] deviceId is the ordinal. LSB-first packing.
   function automatic logic [CHI_MAX_NODEID_W-1:0] chiNodeIdForOrdinal(
     input chi_cfg_t cfg,
     input int unsigned ordinal
@@ -697,7 +697,7 @@ package chiGlobalsPkg;
     return placements;
   endfunction
 
-  // [ASSUMPTION:6] Non-secure, Realm, and Non-secure Protected.
+  // [ASSUMPTION:10] Non-secure, Realm, and Non-secure Protected.
   function automatic bit chiPasIsNonSecure(input logic [2:0] pas);
     return (pas == CHI_PAS_NON_SECURE)
       || (pas == CHI_PAS_REALM)
@@ -725,7 +725,7 @@ package chiGlobalsPkg;
   endfunction
 
   // [SPEC:IHI0050H B13.9.1] Optional tails follow the enabled config.
-  // [ASSUMPTION:5] PBHA contributes no bits.
+  // [ASSUMPTION:7] PBHA contributes no bits.
   function automatic int unsigned chiReqFlitWidth(input chi_cfg_t cfg);
     return 4 + cfg.nodeIdW + cfg.nodeIdW + 12 + cfg.nodeIdW + 1 + 12
       + 7 + 1 + 6 + cfg.addrW + 3 + 1 + 1 + 2 + 4 + 4 + 1 + 8 + 1 + 1
@@ -748,7 +748,7 @@ package chiGlobalsPkg;
   endfunction
 
   // [SPEC:IHI0050H B13.9.4] Tag and TU are always present.
-  // [ASSUMPTION:5] DataCheck and Poison follow their enables.
+  // [ASSUMPTION:7] DataCheck and Poison follow their enables.
   function automatic int unsigned chiDatFlitWidth(input chi_cfg_t cfg);
     int unsigned mecWidth;
     int unsigned dataCheckWidth;
@@ -766,7 +766,7 @@ package chiGlobalsPkg;
     return (CHI_TB_CACHE_LINE_BYTES * 8) / cfg.dataW;
   endfunction
 
-  // [ASSUMPTION:8] Legal lcrdDepth is already at least 2, so this is the
+  // [ASSUMPTION:9] Legal lcrdDepth is already at least 2, so this is the
   // advertised credit count and the hard grant cap.
   function automatic int unsigned chiLcrdCap(input chi_cfg_t cfg);
     return cfg.lcrdDepth;

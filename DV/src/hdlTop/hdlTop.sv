@@ -4,7 +4,7 @@
 // handles and contains no classes. It elaborates with no UVM test.
 // NodeIDs, placements, and regions are built here so the testbench knows
 // them by construction. See OPEN QUESTIONS items 3, 6 and 8.
-// [TOP:chi_interconnect_top] [ASSUMPTION:3] [ASSUMPTION:6] [ASSUMPTION:8]
+// [TOP:chi_interconnect_top] [ASSUMPTION:5] [ASSUMPTION:10] [ASSUMPTION:9]
 
 `timescale 1ns/1ps
 
@@ -17,7 +17,7 @@ module hdlTop;
   localparam logic [CHI_CFG.addrW-1:0] CHI_TB_MMIO_BASE =
     {CHI_CFG.addrW{1'b1}} - CHI_CFG.addrW'(12'hfff);
 
-  // [ASSUMPTION:6] Same windows the top module builds when
+  // [ASSUMPTION:10] Same windows the top module builds when
   // USE_DEFAULT_REGIONS is 1. Passed explicitly so the TB owns them.
   localparam logic [CHI_CFG.addrW-1:0]
     REGION_BASE [CHI_TB_NUM_REGIONS-1:0] = '{
@@ -84,7 +84,7 @@ module hdlTop;
   logic [CHI_TB_NUM_NODES-1:0] linkParityError;
   logic [CHI_TB_NUM_NODES-1:0] linkCreditError;
 
-  // [ASSUMPTION:3] Placement array is built as an assignment pattern.
+  // [ASSUMPTION:5] Placement array is built as an assignment pattern.
   // See chiDutElab.svh.
   `include "chiDutElab.svh"
 
@@ -209,4 +209,19 @@ module hdlTop;
 `ifndef CHI_TB_NO_UVM
   initial uvm_config_db#(virtual chiClkRstBfm)::set(null, "*", "chiClkRstBfm", clkRst);
 `endif
+
+  // Q12 is closed. This printout is how a sweep records the resolved
+  // configuration, NodeIDs, and ordinals.
+  initial begin
+    int unsigned ordinal;
+    $display("CHI_TB cfg nodes=%0d rnf=%0d rnd=%0d rni=%0d snf=%0d sni=%0d hnf=%0d hni=%0d mn=%0d dataW=%0d addrW=%0d nodeIdW=%0d",
+      CHI_TB_NUM_NODES, CHI_CFG.numRnf, CHI_CFG.numRnd, CHI_CFG.numRni,
+      CHI_CFG.numSnf, CHI_CFG.numSni, CHI_CFG.numHnf, CHI_CFG.numHni,
+      CHI_CFG.numMn, CHI_CFG.dataW, CHI_CFG.addrW, CHI_CFG.nodeIdW);
+    for (ordinal = 0; ordinal < CHI_TB_NUM_NODES; ordinal++) begin
+      $display("CHI_TB node ordinal=%0d id=%0h class=%0d index=%0d",
+        ordinal, chiNodeIdForOrdinal(CHI_CFG, ordinal),
+        chiNodeClassOf(CHI_CFG, ordinal), chiNodeIndexOf(CHI_CFG, ordinal));
+    end
+  end
 endmodule

@@ -4,7 +4,7 @@
 // count is an assignment pattern of chiMakeOnePlacement. The
 // rightmost element is ordinal 0. Counts outside 1..32 fail
 // elaboration on purpose.
-// [ASSUMPTION:3]
+// [ASSUMPTION:5]
 
 `define CHI_TB_PL_1(cfg) chiMakeOnePlacement((cfg), 0)
 `define CHI_TB_PL_2(cfg) chiMakeOnePlacement((cfg), 1), `CHI_TB_PL_1(cfg)

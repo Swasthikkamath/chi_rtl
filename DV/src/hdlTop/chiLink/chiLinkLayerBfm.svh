@@ -2,8 +2,8 @@
 // subordinate ports cannot drift apart on credit or link-state rules.
 // Pin names are the Issue H names. TX/RX are the external node's view.
 // The receiver of a channel drives *LCRDV, so the node drives RX*LCRDV
-// and only samples TX*LCRDV. See OPEN QUESTIONS items 1, 2 and 8.
-// [SPEC:IHI0050H B14.2] [SPEC:IHI0050H B14.5] [ASSUMPTION:1] [ASSUMPTION:8]
+// and only samples TX*LCRDV. See OPEN QUESTIONS items 1, 2, 3 and 9.
+// [SPEC:IHI0050H B14.2] [SPEC:IHI0050H B14.5] [ASSUMPTION:1] [ASSUMPTION:9]
 
   localparam int unsigned LCRD_CAP = CHI_CFG.lcrdDepth;
 
@@ -58,7 +58,8 @@
   int unsigned rxSnpOutstanding;
 
   // Node-owned pins. 1-bit *CHK, CLK, RESETn, and both SACTIVE pins are
-  // DUT outputs and are intentionally not driven here. [ASSUMPTION:2]
+  // DUT outputs and are intentionally not driven here.
+  // [ASSUMPTION:2] [ASSUMPTION:3]
   generate
     if (IS_REQUESTER) begin : requesterDrive
       assign chiPort.TXREQFLITPEND = portActive ? txReqFlitPend : 1'b0;
@@ -284,7 +285,7 @@
       txLinkActiveReq <= 1'b0;
       rxLinkActiveAck <= 1'b0;
     end else begin
-      // [ASSUMPTION:8] Acknowledge the DUT's TX link on the clock after
+      // [ASSUMPTION:9] Acknowledge the DUT's TX link on the clock after
       // RXLINKACTIVEREQ rises. Hold the ack through credit return.
       if (chiPort.RXLINKACTIVEREQ === 1'b1)
         rxLinkActiveAck <= 1'b1;

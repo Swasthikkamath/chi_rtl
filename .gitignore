@@ -1,7 +1,25 @@
-chi_rtl/
-agent-tools/
+# The DUT repository is cloned beside the testbench and is never committed here.
+# It is referenced only by DV/sim/xcelium/chiFileList.f through its own filelist.f.
+/chi_rtl/
+
+# Simulator and build artefacts
 DV/sim/xcelium/xcelium.d/
-DV/sim/xcelium/waves.shm/
-DV/sim/xcelium/*.log
+DV/sim/xcelium/xrun.log
 DV/sim/xcelium/xrun.history
-DV/sim/xcelium/xrun.key
+DV/sim/xcelium/waves.shm/
+DV/sim/xcelium/logs/
+DV/sim/xcelium/*.log
+DV/sim/xcelium/.simvision/
+DV/sim/xcelium/INCA_libs/
+DV/doc/*.pdf
+DV/doc/build/
+
+# Local static-check helpers and scratch
+/tools/
+agent-tools/
+__pycache__/
+*.shm
+*.vcd
+*.fsdb
+*.key
+simv*

@@ -10,7 +10,8 @@ interface chiClkRstBfm;
   logic resetn;
 
   localparam int unsigned CHI_TB_CLK_HALF_PERIOD = 5;
-  localparam int unsigned CHI_TB_RESET_CYCLES = 8;
+  // [ASSUMPTION:16] Hold reset for at least ten cycles.
+  localparam int unsigned CHI_TB_RESET_CYCLES = 10;
 
   initial begin
     clk = 1'b0;

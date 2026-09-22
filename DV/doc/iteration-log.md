@@ -25,4 +25,4 @@ each is demonstrated (or refuted) by a simulation before the DV spec is finalize
 
 | Date | Stage | Symptom | Classification | Root cause | Fix |
 |------|-------|---------|----------------|------------|-----|
-| — | — | — (no failures yet) | — | — | — |
+| 2026-09-22 | 1 | `xrun` is not installed. Local check used Verilator 5.020 (`--cc --timing --top-module hdlTop` plus `+define+CHI_TB_NO_UVM`). A timed run past time 0 did not hit the DUT's configuration `$fatal` checks. | environment | Q20: no Xcelium in this image. `slang` was not on `PATH` for this pass. | Xcelium `make compile` stays the sign-off command. Verilator is only the local elaborator. |

@@ -2,7 +2,7 @@
 // It never drives a pin. The HVL monitor proxy blocks in the wait tasks.
 // TXSACTIVE is sampled only. The spec makes it a node output; the DUT
 // drives it. See OPEN QUESTIONS item 2.
-// [SPEC:IHI0050H B14.7.2] [ASSUMPTION:2] [TOP:linkUp]
+// [SPEC:IHI0050H B14.7.2] [ASSUMPTION:3] [TOP:linkUp]
 
 `timescale 1ns/1ps
 

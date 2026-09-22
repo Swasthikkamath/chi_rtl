@@ -5,7 +5,7 @@
 #
 # chiFileList.f is read with -F. Paths inside it, including the
 # referenced chi_rtl/filelist.f, resolve from the file that names them.
-# [ASSUMPTION:9]
+# [ASSUMPTION:21]
 
 XRUN ?= xrun
 FILELIST := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))chiFileList.f

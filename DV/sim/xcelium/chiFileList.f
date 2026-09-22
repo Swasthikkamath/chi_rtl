@@ -1,6 +1,6 @@
 // Paths are relative to this file. Invoke xrun with -F so they resolve
 // here, not from the launch directory.
-// [ASSUMPTION:9] The DUT list is an argument file. -F makes its own
+// [ASSUMPTION:21] The DUT list is an argument file. -F makes its own
 // paths resolve from the chi_rtl directory. Do not `include it.
 // +incdir+ is accepted by xrun and by Verilator. It names the directory
 // that holds chiLinkLayerBfm.svh.
