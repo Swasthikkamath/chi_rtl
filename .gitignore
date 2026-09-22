@@ -15,6 +15,12 @@ DV/sim/xcelium/gen/
 DV/doc/*.pdf
 DV/doc/build/
 
+# The CHI specification is Arm copyright and free to download but not ours to
+# redistribute. DV/doc/spec/fetchSpec.sh puts it here; only the script is
+# committed.
+DV/doc/spec/*.pdf
+DV/doc/spec/*.txt
+
 # Local static-check helpers and scratch
 /tools/
 agent-tools/
