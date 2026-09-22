@@ -40,6 +40,27 @@ class topMemoryModel extends uvm_component;
   bit expectPoison;
   bit expectDataCheck;
 
+  // End-to-end image, kept separately from the one above and built from the
+  // opposite end of the interconnect.
+  //
+  // The image above is written from data seen at a Subordinate, so
+  // comparing a Subordinate read against it mostly checks the Subordinate
+  // agent against itself. This one is written from data a Requester sent
+  // and compared against data a Requester received, so everything between
+  // the two ports has to have worked for it to agree: routing, ordering,
+  // the directory, and the Subordinate. It is the check that catches a line
+  // delivered from the wrong place, which looks like correct protocol to
+  // every other model.
+  //
+  // Whether the value came back from memory or from another node's cache is
+  // beside the point. Either way it must be the last value written.
+  logic [7:0] rnImage[chiAddrT];
+  chiAddrT rnReqAddr[topMemKeyT];      // keyed by requester port and TxnID
+  chiAddrT rnWriteAddr[topMemKeyT];    // keyed by requester port and DBID
+  int unsigned rnBytesWritten;
+  int unsigned rnBytesChecked;
+  int unsigned rnMismatches;
+
   `uvm_component_utils(topMemoryModel)
 
   function new(string name, uvm_component parent);
@@ -48,6 +69,118 @@ class topMemoryModel extends uvm_component;
     dataCheckBeats = 0;
     expectPoison = 1'b0;
     expectDataCheck = 1'b0;
+    rnBytesWritten = 0;
+    rnBytesChecked = 0;
+    rnMismatches = 0;
+  endfunction
+
+  //----------------------------------------------------------------------------
+  // The end-to-end image
+  //----------------------------------------------------------------------------
+
+  // A request from a Requester names the line the transaction will touch.
+  function void chiRnNoteReq(
+    input int unsigned ordinal,
+    input chiNodeClassE nodeClass,
+    input bit isTx,
+    input chiReqFlitT flit
+  );
+    if (!nodeClassIsRequester(nodeClass) || !isTx)
+      return;
+    rnReqAddr[chiMemKey(ordinal, flit.txnId)] = flit.addr;
+    // A write of zeroes carries no data, so the request alone defines the
+    // line. [SPEC:IHI0050H B2.3.9.3]
+    if (flit.opcode inside {REQ_WRITE_NO_SNP_ZERO, REQ_WRITE_UNIQUE_ZERO}) begin
+      chiAddrT base;
+      base = lineAlign(flit.addr);
+      for (int unsigned b = 0; b < CACHE_LINE_BYTES; b++) begin
+        rnImage[base + b] = '0;
+        rnBytesWritten++;
+      end
+    end
+  endfunction
+
+  // Write data carries the DBID the completer handed out, not the TxnID the
+  // request was sent with, so the address has to be carried across here.
+  function void chiRnNoteRsp(
+    input int unsigned ordinal,
+    input chiNodeClassE nodeClass,
+    input bit isTx,
+    input chiRspFlitT flit
+  );
+    topMemKeyT reqKey;
+    if (!nodeClassIsRequester(nodeClass) || isTx)
+      return;
+    if (!(flit.opcode inside {RSP_DBID_RESP, RSP_DBID_RESP_ORD, RSP_COMP_DBID_RESP}))
+      return;
+    reqKey = chiMemKey(ordinal, flit.txnId);
+    if (!rnReqAddr.exists(reqKey))
+      return;
+    rnWriteAddr[chiMemKey(ordinal, flit.dbId)] = rnReqAddr[reqKey];
+  endfunction
+
+  function void chiRnNoteDat(
+    input int unsigned ordinal,
+    input chiNodeClassE nodeClass,
+    input bit isTx,
+    input chiDatFlitT flit
+  );
+    topMemKeyT key;
+    if (!nodeClassIsRequester(nodeClass))
+      return;
+    key = chiMemKey(ordinal, flit.txnId);
+    if (isTx) begin
+      // Data leaving a Requester. A cancellation writes nothing.
+      if (!(flit.opcode inside {DAT_COPY_BACK_WR_DATA, DAT_NON_COPY_BACK_WR_DATA,
+                                DAT_NCB_WR_DATA_COMP_ACK}))
+        return;
+      if (rnWriteAddr.exists(key))
+        chiRnApplyWrite(rnWriteAddr[key], flit);
+      return;
+    end
+    if (!(flit.opcode inside {DAT_COMP_DATA, DAT_DATA_SEP_RESP}))
+      return;
+    if (rnReqAddr.exists(key))
+      chiRnCheckRead(ordinal, rnReqAddr[key], flit);
+  endfunction
+
+  function void chiRnApplyWrite(input chiAddrT addr, input chiDatFlitT flit);
+    chiAddrT base;
+    base = lineAlign(addr) + chiAddrT'(int'(flit.dataId) * (128 / 8));
+    for (int unsigned b = 0; b < BE_W; b++) begin
+      if (!flit.be[b])
+        continue;
+      rnImage[base + b] = flit.data[b*8 +: 8];
+      rnBytesWritten++;
+    end
+  endfunction
+
+  function void chiRnCheckRead(
+    input int unsigned ordinal,
+    input chiAddrT addr,
+    input chiDatFlitT flit
+  );
+    chiAddrT base;
+    // A response reporting an error may carry anything.
+    // [SPEC:IHI0050H B9.4 Error response]
+    if (flit.respErr != RESP_ERR_OK)
+      return;
+    base = lineAlign(addr) + chiAddrT'(int'(flit.dataId) * (128 / 8));
+    for (int unsigned b = 0; b < BE_W; b++) begin
+      // A byte nobody has written has no expected value. The Subordinate's
+      // reset pattern is not borrowed for it, because agreeing with that
+      // model by construction would make the comparison vacuous.
+      if (!rnImage.exists(base + b))
+        continue;
+      rnBytesChecked++;
+      if (flit.data[b*8 +: 8] !== rnImage[base + b]) begin
+        rnMismatches++;
+        `uvm_error("topMemoryModel",
+          $sformatf({"ordinal %0d read %0h from address %0h, but the last write seen ",
+                     "at any Requester left %0h there"},
+                    ordinal, flit.data[b*8 +: 8], base + b, rnImage[base + b]))
+      end
+    end
   endfunction
 
   function topMemKeyT chiMemKey(input int unsigned ordinal, input chiTxnIdT txnId);
@@ -156,6 +289,7 @@ class topMemoryModel extends uvm_component;
     topMemKeyT key;
     if ((flit.opcode == REQ_LCRD_RETURN) || (flit.opcode == REQ_P_CRD_RETURN))
       return;
+    chiRnNoteReq(ordinal, nodeClass, isTx, flit);
     if (nodeClassIsRequester(nodeClass) && isTx) begin
       key = chiMemKey(ordinal, flit.txnId);
       if (!rnTxn.exists(key))
@@ -201,6 +335,7 @@ class topMemoryModel extends uvm_component;
     topMemKeyT key;
     if (flit.opcode == RSP_LCRD_RETURN)
       return;
+    chiRnNoteRsp(ordinal, nodeClass, isTx, flit);
     if (nodeClassIsRequester(nodeClass) && !isTx) begin
       key = chiMemKey(ordinal, flit.txnId);
       if (!rnTxn.exists(key))
@@ -280,6 +415,7 @@ class topMemoryModel extends uvm_component;
     if (flit.opcode == DAT_LCRD_RETURN)
       return;
     chiNotePoison(flit);
+    chiRnNoteDat(ordinal, nodeClass, isTx, flit);
     if ((flit.opcode == DAT_SNP_RESP_DATA) || (flit.opcode == DAT_SNP_RESP_DATA_PTL)
         || (flit.opcode == DAT_SNP_RESP_DATA_FWDED))
       return;
@@ -310,6 +446,13 @@ class topMemoryModel extends uvm_component;
   endfunction
 
   function void chiCheckEnd();
+    if (rnBytesChecked == 0)
+      `uvm_warning("topMemoryModel",
+        {"no Requester read was ever compared against a value another Requester wrote, ",
+         "so nothing checked that data survived the crossing"})
+    `uvm_info("topMemoryModel",
+      $sformatf("end to end: %0d bytes written, %0d checked, %0d mismatches",
+                rnBytesWritten, rnBytesChecked, rnMismatches), UVM_LOW)
     if (expectPoison && (poisonBeats == 0))
       `uvm_error("topMemoryModel", "expected a poisoned data beat and saw none")
     if (!expectPoison && (poisonBeats != 0))

@@ -13,6 +13,7 @@ class chiRequesterMonitorProxy extends uvm_monitor;
   uvm_analysis_port#(chiRspFlitT) rxRspPort;
   uvm_analysis_port#(chiDatFlitT) rxDatPort;
   uvm_analysis_port#(chiSnpFlitT) rxSnpPort;
+  uvm_analysis_port#(chiCreditSampleT) creditPort;
   uvm_analysis_port#(chiLinkSampleT) linkPort;
 
   `uvm_component_utils(chiRequesterMonitorProxy)
@@ -26,6 +27,7 @@ class chiRequesterMonitorProxy extends uvm_monitor;
     rxRspPort = new("rxRspPort", this);
     rxDatPort = new("rxDatPort", this);
     rxSnpPort = new("rxSnpPort", this);
+    creditPort = new("creditPort", this);
     linkPort = new("linkPort", this);
   endfunction
 
@@ -45,6 +47,7 @@ class chiRequesterMonitorProxy extends uvm_monitor;
     bfm.monitorStart();
     fork
       chiWatchFlits();
+      chiWatchCredits();
       chiWatchLink();
     join_none
     wait(0);
@@ -75,6 +78,14 @@ class chiRequesterMonitorProxy extends uvm_monitor;
         end
         default: rxSnpPort.write(unpackSnp(sample.payload));
       endcase
+    end
+  endtask
+
+  task automatic chiWatchCredits();
+    chiCreditSampleT sample;
+    forever begin
+      bfm.getCreditSample(sample);
+      creditPort.write(sample);
     end
   endtask
 

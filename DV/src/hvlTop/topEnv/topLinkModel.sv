@@ -23,6 +23,19 @@ class topLinkModel extends uvm_component;
   bit expectCreditError;
   virtual chiMonitorBfm bfmByOrdinal[int unsigned];
 
+  // Live credit ledger. The end-of-test balance below proves the books
+  // close; this proves they were never overdrawn in between, which a total
+  // cannot show because a flit sent one cycle before its credit arrives
+  // leaves the same total behind as one sent a cycle after.
+  // [SPEC:IHI0050H B14.2 Flow control]
+  int unsigned grantedCount[topLinkKeyT];
+  int unsigned spentCount[topLinkKeyT];
+
+  // Last observed activation state per direction, for checking that the
+  // handshake walks its cycle rather than jumping.
+  chiLinkStateE lastTxState[int unsigned];
+  chiLinkStateE lastRxState[int unsigned];
+
   `uvm_component_utils(topLinkModel)
 
   function new(string name, uvm_component parent);
@@ -60,6 +73,7 @@ class topLinkModel extends uvm_component;
     input bit lcrd
   );
     topLinkKeyT key;
+    chiLinkStateE senderState;
     key = chiLinkKey(ordinal, channel, direction);
     if (lcrd) begin
       if (!lcrdCount.exists(key))
@@ -70,9 +84,79 @@ class topLinkModel extends uvm_component;
         protoCount[key] = 0;
       protoCount[key]++;
     end
+
+    // Both a Protocol flit and an L-Credit return consume one credit.
+    if (!spentCount.exists(key))
+      spentCount[key] = 0;
+    spentCount[key]++;
+    if (spentCount[key] > (grantedCount.exists(key) ? grantedCount[key] : 0))
+      `uvm_error("topLinkModel",
+        $sformatf("ordinal %0d %s %s has sent %0d flits against %0d credits",
+                  ordinal, channel.name(), direction.name(), spentCount[key],
+                  grantedCount.exists(key) ? grantedCount[key] : 0))
+
+    // A flit may only move while the link carrying it is running.
+    // [SPEC:IHI0050H B13.5 Link activation and deactivation]
+    senderState = (direction == CHI_DIR_TX)
+      ? (lastTxState.exists(ordinal) ? lastTxState[ordinal] : LINK_STOP)
+      : (lastRxState.exists(ordinal) ? lastRxState[ordinal] : LINK_STOP);
+    if (senderState != LINK_RUN)
+      `uvm_error("topLinkModel",
+        $sformatf("ordinal %0d carried a %s flit while its %s link was %s",
+                  ordinal, channel.name(), direction.name(), senderState.name()))
+  endfunction
+
+  function void chiNoteCredit(input chiCreditSampleT sample);
+    topLinkKeyT key;
+    int unsigned outstanding;
+    key = chiLinkKey(sample.nodeOrdinal, sample.channel, sample.direction);
+    if (!grantedCount.exists(key))
+      grantedCount[key] = 0;
+    grantedCount[key]++;
+    outstanding = grantedCount[key] - (spentCount.exists(key) ? spentCount[key] : 0);
+    // The DUT raises linkCreditError if it is ever given more credits than
+    // its transmit depth, so this ceiling is a hard limit the testbench must
+    // respect rather than a convention. [ASSUMPTION:9]
+    if (outstanding > LCRD_DEPTH)
+      `uvm_error("topLinkModel",
+        $sformatf("ordinal %0d %s %s holds %0d credits, above the depth of %0d",
+                  sample.nodeOrdinal, sample.channel.name(), sample.direction.name(),
+                  outstanding, LCRD_DEPTH))
+  endfunction
+
+  // The activation handshake walks STOP, ACTIVATE, RUN, DEACTIVATE, STOP.
+  // Any other step means one side moved without the other, which is the
+  // thing the handshake exists to prevent.
+  // [SPEC:IHI0050H B13.5 Link activation and deactivation]
+  function bit chiLegalTransition(input chiLinkStateE from, input chiLinkStateE to);
+    if (from == to)
+      return 1'b1;
+    case (from)
+      LINK_STOP:       return to == LINK_ACTIVATE;
+      LINK_ACTIVATE:   return to == LINK_RUN;
+      LINK_RUN:        return to == LINK_DEACTIVATE;
+      LINK_DEACTIVATE: return to == LINK_STOP;
+      default:         return 1'b0;
+    endcase
   endfunction
 
   function void chiNoteLink(input chiLinkSampleT sample);
+    if (!lastTxState.exists(sample.nodeOrdinal)) begin
+      lastTxState[sample.nodeOrdinal] = LINK_STOP;
+      lastRxState[sample.nodeOrdinal] = LINK_STOP;
+    end
+    if (!chiLegalTransition(lastTxState[sample.nodeOrdinal], sample.txState))
+      `uvm_error("topLinkModel",
+        $sformatf("ordinal %0d TX link went %s to %s, which is not a step of the cycle",
+                  sample.nodeOrdinal, lastTxState[sample.nodeOrdinal].name(),
+                  sample.txState.name()))
+    if (!chiLegalTransition(lastRxState[sample.nodeOrdinal], sample.rxState))
+      `uvm_error("topLinkModel",
+        $sformatf("ordinal %0d RX link went %s to %s, which is not a step of the cycle",
+                  sample.nodeOrdinal, lastRxState[sample.nodeOrdinal].name(),
+                  sample.rxState.name()))
+    lastTxState[sample.nodeOrdinal] = sample.txState;
+    lastRxState[sample.nodeOrdinal] = sample.rxState;
     if (sample.txState == LINK_RUN)
       sawTxRun[sample.nodeOrdinal] = 1'b1;
     if (sample.rxState == LINK_RUN)

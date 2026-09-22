@@ -88,6 +88,7 @@ interface chiMonitorBfm (
 
   chiGlobalsPkg::chiFlitSampleT flitQueue [$];
   chiGlobalsPkg::chiLinkSampleT linkQueue [$];
+  chiGlobalsPkg::chiCreditSampleT creditQueue [$];
 
   // Latched error pulses, cleared only when the proxy takes them.
   bit parityErrorLatched;
@@ -213,17 +214,53 @@ interface chiMonitorBfm (
     end
   endtask
 
+  // Counting credits is not enough for the link reference model: it has to
+  // compare credits against flits as they happen, because a flit sent one
+  // cycle before its credit arrives is a protocol violation that an
+  // end-of-test total would hide. So every grant is pushed as an event.
+  function automatic void pushCredit(
+      input chiGlobalsPkg::chiChannelE channel,
+      input chiGlobalsPkg::chiDirE direction);
+    chiGlobalsPkg::chiCreditSampleT sample;
+    sample.nodeOrdinal = nodeOrdinal;
+    sample.channel     = channel;
+    sample.direction   = direction;
+    sample.sampleTime  = $time;
+    creditQueue.push_back(sample);
+  endfunction
+
   task automatic creditSampleLoop();
     forever begin
       @(posedge CLK);
       if (RESETn === 1'b1) begin
-        if (TXREQLCRDV === 1'b1) txReqCreditCount++;
-        if (TXRSPLCRDV === 1'b1) txRspCreditCount++;
-        if (TXDATLCRDV === 1'b1) txDatCreditCount++;
-        if (RXREQLCRDV === 1'b1) rxReqCreditCount++;
-        if (RXRSPLCRDV === 1'b1) rxRspCreditCount++;
-        if (RXDATLCRDV === 1'b1) rxDatCreditCount++;
-        if (RXSNPLCRDV === 1'b1) rxSnpCreditCount++;
+        if (TXREQLCRDV === 1'b1) begin
+          txReqCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_REQ, chiGlobalsPkg::CHI_DIR_TX);
+        end
+        if (TXRSPLCRDV === 1'b1) begin
+          txRspCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_RSP, chiGlobalsPkg::CHI_DIR_TX);
+        end
+        if (TXDATLCRDV === 1'b1) begin
+          txDatCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_DAT, chiGlobalsPkg::CHI_DIR_TX);
+        end
+        if (RXREQLCRDV === 1'b1) begin
+          rxReqCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_REQ, chiGlobalsPkg::CHI_DIR_RX);
+        end
+        if (RXRSPLCRDV === 1'b1) begin
+          rxRspCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_RSP, chiGlobalsPkg::CHI_DIR_RX);
+        end
+        if (RXDATLCRDV === 1'b1) begin
+          rxDatCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_DAT, chiGlobalsPkg::CHI_DIR_RX);
+        end
+        if (RXSNPLCRDV === 1'b1) begin
+          rxSnpCreditCount++;
+          pushCredit(chiGlobalsPkg::CHI_CH_SNP, chiGlobalsPkg::CHI_DIR_RX);
+        end
       end
     end
   endtask
@@ -317,6 +354,18 @@ interface chiMonitorBfm (
     if (linkQueue.size() == 0)
       return 1'b0;
     sample = linkQueue.pop_front();
+    return 1'b1;
+  endfunction
+
+  task automatic getCreditSample(output chiGlobalsPkg::chiCreditSampleT sample);
+    wait (creditQueue.size() > 0);
+    sample = creditQueue.pop_front();
+  endtask
+
+  function automatic bit tryGetCreditSample(output chiGlobalsPkg::chiCreditSampleT sample);
+    if (creditQueue.size() == 0)
+      return 1'b0;
+    sample = creditQueue.pop_front();
     return 1'b1;
   endfunction
 

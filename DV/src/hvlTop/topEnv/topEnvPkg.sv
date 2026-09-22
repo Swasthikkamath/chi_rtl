@@ -24,6 +24,7 @@ package topEnvPkg;
   `include "topSnpSink.sv"
   `include "topLinkSink.sv"
   `include "topFlitSink.sv"
+  `include "topCreditSink.sv"
   `include "topScoreboard.sv"
   `include "chiVirtualSequencer.sv"
   `include "chiEnv.sv"

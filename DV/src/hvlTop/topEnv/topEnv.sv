@@ -57,6 +57,7 @@ class topEnv extends uvm_env;
     agent.monitor.txDatPort.connect(scoreboard.txDatSink[ordinal].analysis_export);
     agent.monitor.rxDatPort.connect(scoreboard.rxDatSink[ordinal].analysis_export);
     agent.monitor.rxSnpPort.connect(scoreboard.rxSnpSink[ordinal].analysis_export);
+    agent.monitor.creditPort.connect(scoreboard.creditSink[ordinal].analysis_export);
     agent.monitor.linkPort.connect(scoreboard.linkSink[ordinal].analysis_export);
     if (agent.sequencer == null)
       return;
@@ -77,6 +78,7 @@ class topEnv extends uvm_env;
     // have no typed port. Connecting the typed ports as well would count
     // those flits twice.
     agent.monitor.flitPort.connect(scoreboard.flitSink[ordinal].analysis_export);
+    agent.monitor.creditPort.connect(scoreboard.creditSink[ordinal].analysis_export);
     agent.monitor.linkPort.connect(scoreboard.linkSink[ordinal].analysis_export);
     if (agent.sequencer == null)
       return;

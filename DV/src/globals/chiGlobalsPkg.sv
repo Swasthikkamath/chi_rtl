@@ -1128,6 +1128,17 @@ package chiGlobalsPkg;
     time          sampleTime;
   } chiFlitSampleT;
 
+  // One L-Credit grant. The channel and direction name the channel the
+  // credit permits a flit on, so a credit counted here and a flit counted
+  // from chiFlitSampleT with the same channel and direction are the two
+  // sides of the same ledger. [SPEC:IHI0050H B14.2 Flow control]
+  typedef struct {
+    int unsigned  nodeOrdinal;
+    chiChannelE   channel;
+    chiDirE       direction;
+    time          sampleTime;
+  } chiCreditSampleT;
+
   typedef struct {
     int unsigned  nodeOrdinal;
     bit           linkUp;

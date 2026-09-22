@@ -22,6 +22,7 @@ class topScoreboard extends uvm_component;
   topSnpSink rxSnpSink[int unsigned];
   topLinkSink linkSink[int unsigned];
   topFlitSink flitSink[int unsigned];
+  topCreditSink creditSink[int unsigned];
 
   `uvm_component_utils(topScoreboard)
 
@@ -71,6 +72,7 @@ class topScoreboard extends uvm_component;
       rxDatSink[ordinal] = chiMakeDatSink($sformatf("rxDatSink%0d", ordinal), ordinal, nodeClass, 1'b0);
       rxSnpSink[ordinal] = chiMakeSnpSink($sformatf("rxSnpSink%0d", ordinal), ordinal, nodeClass);
       linkSink[ordinal] = chiMakeLinkSink($sformatf("linkSink%0d", ordinal), ordinal);
+      creditSink[ordinal] = chiMakeCreditSink($sformatf("creditSink%0d", ordinal));
       if (!nodeClassIsRequester(nodeClass))
         flitSink[ordinal] = chiMakeFlitSink($sformatf("flitSink%0d", ordinal), ordinal);
     end
@@ -142,6 +144,13 @@ class topScoreboard extends uvm_component;
     return sink;
   endfunction
 
+  function topCreditSink chiMakeCreditSink(input string name);
+    topCreditSink sink;
+    sink = topCreditSink::type_id::create(name, this);
+    sink.sb = this;
+    return sink;
+  endfunction
+
   function topLinkSink chiMakeLinkSink(input string name, input int unsigned ordinal);
     topLinkSink sink;
     sink = topLinkSink::type_id::create(name, this);
@@ -160,6 +169,9 @@ class topScoreboard extends uvm_component;
       isTx ? CHI_DIR_TX : CHI_DIR_RX, flit.opcode == REQ_LCRD_RETURN);
     lifecycleModel.chiNoteReq(ordinal, nodeClass, isTx, flit);
     memoryModel.chiNoteReq(ordinal, nodeClass, isTx, flit);
+    // The directory model needs the request too: a completion carries no
+    // address, so without this it cannot tell which line was acquired.
+    directoryModel.chiNoteReq(ordinal, nodeClass, isTx, flit);
     if (cov != null)
       cov.chiSampleReq(nodeClass, isTx, flit);
   endfunction
@@ -205,6 +217,10 @@ class topScoreboard extends uvm_component;
     linkModel.chiNoteLink(sample);
   endfunction
 
+  function void chiNoteCredit(input chiCreditSampleT sample);
+    linkModel.chiNoteCredit(sample);
+  endfunction
+
   function void chiNoteSample(input chiFlitSampleT sample);
     bit isTx;
     isTx = (sample.direction == CHI_DIR_TX);
@@ -221,6 +237,12 @@ class topScoreboard extends uvm_component;
     foreach (bfmByOrdinal[ordinal]) begin
       chiFlitSampleT flitSample;
       chiLinkSampleT linkSample;
+      chiCreditSampleT creditSample;
+      // Credits first: a flit drained here was sent against a credit that
+      // may also still be queued, and crediting after spending would report
+      // an overdraft that never happened.
+      while (bfmByOrdinal[ordinal].tryGetCreditSample(creditSample))
+        chiNoteCredit(creditSample);
       while (bfmByOrdinal[ordinal].tryGetFlitSample(flitSample))
         chiNoteSample(flitSample);
       while (bfmByOrdinal[ordinal].tryGetLinkSample(linkSample))

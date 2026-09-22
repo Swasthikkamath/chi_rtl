@@ -16,6 +16,7 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
   uvm_analysis_port#(chiReqFlitT) rxReqPort;
   uvm_analysis_port#(chiDatFlitT) rxDatPort;
   uvm_analysis_port#(chiFlitSampleT) flitPort;
+  uvm_analysis_port#(chiCreditSampleT) creditPort;
   uvm_analysis_port#(chiLinkSampleT) linkPort;
 
   `uvm_component_utils(chiSubordinateMonitorProxy)
@@ -27,6 +28,7 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
     rxReqPort = new("rxReqPort", this);
     rxDatPort = new("rxDatPort", this);
     flitPort = new("flitPort", this);
+    creditPort = new("creditPort", this);
     linkPort = new("linkPort", this);
   endfunction
 
@@ -46,6 +48,7 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
     bfm.monitorStart();
     fork
       chiWatchFlits();
+      chiWatchCredits();
       chiWatchLink();
     join_none
     wait(0);
@@ -79,6 +82,14 @@ class chiSubordinateMonitorProxy extends uvm_monitor;
             "SNP observed on a Subordinate port, which has no snoop channel")
         end
       endcase
+    end
+  endtask
+
+  task automatic chiWatchCredits();
+    chiCreditSampleT sample;
+    forever begin
+      bfm.getCreditSample(sample);
+      creditPort.write(sample);
     end
   endtask
 
