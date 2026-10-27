@@ -87,9 +87,16 @@ module chi_hni_top #(
                           REQ_READ_ONCE_MAKE_INVALID};
   endfunction
 
+  // The HN-I decode never hashes, but the SAM still takes a hash table. It is
+  // passed as a typed one-entry array: an assignment pattern written against
+  // the parameter would be sized by the SAM's default NUM_HNF before the
+  // override applies, which some tools reject.
+  localparam logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
+    HNI_HASH_NODE_IDS [0:0] = '{HN_NODE_ID};
+
   chi_sam #(
     .CFG(CFG), .NUM_REGIONS(NUM_REGIONS), .HASH_TO_HNF(1'b0),
-    .NUM_HNF(1), .HN_NODE_IDS('{HN_NODE_ID}),
+    .NUM_HNF(1), .HN_NODE_IDS(HNI_HASH_NODE_IDS),
     .REGION_BASE(REGION_BASE), .REGION_LIMIT(REGION_LIMIT),
     .REGION_TARGET(REGION_TARGET), .REGION_ATTRIBUTES(REGION_ATTRIBUTES)
   ) hni_sam (

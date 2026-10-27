@@ -6,10 +6,17 @@ module chi_hnf_top #(
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     RNF_NODE_IDS [NUM_RNF] = '{default:'0},
   parameter bit COMBINED_COMP_DBID = 1'b1,
-  parameter bit COMBINED_COMP_STASH_DONE = 1'b1
+  parameter bit COMBINED_COMP_STASH_DONE = 1'b1,
+  // Capabilities of the SN-F this Home is striped to and of every RN-F as a
+  // DCT forwarder (IHI 0050H B16.1.3, B16.1.5).
+  parameter bit SN_DMT_CAP = 1'b1,
+  parameter bit SN_DWT_CAP = 1'b1,
+  parameter logic [NUM_RNF-1:0] RNF_DCT_CAP = '1
 ) (
   input  logic clk,
   input  logic resetn,
+  // Run-time policy, committed over APB while the fabric is quiescent.
+  input  chi_cfg_pkg::chi_hnf_policy_t policy,
   input  logic reqInValid,
   output logic reqInReady,
   input  chi_pkg::chi_noc_flit_t reqInFlit,
@@ -155,6 +162,7 @@ module chi_hnf_top #(
   chi_dat_flit_t snoopDat;
 
   logic dctEligible;
+  logic dctEligibleRaw;
   logic dctFallback;
   chi_snp_opcode_e dctOpcode;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] dctFwdNid;
@@ -194,10 +202,12 @@ module chi_hnf_top #(
   logic activeGotPersist;
 
   logic dmtEligible;
+  logic dmtEligibleRaw;
   logic dmtSeparateResponse;
   logic [CHI_NODEID_SLOT_W-1:0] dmtReturnNid;
   logic [CHI_TXNID_FLIT_W-1:0] dmtReturnTxnId;
   logic dwtEligible;
+  logic dwtEligibleRaw;
   logic dwtDoDwt;
   logic [CHI_NODEID_SLOT_W-1:0] dwtReturnNid;
   logic [CHI_TXNID_FLIT_W-1:0] dwtReturnTxnId;
@@ -812,7 +822,7 @@ module chi_hnf_top #(
     .forwarderKnown(sfHasOwner), .forwarder(RNF_NODE_IDS[sfOwner]),
     .forwarderClean(sfPrecise), .dataPresent(sfHit), .dataFullLine(sfPrecise),
     .dataPoison(1'b0), .dataError(1'b0), .responseCompatible(1'b1),
-    .mteCompatible(!CFG.mteEn), .eligible(dctEligible),
+    .mteCompatible(!CFG.mteEn), .eligible(dctEligibleRaw),
     .fallbackToHome(dctFallback), .snoopOpcode(dctOpcode),
     .fwdNid(dctFwdNid), .fwdTxnId(dctFwdTxn), .retToSrc(dctRetToSrc)
   );
@@ -822,7 +832,7 @@ module chi_hnf_top #(
     .requester(incomingReq.srcId), .requesterTxnId(incomingReq.txnId),
     .snoopRequired(sfHit && (sfSharers != '0)), .errorDetected(1'b0),
     .exclusiveAccess(incomingReq.exclOrSnoopMeOrCah),
-    .atomicAccess(atomicRequest), .eligible(dmtEligible),
+    .atomicAccess(atomicRequest), .eligible(dmtEligibleRaw),
     .separateResponse(dmtSeparateResponse), .returnNid(dmtReturnNid),
     .returnTxnId(dmtReturnTxnId)
   );
@@ -834,9 +844,17 @@ module chi_hnf_top #(
     .exclusiveAccess(incomingReq.exclOrSnoopMeOrCah),
     .atomicAccess(atomicRequest),
     .tagOperation(incomingReq.tagOp != TAG_OP_INVALID),
-    .eligible(dwtEligible), .doDwt(dwtDoDwt), .returnNid(dwtReturnNid),
+    .eligible(dwtEligibleRaw), .doDwt(dwtDoDwt), .returnNid(dwtReturnNid),
     .returnTxnId(dwtReturnTxnId)
   );
+
+  // A direct transfer needs the global enable (inside each controller), the
+  // capability of the node involved, and the run-time policy.
+  always_comb begin
+    dctEligible = dctEligibleRaw && policy.dctEn && RNF_DCT_CAP[sfOwner];
+    dmtEligible = dmtEligibleRaw && policy.dmtEn && SN_DMT_CAP;
+    dwtEligible = dwtEligibleRaw && policy.dwtEn && SN_DWT_CAP;
+  end
 
   // ReadReceipt tells the Requester its request has been accepted and will
   // not be retried, which is what Order = Request accepted asks for

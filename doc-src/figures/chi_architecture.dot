@@ -45,7 +45,8 @@ digraph chiArchitecture {
     label=<<table border="0" cellborder="0" cellspacing="1">
       <tr><td><b>chi_noc_top</b>   topology = CROSSBAR | RING | MESH_2D</td></tr>
       <tr><td>independent REQ / RSP / SNP / DAT networks, ready-valid</td></tr>
-      <tr><td>chi_route_compute, chi_router, chi_vc_arb (QoS, AGE_LIMIT)</td></tr>
+      <tr><td>chi_xp crosspoints: chi_router, chi_route_compute, chi_vc_arb</td></tr>
+      <tr><td>routes on TgtID only; automatic placement</td></tr>
     </table>>];
 
   subgraph cluster_home {

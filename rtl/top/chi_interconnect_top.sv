@@ -7,9 +7,24 @@ module chi_interconnect_top #(
     + CFG.numHnf + CFG.numHni + CFG.numMn,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     NODE_IDS [NUM_NODES-1:0] = '{default:'1},
+  // 1 places every node automatically for any population (autoPlacements in
+  // chi_pkg); 0 takes PLACEMENTS as given, after validation.
   parameter bit USE_DEFAULT_PLACEMENTS = 1'b1,
   parameter chi_cfg_pkg::chi_mesh_placement_t
     PLACEMENTS [NUM_NODES-1:0] = '{default:'0},
+  // A crossbar's link count grows with the square of its crosspoint count, so
+  // elaboration refuses a CROSSBAR wider than this.
+  parameter int unsigned XBAR_MAX_XP = 8,
+  // SN-F index of each HN-F when CFG.hnfSnfMap is HNF_SNF_MAP_TABLE.
+  parameter int unsigned
+    HNF_TO_SNF [(CFG.numHnf > 0 ? CFG.numHnf : 1)-1:0] = '{default:0},
+  // Per-node capabilities: SN-F i supports DMT or DWT, RN-F i can act as the
+  // forwarding Snoopee of DCT (IHI 0050H B16.1.3, B16.1.5). A direct transfer
+  // is used only when the global enable in CFG, the capability of the node
+  // involved and the HN-F run-time policy all allow it.
+  parameter logic [(CFG.numSnf > 0 ? CFG.numSnf : 1)-1:0] SNF_DMT_CAP = '1,
+  parameter logic [(CFG.numSnf > 0 ? CFG.numSnf : 1)-1:0] SNF_DWT_CAP = '1,
+  parameter logic [(CFG.numRnf > 0 ? CFG.numRnf : 1)-1:0] RNF_DCT_CAP = '1,
   parameter logic [CFG.addrW-1:0] CFG_MMIO_BASE =
     {CFG.addrW{1'b1}} - CFG.addrW'(12'hfff),
   parameter bit USE_DEFAULT_REGIONS = 1'b1,
@@ -65,6 +80,7 @@ module chi_interconnect_top #(
   localparam int unsigned OFF_MN  = OFF_HNI + CFG.numHni;
 
   typedef logic [CHI_MAX_NODEID_W-1:0] node_id_array_t [NUM_NODES-1:0];
+  typedef chi_mesh_placement_t placement_array_t [NUM_NODES-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] hnf_id_array_t [NUM_HNF_E-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] snf_id_array_t [NUM_SNF_E];
   typedef logic [CHI_MAX_NODEID_W-1:0]
@@ -74,23 +90,47 @@ module chi_interconnect_top #(
   typedef logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] region_target_array_t [NUM_REGIONS-1:0];
   typedef logic [3:0] region_attr_array_t [NUM_REGIONS-1:0];
 
-  function automatic node_id_array_t makeNodeIds();
-    node_id_array_t values;
+  function automatic chi_hnf_snf_table_t makeHnfSnfTable();
+    chi_hnf_snf_table_t values;
+    for (int unsigned i = 0; i < CHI_MAX_HNF; i++)
+      values[i] = '0;
+    for (int unsigned i = 0; (i < CFG.numHnf) && (i < CHI_MAX_HNF); i++)
+      values[i] = 8'(HNF_TO_SNF[i]);
+    return values;
+  endfunction
+
+  localparam chi_hnf_snf_table_t HNF_SNF_TABLE = makeHnfSnfTable();
+  localparam chi_placement_table_t AUTO_PLACEMENTS =
+    autoPlacements(CFG, HNF_SNF_TABLE);
+
+  function automatic placement_array_t makePlacements();
+    placement_array_t values;
     for (int unsigned i = 0; i < NUM_NODES; i++) begin
-      if (NODE_IDS[i] == {CHI_MAX_NODEID_W{1'b1}})
-        values[i] = defaultNodeId(CFG, i);
+      if (!USE_DEFAULT_PLACEMENTS)
+        values[i] = PLACEMENTS[i];
+      else if (i < CHI_MAX_NODES)
+        values[i] = AUTO_PLACEMENTS[i];
       else
-        values[i] = NODE_IDS[i];
+        values[i] = '0;
     end
     return values;
   endfunction
 
-  function automatic chi_mesh_placement_t effectivePlacement(
-    input int unsigned ordinal
-  );
-    if (USE_DEFAULT_PLACEMENTS)
-      return defaultMeshPlacement(ordinal);
-    return PLACEMENTS[ordinal];
+  localparam placement_array_t EFFECTIVE_PLACEMENTS = makePlacements();
+
+  // An all-ones NODE_IDS entry asks for the NodeID that encodes the node's
+  // placement, with the node ordinal in the deviceId field.
+  function automatic node_id_array_t makeNodeIds();
+    node_id_array_t values;
+    for (int unsigned i = 0; i < NUM_NODES; i++) begin
+      if (NODE_IDS[i] == {CHI_MAX_NODEID_W{1'b1}})
+        values[i] = encodeXpNodeId(
+          CFG, xpIndexOfPlacement(CFG, EFFECTIVE_PLACEMENTS[i]),
+          int'(EFFECTIVE_PLACEMENTS[i].devicePort), i);
+      else
+        values[i] = NODE_IDS[i];
+    end
+    return values;
   endfunction
 
   function automatic hnf_id_array_t makeHnfIds(input node_id_array_t ids);
@@ -233,15 +273,6 @@ module chi_interconnect_top #(
     makeRegionTarget(EFFECTIVE_NODE_IDS);
   localparam region_attr_array_t EFFECTIVE_REGION_ATTRIBUTES =
     makeRegionAttributes();
-  localparam chi_default_placement_array_t DEFAULT_PLACEMENTS = '{
-    0: defaultMeshPlacement(0), 1: defaultMeshPlacement(1),
-    2: defaultMeshPlacement(2), 3: defaultMeshPlacement(3),
-    4: defaultMeshPlacement(4), 5: defaultMeshPlacement(5),
-    6: defaultMeshPlacement(6), 7: defaultMeshPlacement(7),
-    8: defaultMeshPlacement(8), 9: defaultMeshPlacement(9),
-    10: defaultMeshPlacement(10), 11: defaultMeshPlacement(11),
-    12: defaultMeshPlacement(12), 13: defaultMeshPlacement(13)
-  };
 
   logic [NUM_NODES-1:0] reqInValid;
   logic [NUM_NODES-1:0] reqInReady;
@@ -299,6 +330,20 @@ module chi_interconnect_top #(
   logic [(CFG.numHnf > 0 ? CFG.numHnf : 1)-1:0] hnfIdle;
   logic [(CFG.numMn > 0 ? CFG.numMn : 1)-1:0] mnIdle;
   logic trafficQuiescent;
+  // Run-time policy of each HN-F, from the APB policy block or its reset
+  // value when there is no APB access.
+  chi_hnf_policy_t hnfPolicy [NUM_HNF_E];
+  // APB register blocks. PADDR[11:8] selects a 256-byte block: 0 is the
+  // region editor, 1 the HN-F policy registers.
+  logic apbRegionSelect;
+  logic apbPolicySelect;
+  logic [31:0] apbRegionRdata;
+  logic [31:0] apbPolicyRdata;
+  logic apbRegionReady;
+  logic apbPolicyReady;
+  logic apbRegionError;
+  logic apbPolicyError;
+  logic fabricRouteError;
 
   generate
     begin : chi_cfg_check
@@ -388,15 +433,38 @@ module chi_interconnect_top #(
                           + CFG.numSnf + CFG.numSni + CFG.numHnf
                           + CFG.numHni + CFG.numMn))
           $fatal(1, "NUM_NODES must equal the sum of configured nodes");
-        if (USE_DEFAULT_PLACEMENTS && (NUM_NODES != 14))
-          $fatal(1, "Default placements are defined only for 14 nodes");
-        if ((CFG.topology == MESH_2D)
-            && ((CFG.meshX == 0) || (CFG.meshY == 0)
-                || (CFG.numDevPortsPerXp == 0)
-                || (deviceIdWidth(CFG) <= 0)
-                || ((CFG.meshX * CFG.meshY * CFG.numDevPortsPerXp)
-                    < NUM_NODES)))
-          $fatal(1, "Invalid or undersized mesh dimensions");
+        // Fabric geometry. Every topology is numXp crosspoints with
+        // numDevPortsPerXp device ports each, and every node needs a port.
+        if ((CFG.topology == MESH_2D) && ((CFG.meshX == 0) || (CFG.meshY == 0)))
+          $fatal(1, "MESH_2D needs positive meshX and meshY");
+        if ((numXpOf(CFG) == 0) || (CFG.numDevPortsPerXp == 0))
+          $fatal(1, "The fabric needs at least one crosspoint and one device port per crosspoint");
+        if ((numXpOf(CFG) > CHI_MAX_XP)
+            || (CFG.numDevPortsPerXp > CHI_MAX_DEV_PORTS))
+          $fatal(1, "At most %0d crosspoints and %0d device ports per crosspoint are supported",
+                 CHI_MAX_XP, CHI_MAX_DEV_PORTS);
+        if ((numXpOf(CFG) * CFG.numDevPortsPerXp) < NUM_NODES)
+          $fatal(1, "numXp * numDevPortsPerXp = %0d device ports cannot hold NUM_NODES = %0d",
+                 numXpOf(CFG) * CFG.numDevPortsPerXp, NUM_NODES);
+        if ((CFG.topology == RING) && (CFG.numXp < 2))
+          $fatal(1, "RING needs at least two crosspoints, numXp is %0d",
+                 CFG.numXp);
+        if ((CFG.topology == CROSSBAR) && (CFG.numXp > XBAR_MAX_XP))
+          $fatal(1, "CROSSBAR numXp %0d exceeds XBAR_MAX_XP %0d",
+                 CFG.numXp, XBAR_MAX_XP);
+        // The NodeID must hold the routing fields; deviceId may be empty.
+        if (deviceIdWidth(CFG) < 0)
+          $fatal(1, "nodeIdW %0d cannot encode {xpId, devicePort}; the minimum nodeIdW for this topology is %0d",
+                 CFG.nodeIdW, minNodeIdWidth(CFG));
+        if (USE_DEFAULT_PLACEMENTS && (NUM_NODES > CHI_MAX_NODES))
+          $fatal(1, "Automatic placement supports at most %0d nodes", CHI_MAX_NODES);
+        if (CFG.numHnf > CHI_MAX_HNF)
+          $fatal(1, "At most %0d HN-F nodes are supported", CHI_MAX_HNF);
+        if ((CFG.hnfSnfMap == HNF_SNF_MAP_TABLE) && (CFG.numHnf > 0))
+          for (int unsigned i = 0; i < CFG.numHnf; i++)
+            if (HNF_TO_SNF[i] >= CFG.numSnf)
+              $fatal(1, "HNF_TO_SNF[%0d] = %0d names an SN-F that does not exist (numSnf = %0d)",
+                     i, HNF_TO_SNF[i], CFG.numSnf);
         if ((CFG.cfgAccess == CFG_CHI_MMIO) && (CFG.numHni == 0))
           $fatal(1, "CHI-MMIO configuration requires HN-I");
         if ((CFG.cfgAccess != CFG_PARAM_ONLY) && (CFG.cfgAccess != CFG_APB)
@@ -408,32 +476,46 @@ module chi_interconnect_top #(
         if ((CFG.cfgAccess == CFG_APB) && (NUM_REGIONS == 0))
           $fatal(1, "APB configuration requires a region table");
         for (int unsigned i = 0; i < NUM_NODES; i++) begin
-          placement = effectivePlacement(i);
+          placement = EFFECTIVE_PLACEMENTS[i];
           if (!placement.valid)
-            $fatal(1, "Every node must have a placement");
+            $fatal(1, "Node %0d has no placement", i);
           if ((placement.nodeClass != nodeClassForOrdinal(CFG, i))
               || (int'(placement.nodeIndex)
                   != nodeIndexForOrdinal(CFG, i)))
-            $fatal(1, "Placement class/index does not match node ordinal");
-          if ((int'(placement.meshX) >= CFG.meshX)
-              || (int'(placement.meshY) >= CFG.meshY)
-              || (int'(placement.devicePort)
-                  >= CFG.numDevPortsPerXp))
-            $fatal(1, "Node placement is out of range");
-          if ((nodeIdMeshX(CFG, EFFECTIVE_NODE_IDS[i])
-                != int'(placement.meshX))
-              || (nodeIdMeshY(CFG, EFFECTIVE_NODE_IDS[i])
-                != int'(placement.meshY))
+            $fatal(1, "Placement class/index of node %0d does not match its ordinal", i);
+          if (CFG.topology == MESH_2D) begin
+            if ((int'(placement.meshX) >= CFG.meshX)
+                || (int'(placement.meshY) >= CFG.meshY))
+              $fatal(1, "Node %0d is placed outside the mesh", i);
+          end else if ((int'(placement.meshX) >= CFG.numXp)
+                       || (placement.meshY != '0)) begin
+            $fatal(1, "Node %0d names crosspoint %0d of %0d; meshY must be zero for RING and CROSSBAR",
+                   i, placement.meshX, CFG.numXp);
+          end
+          if (int'(placement.devicePort) >= CFG.numDevPortsPerXp)
+            $fatal(1, "Node %0d names device port %0d of %0d",
+                   i, placement.devicePort, CFG.numDevPortsPerXp);
+          if ((EFFECTIVE_NODE_IDS[i] >> CFG.nodeIdW) != '0)
+            $fatal(1, "NodeID of node %0d does not fit in nodeIdW %0d",
+                   i, CFG.nodeIdW);
+          // The crosspoints route on these fields alone.
+          if ((nodeIdXpIndex(CFG, EFFECTIVE_NODE_IDS[i])
+                != xpIndexOfPlacement(CFG, placement))
               || (nodeIdDevicePort(CFG, EFFECTIVE_NODE_IDS[i])
-                != int'(placement.devicePort)))
-            $fatal(1, "NodeID routing fields do not match placement");
+                != int'(placement.devicePort))
+              || ((CFG.topology == MESH_2D)
+                  && ((nodeIdMeshX(CFG, EFFECTIVE_NODE_IDS[i])
+                       != int'(placement.meshX))
+                      || (nodeIdMeshY(CFG, EFFECTIVE_NODE_IDS[i])
+                       != int'(placement.meshY)))))
+            $fatal(1, "NodeID routing fields of node %0d do not match its placement", i);
           for (int unsigned j = i + 1; j < NUM_NODES; j++) begin
             if (EFFECTIVE_NODE_IDS[i] == EFFECTIVE_NODE_IDS[j])
-              $fatal(1, "NodeIDs must be unique");
-            if ((placement.meshX == effectivePlacement(j).meshX)
-                && (placement.meshY == effectivePlacement(j).meshY)
-                && (placement.devicePort == effectivePlacement(j).devicePort))
-              $fatal(1, "Node placements must not collide");
+              $fatal(1, "Nodes %0d and %0d have the same NodeID", i, j);
+            if ((xpIndexOfPlacement(CFG, placement)
+                 == xpIndexOfPlacement(CFG, EFFECTIVE_PLACEMENTS[j]))
+                && (placement.devicePort == EFFECTIVE_PLACEMENTS[j].devicePort))
+              $fatal(1, "Nodes %0d and %0d are placed on the same device port", i, j);
           end
         end
       end
@@ -468,6 +550,11 @@ module chi_interconnect_top #(
   end
 
   if (CFG.cfgAccess == CFG_APB) begin : apb_cfg
+    always_comb begin
+      apbRegionSelect = PSEL && (PADDR[11:8] == 4'h0);
+      apbPolicySelect = PSEL && (PADDR[11:8] == 4'h1);
+    end
+
     chi_cfg_slave #(
       .CFG(CFG), .NUM_REGIONS(NUM_REGIONS),
       .REGION_BASE(EFFECTIVE_REGION_BASE),
@@ -475,8 +562,9 @@ module chi_interconnect_top #(
       .REGION_TARGET(EFFECTIVE_REGION_TARGET),
       .REGION_ATTRIBUTES(EFFECTIVE_REGION_ATTRIBUTES)
     ) cfg_slave (
-      .PCLK(clk), .PRESETn(resetn), .PADDR, .PSEL, .PENABLE, .PWRITE,
-      .PWDATA, .PSTRB, .PPROT, .PRDATA, .PREADY, .PSLVERR,
+      .PCLK(clk), .PRESETn(resetn), .PADDR, .PSEL(apbRegionSelect), .PENABLE,
+      .PWRITE, .PWDATA, .PSTRB, .PPROT, .PRDATA(apbRegionRdata),
+      .PREADY(apbRegionReady), .PSLVERR(apbRegionError),
       .trafficQuiescent, .regionUpdate(apbRegionUpdate),
       .regionUpdateIndex(apbRegionUpdateIndex),
       .regionUpdateBase(apbRegionUpdateBase),
@@ -484,6 +572,30 @@ module chi_interconnect_top #(
       .regionUpdateTarget(apbRegionUpdateTarget),
       .regionUpdateAttributes(apbRegionUpdateAttributes)
     );
+
+    chi_hnf_policy_regs #(
+      .CFG(CFG), .NUM_HNF(NUM_HNF_E)
+    ) policy_regs (
+      .PCLK(clk), .PRESETn(resetn), .PADDR(PADDR[7:0]),
+      .PSEL(apbPolicySelect), .PENABLE, .PWRITE, .PWDATA, .PSTRB, .PPROT,
+      .PRDATA(apbPolicyRdata), .PREADY(apbPolicyReady),
+      .PSLVERR(apbPolicyError), .trafficQuiescent, .policy(hnfPolicy)
+    );
+
+    always_comb begin
+      PRDATA = '0;
+      PREADY = 1'b1;
+      PSLVERR = PSEL && PENABLE;
+      if (apbRegionSelect) begin
+        PRDATA = apbRegionRdata;
+        PREADY = apbRegionReady;
+        PSLVERR = apbRegionError;
+      end else if (apbPolicySelect) begin
+        PRDATA = apbPolicyRdata;
+        PREADY = apbPolicyReady;
+        PSLVERR = apbPolicyError;
+      end
+    end
   end else begin : no_apb_cfg
     always_comb begin
       PRDATA = '0;
@@ -495,6 +607,17 @@ module chi_interconnect_top #(
       apbRegionUpdateLimit = '0;
       apbRegionUpdateTarget = '0;
       apbRegionUpdateAttributes = '0;
+      apbRegionSelect = 1'b0;
+      apbPolicySelect = 1'b0;
+      apbRegionRdata = '0;
+      apbPolicyRdata = '0;
+      apbRegionReady = 1'b1;
+      apbPolicyReady = 1'b1;
+      apbRegionError = 1'b0;
+      apbPolicyError = 1'b0;
+    end
+    for (genvar i = 0; i < NUM_HNF_E; i++) begin : reset_policy
+      assign hnfPolicy[i] = CHI_HNF_POLICY_DEFAULT;
     end
   end
 
@@ -669,13 +792,18 @@ module chi_interconnect_top #(
   end
 
   for (genvar i = 0; i < CFG.numHnf; i++) begin : hnf_nodes
+    // The SN-F that holds this HN-F's memory, by modulo or by HNF_TO_SNF.
+    localparam int unsigned SNF_INDEX = snfIndexOfHnf(CFG, HNF_SNF_TABLE, i);
     chi_hnf_top #(
       .CFG(CFG), .HN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_HNF+i]),
-      .SN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_SNF+(i % CFG.numSnf)]),
+      .SN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_SNF+SNF_INDEX]),
       .NUM_RNF((CFG.numRnf > 0) ? CFG.numRnf : 1),
-      .RNF_NODE_IDS(RNF_NODE_IDS)
+      .RNF_NODE_IDS(RNF_NODE_IDS),
+      .SN_DMT_CAP(SNF_DMT_CAP[SNF_INDEX]),
+      .SN_DWT_CAP(SNF_DWT_CAP[SNF_INDEX]),
+      .RNF_DCT_CAP(RNF_DCT_CAP)
     ) hnf (
-      .clk, .resetn, .reqInValid(reqOutValid[OFF_HNF+i]),
+      .clk, .resetn, .policy(hnfPolicy[i]), .reqInValid(reqOutValid[OFF_HNF+i]),
       .reqInReady(reqOutReady[OFF_HNF+i]), .reqInFlit(reqOutFlit[OFF_HNF+i]),
       .rspInValid(rspOutValid[OFF_HNF+i]),
       .rspInReady(rspOutReady[OFF_HNF+i]), .rspInFlit(rspOutFlit[OFF_HNF+i]),
@@ -753,33 +881,18 @@ module chi_interconnect_top #(
     assign datOutReady[OFF_MN+i] = 1'b1;
   end
 
-  if (USE_DEFAULT_PLACEMENTS) begin : default_noc_placements
-    chi_noc_top #(
-      .CFG(CFG), .NUM_PORTS(NUM_NODES), .AGE_LIMIT(AGE_LIMIT),
-      .NODE_IDS(EFFECTIVE_NODE_IDS), .PLACEMENTS(DEFAULT_PLACEMENTS)
-    ) noc (
-      .clk, .resetn, .reqInValid, .reqInReady, .reqInFlit,
-      .reqOutValid, .reqOutReady, .reqOutFlit,
-      .rspInValid, .rspInReady, .rspInFlit,
-      .rspOutValid, .rspOutReady, .rspOutFlit,
-      .snpInValid, .snpInReady, .snpInFlit,
-      .snpOutValid, .snpOutReady, .snpOutFlit,
-      .datInValid, .datInReady, .datInFlit,
-      .datOutValid, .datOutReady, .datOutFlit
-    );
-  end else begin : override_noc_placements
-    chi_noc_top #(
-      .CFG(CFG), .NUM_PORTS(NUM_NODES), .AGE_LIMIT(AGE_LIMIT),
-      .NODE_IDS(EFFECTIVE_NODE_IDS), .PLACEMENTS(PLACEMENTS)
-    ) noc (
-      .clk, .resetn, .reqInValid, .reqInReady, .reqInFlit,
-      .reqOutValid, .reqOutReady, .reqOutFlit,
-      .rspInValid, .rspInReady, .rspInFlit,
-      .rspOutValid, .rspOutReady, .rspOutFlit,
-      .snpInValid, .snpInReady, .snpInFlit,
-      .snpOutValid, .snpOutReady, .snpOutFlit,
-      .datInValid, .datInReady, .datInFlit,
-      .datOutValid, .datOutReady, .datOutFlit
-    );
-  end
+  chi_noc_top #(
+    .CFG(CFG), .NUM_PORTS(NUM_NODES), .AGE_LIMIT(AGE_LIMIT),
+    .NODE_IDS(EFFECTIVE_NODE_IDS), .PLACEMENTS(EFFECTIVE_PLACEMENTS)
+  ) noc (
+    .clk, .resetn, .reqInValid, .reqInReady, .reqInFlit,
+    .reqOutValid, .reqOutReady, .reqOutFlit,
+    .rspInValid, .rspInReady, .rspInFlit,
+    .rspOutValid, .rspOutReady, .rspOutFlit,
+    .snpInValid, .snpInReady, .snpInFlit,
+    .snpOutValid, .snpOutReady, .snpOutFlit,
+    .datInValid, .datInReady, .datInFlit,
+    .datOutValid, .datOutReady, .datOutFlit,
+    .routeError(fabricRouteError)
+  );
 endmodule

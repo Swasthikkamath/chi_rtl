@@ -30,10 +30,14 @@ package chi_pkg;
     CHI_CHANNEL_DAT = 2'b11
   } chi_channel_e;
 
+  // Internal fabric flit. hops counts the crosspoint-to-crosspoint links the
+  // flit has crossed; it is fabric bookkeeping, never part of a CHI message,
+  // and lets the bound assertions bound the route length per topology.
   typedef struct packed {
     chi_channel_e channel;
     logic [3:0] qos;
     logic [CHI_MAX_NODEID_W-1:0] targetNodeId;
+    logic [7:0] hops;
     logic [CHI_MAX_NOC_PAYLOAD_W-1:0] payload;
   } chi_noc_flit_t;
 
@@ -429,12 +433,97 @@ package chi_pkg;
     return result;
   endfunction
 
-  function automatic int signed deviceIdWidth(input chi_cfg_t cfg);
-    return $signed(cfg.nodeIdW) - $signed(clog2Min1(cfg.meshY))
-           - $signed(clog2Min1(cfg.meshX))
-           - $signed(clog2Min1(cfg.numDevPortsPerXp));
+  // Size limits for the elaboration-time placement tables. They bound the
+  // configurations automatic placement can handle, not the fabric itself.
+  localparam int unsigned CHI_MAX_NODES = 128;
+  localparam int unsigned CHI_MAX_XP = 256;
+  localparam int unsigned CHI_MAX_DEV_PORTS = 16;
+  localparam int unsigned CHI_MAX_HNF = 64;
+
+  typedef chi_mesh_placement_t chi_placement_table_t [CHI_MAX_NODES];
+  typedef logic [7:0] chi_hnf_snf_table_t [CHI_MAX_HNF];
+
+  // NodeID layout, least significant field first (IHI 0050H B3.2 leaves the
+  // assignment to the implementation):
+  //
+  //   NodeID = {xpId, devicePort, deviceId}
+  //
+  // xpId is {Y, X} for MESH_2D and the crosspoint index for RING and
+  // CROSSBAR. The crosspoints route on xpId and devicePort alone, so deviceId
+  // only distinguishes nodes for software and may be zero bits wide.
+  function automatic int unsigned numXpOf(input chi_cfg_t cfg);
+    return (cfg.topology == MESH_2D) ? (cfg.meshX * cfg.meshY) : cfg.numXp;
   endfunction
 
+  function automatic int unsigned xpIdWidth(input chi_cfg_t cfg);
+    if (cfg.topology == MESH_2D)
+      return clog2Min1(cfg.meshX) + clog2Min1(cfg.meshY);
+    return clog2Min1(cfg.numXp);
+  endfunction
+
+  function automatic int unsigned devPortWidth(input chi_cfg_t cfg);
+    return clog2Min1(cfg.numDevPortsPerXp);
+  endfunction
+
+  function automatic int signed deviceIdWidth(input chi_cfg_t cfg);
+    return $signed(cfg.nodeIdW) - $signed(xpIdWidth(cfg))
+           - $signed(devPortWidth(cfg));
+  endfunction
+
+  // The narrowest NodeID that still carries the routing fields, clamped to
+  // the Issue H minimum NodeID_Width (IHI 0050H B16.1.12).
+  function automatic int unsigned minNodeIdWidth(input chi_cfg_t cfg);
+    int unsigned width;
+    width = xpIdWidth(cfg) + devPortWidth(cfg);
+    return (width < CHI_MIN_NODEID_W) ? CHI_MIN_NODEID_W : width;
+  endfunction
+
+  function automatic logic [CHI_MAX_NODEID_W-1:0] encodeXpNodeId(
+    input chi_cfg_t cfg,
+    input int unsigned xpIndex,
+    input int unsigned devicePort,
+    input int unsigned deviceId
+  );
+    logic [CHI_MAX_NODEID_W-1:0] nodeId;
+    int unsigned bitPos;
+    int signed idWidthSigned;
+    // Every field width is taken once into a local. A loop bound that is itself
+    // a function call would be re-evaluated on each iteration, and Verilator
+    // 5.020 miscompiles that when the callee contains a loop of its own.
+    int unsigned idW;
+    int unsigned portW;
+    int unsigned xW;
+    int unsigned xpW;
+    int unsigned xpField;
+    nodeId = '0;
+    bitPos = 0;
+    idWidthSigned = deviceIdWidth(cfg);
+    idW = (idWidthSigned > 0) ? int'(idWidthSigned) : 0;
+    portW = devPortWidth(cfg);
+    xpW = xpIdWidth(cfg);
+    if (cfg.topology == MESH_2D) begin
+      xW = clog2Min1(cfg.meshX);
+      xpField = ((xpIndex / cfg.meshX) << xW) | (xpIndex % cfg.meshX);
+    end else begin
+      xpField = xpIndex;
+    end
+    for (int i = 0; i < idW; i++) begin
+      nodeId[bitPos] = deviceId[i];
+      bitPos++;
+    end
+    for (int i = 0; i < portW; i++) begin
+      nodeId[bitPos] = devicePort[i];
+      bitPos++;
+    end
+    for (int i = 0; i < xpW; i++) begin
+      nodeId[bitPos] = xpField[i];
+      bitPos++;
+    end
+    return nodeId;
+  endfunction
+
+  // Mesh-coordinate form of encodeXpNodeId, kept for callers that place by
+  // (X, Y).
   function automatic logic [CHI_MAX_NODEID_W-1:0] encodeNodeId(
     input chi_cfg_t cfg,
     input int unsigned meshX,
@@ -442,26 +531,347 @@ package chi_pkg;
     input int unsigned devicePort,
     input int unsigned deviceId
   );
-    logic [CHI_MAX_NODEID_W-1:0] nodeId;
-    int unsigned bitPos;
-    int signed idWidth;
-    // Every field width is taken once into a local. A loop bound that is itself
-    // a function call would be re-evaluated on each iteration, and Verilator
-    // 5.020 miscompiles that when the callee contains a loop of its own.
+    return encodeXpNodeId(cfg, meshY * cfg.meshX + meshX, devicePort,
+                          deviceId);
+  endfunction
+
+  function automatic int unsigned nodeIdField(
+    input logic [CHI_MAX_NODEID_W-1:0] nodeId,
+    input int unsigned base,
+    input int unsigned width
+  );
+    int unsigned value;
+    value = 0;
+    for (int unsigned i = 0; i < width; i++)
+      if ((base + i) < CHI_MAX_NODEID_W)
+        value[i] = nodeId[base + i];
+    return value;
+  endfunction
+
+  function automatic int unsigned nodeIdDeviceId(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
+    int signed idWidthSigned;
+    int unsigned idW;
+    idWidthSigned = deviceIdWidth(cfg);
+    idW = (idWidthSigned > 0) ? int'(idWidthSigned) : 0;
+    return nodeIdField(nodeId, 0, idW);
+  endfunction
+
+  function automatic int unsigned nodeIdDevicePort(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
+    int signed idWidthSigned;
+    int unsigned idW;
     int unsigned portW;
+    idWidthSigned = deviceIdWidth(cfg);
+    idW = (idWidthSigned > 0) ? int'(idWidthSigned) : 0;
+    portW = devPortWidth(cfg);
+    return nodeIdField(nodeId, idW, portW);
+  endfunction
+
+  function automatic int unsigned nodeIdXpField(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
+    int signed idWidthSigned;
+    int unsigned idW;
+    int unsigned portW;
+    int unsigned xpW;
+    idWidthSigned = deviceIdWidth(cfg);
+    idW = (idWidthSigned > 0) ? int'(idWidthSigned) : 0;
+    portW = devPortWidth(cfg);
+    xpW = xpIdWidth(cfg);
+    return nodeIdField(nodeId, idW + portW, xpW);
+  endfunction
+
+  function automatic int unsigned nodeIdMeshX(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
     int unsigned xW;
-    int unsigned yW;
-    nodeId = '0;
-    bitPos = 0;
-    idWidth = deviceIdWidth(cfg);
-    portW = clog2Min1(cfg.numDevPortsPerXp);
     xW = clog2Min1(cfg.meshX);
-    yW = clog2Min1(cfg.meshY);
-    for (int i = 0; i < idWidth; i++) nodeId[bitPos++] = deviceId[i];
-    for (int i = 0; i < portW; i++) nodeId[bitPos++] = devicePort[i];
-    for (int i = 0; i < xW; i++) nodeId[bitPos++] = meshX[i];
-    for (int i = 0; i < yW; i++) nodeId[bitPos++] = meshY[i];
-    return nodeId;
+    return nodeIdXpField(cfg, nodeId) & ((32'd1 << xW) - 32'd1);
+  endfunction
+
+  function automatic int unsigned nodeIdMeshY(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
+    int unsigned xW;
+    xW = clog2Min1(cfg.meshX);
+    return nodeIdXpField(cfg, nodeId) >> xW;
+  endfunction
+
+  // Linear crosspoint index of the node a NodeID names: Y * meshX + X for a
+  // mesh, the xpId field itself for a ring or crossbar.
+  function automatic int unsigned nodeIdXpIndex(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
+    if (cfg.topology == MESH_2D)
+      return nodeIdMeshY(cfg, nodeId) * cfg.meshX + nodeIdMeshX(cfg, nodeId);
+    return nodeIdXpField(cfg, nodeId);
+  endfunction
+
+  function automatic int unsigned xpIndexOfPlacement(
+    input chi_cfg_t cfg,
+    input chi_mesh_placement_t placement
+  );
+    if (cfg.topology == MESH_2D)
+      return int'(placement.meshY) * cfg.meshX + int'(placement.meshX);
+    return int'(placement.meshX);
+  endfunction
+
+  // Network distance in crosspoint-to-crosspoint links between two
+  // crosspoints: Manhattan distance for XY routing, the shorter way round a
+  // ring, one link between distinct crossbar crosspoints.
+  function automatic int unsigned xpDistance(
+    input chi_cfg_t cfg,
+    input int unsigned fromXp,
+    input int unsigned toXp
+  );
+    int unsigned fromX;
+    int unsigned fromY;
+    int unsigned toX;
+    int unsigned toY;
+    int unsigned clockwise;
+    case (cfg.topology)
+      MESH_2D: begin
+        fromX = fromXp % cfg.meshX;
+        fromY = fromXp / cfg.meshX;
+        toX = toXp % cfg.meshX;
+        toY = toXp / cfg.meshX;
+        return ((fromX > toX) ? (fromX - toX) : (toX - fromX))
+               + ((fromY > toY) ? (fromY - toY) : (toY - fromY));
+      end
+      RING: begin
+        clockwise = (toXp >= fromXp) ? (toXp - fromXp)
+                                     : (toXp + cfg.numXp - fromXp);
+        return (clockwise <= (cfg.numXp - clockwise))
+               ? clockwise : (cfg.numXp - clockwise);
+      end
+      default: return (fromXp == toXp) ? 0 : 1;
+    endcase
+  endfunction
+
+  // The longest route the topology can produce, in links.
+  function automatic int unsigned maxXpHops(input chi_cfg_t cfg);
+    case (cfg.topology)
+      MESH_2D: return (cfg.meshX - 1) + (cfg.meshY - 1);
+      RING: return cfg.numXp / 2;
+      default: return (cfg.numXp > 1) ? 1 : 0;
+    endcase
+  endfunction
+
+  // 0 for a corner crosspoint of the mesh, 1 for an edge, 2 for the interior.
+  function automatic int unsigned meshXpClass(
+    input chi_cfg_t cfg,
+    input int unsigned xp
+  );
+    int unsigned x;
+    int unsigned y;
+    logic xEdge;
+    logic yEdge;
+    x = xp % cfg.meshX;
+    y = xp / cfg.meshX;
+    xEdge = (x == 0) || (x == (cfg.meshX - 1));
+    yEdge = (y == 0) || (y == (cfg.meshY - 1));
+    if (xEdge && yEdge) return 0;
+    if (xEdge || yEdge) return 1;
+    return 2;
+  endfunction
+
+  function automatic int unsigned classOffset(
+    input chi_cfg_t cfg,
+    input chi_node_class_e nodeClass
+  );
+    int unsigned offset;
+    offset = 0;
+    if (nodeClass == NODE_RNF) return offset;
+    offset += cfg.numRnf;
+    if (nodeClass == NODE_RND) return offset;
+    offset += cfg.numRnd;
+    if (nodeClass == NODE_RNI) return offset;
+    offset += cfg.numRni;
+    if (nodeClass == NODE_SNF) return offset;
+    offset += cfg.numSnf;
+    if (nodeClass == NODE_SNI) return offset;
+    offset += cfg.numSni;
+    if (nodeClass == NODE_HNF) return offset;
+    offset += cfg.numHnf;
+    if (nodeClass == NODE_HNI) return offset;
+    offset += cfg.numHni;
+    return offset;
+  endfunction
+
+  function automatic int unsigned classCount(
+    input chi_cfg_t cfg,
+    input chi_node_class_e nodeClass
+  );
+    case (nodeClass)
+      NODE_RNF: return cfg.numRnf;
+      NODE_RND: return cfg.numRnd;
+      NODE_RNI: return cfg.numRni;
+      NODE_SNF: return cfg.numSnf;
+      NODE_SNI: return cfg.numSni;
+      NODE_HNF: return cfg.numHnf;
+      NODE_HNI: return cfg.numHni;
+      default:  return cfg.numMn;
+    endcase
+  endfunction
+
+  // The SN-F whose memory an HN-F serves.
+  function automatic int unsigned snfIndexOfHnf(
+    input chi_cfg_t cfg,
+    input chi_hnf_snf_table_t hnfSnfTable,
+    input int unsigned hnfIndex
+  );
+    if (cfg.numSnf == 0) return 0;
+    if (cfg.hnfSnfMap == HNF_SNF_MAP_TABLE) return int'(hnfSnfTable[hnfIndex]);
+    return hnfIndex % cfg.numSnf;
+  endfunction
+
+  // Elaboration-time placement for any population (IHI 0050H B3.2 leaves
+  // node placement to the implementation). The order is:
+  //
+  //   1. HN-Fs, spread as far apart as the topology allows: on a mesh each
+  //      next HN-F takes the free crosspoint farthest from those already
+  //      placed, preferring corners, then edges; on a ring HN-F h aims at
+  //      crosspoint h * numXp / numHnf; on a crossbar HN-F h aims at h % numXp.
+  //   2. Each SN-F on the free port nearest the first HN-F striped to it.
+  //   3. HN-Is, then each SN-I nearest the first HN-I striped to it.
+  //   4. MN, RN-F, RN-D, RN-I on the least loaded crosspoint, so Requesters
+  //      spread across the fabric.
+  //
+  // Within a crosspoint the lowest free device port is used. Ties always go to
+  // the lower crosspoint index, so the result is deterministic. A node that
+  // cannot be placed is left invalid and rejected by chi_cfg_check.
+  function automatic chi_placement_table_t autoPlacements(
+    input chi_cfg_t cfg,
+    input chi_hnf_snf_table_t hnfSnfTable
+  );
+    chi_placement_table_t result;
+    logic [CHI_MAX_DEV_PORTS-1:0] used [CHI_MAX_XP];
+    int unsigned load [CHI_MAX_XP];
+    int unsigned hnfXp [CHI_MAX_HNF];
+    int unsigned hniXp [CHI_MAX_HNF];
+    int unsigned numXp;
+    int unsigned ports;
+    int unsigned count;
+    int unsigned ordinal;
+    int unsigned bestXp;
+    int unsigned bestKey;
+    int unsigned key;
+    int unsigned minDistance;
+    int unsigned distance;
+    int unsigned target;
+    int unsigned port;
+    int unsigned anchorXp;
+    logic anchorFound;
+    logic found;
+    chi_node_class_e nodeClass;
+
+    numXp = numXpOf(cfg);
+    ports = cfg.numDevPortsPerXp;
+    for (int unsigned xp = 0; xp < CHI_MAX_XP; xp++) begin
+      used[xp] = '0;
+      load[xp] = 0;
+    end
+    for (int unsigned n = 0; n < CHI_MAX_NODES; n++)
+      result[n] = '0;
+    for (int unsigned h = 0; h < CHI_MAX_HNF; h++) begin
+      hnfXp[h] = 0;
+      hniXp[h] = 0;
+    end
+    if ((numXp == 0) || (numXp > CHI_MAX_XP) || (ports == 0)
+        || (ports > CHI_MAX_DEV_PORTS))
+      return result;
+
+    // Eight passes, one per class, in the order described above.
+    for (int unsigned pass = 0; pass < 8; pass++) begin
+      case (pass)
+        0: nodeClass = NODE_HNF;
+        1: nodeClass = NODE_SNF;
+        2: nodeClass = NODE_HNI;
+        3: nodeClass = NODE_SNI;
+        4: nodeClass = NODE_MN;
+        5: nodeClass = NODE_RNF;
+        6: nodeClass = NODE_RND;
+        default: nodeClass = NODE_RNI;
+      endcase
+      count = classCount(cfg, nodeClass);
+      for (int unsigned index = 0; index < count; index++) begin
+        ordinal = classOffset(cfg, nodeClass) + index;
+        anchorFound = 1'b0;
+        anchorXp = 0;
+        if (nodeClass == NODE_SNF) begin
+          for (int unsigned h = 0; h < cfg.numHnf; h++)
+            if (!anchorFound && (h < CHI_MAX_HNF)
+                && (snfIndexOfHnf(cfg, hnfSnfTable, h) == index)) begin
+              anchorFound = 1'b1;
+              anchorXp = hnfXp[h];
+            end
+        end
+        if ((nodeClass == NODE_SNI) && (cfg.numSni > 0)) begin
+          for (int unsigned h = 0; h < cfg.numHni; h++)
+            if (!anchorFound && (h < CHI_MAX_HNF)
+                && ((h % cfg.numSni) == index)) begin
+              anchorFound = 1'b1;
+              anchorXp = hniXp[h];
+            end
+        end
+
+        found = 1'b0;
+        bestXp = 0;
+        bestKey = 0;
+        for (int unsigned xp = 0; xp < numXp; xp++) begin
+          if (load[xp] < ports) begin
+            // Every class is scored so that a larger key is better; strict
+            // comparison keeps the lowest index on a tie.
+            if (nodeClass == NODE_HNF) begin
+              case (cfg.topology)
+                MESH_2D: begin
+                  minDistance = 4095;
+                  for (int unsigned h = 0; h < index; h++) begin
+                    distance = xpDistance(cfg, hnfXp[h], xp);
+                    if (distance < minDistance)
+                      minDistance = distance;
+                  end
+                  key = (minDistance * 4) + (2 - meshXpClass(cfg, xp));
+                end
+                RING: begin
+                  target = (index * numXp) / ((cfg.numHnf > 0) ? cfg.numHnf : 1);
+                  key = numXp - xpDistance(cfg, target, xp);
+                end
+                default: begin
+                  target = index % numXp;
+                  key = numXp - ((xp + numXp - target) % numXp);
+                end
+              endcase
+            end else if (anchorFound) begin
+              key = ((numXp + 1) - xpDistance(cfg, anchorXp, xp))
+                    * (ports + 1) + (ports - load[xp]);
+            end else begin
+              key = ports - load[xp];
+            end
+            if (!found || (key > bestKey)) begin
+              found = 1'b1;
+              bestKey = key;
+              bestXp = xp;
+            end
+          end
+        end
+
+        if (found && (ordinal < CHI_MAX_NODES)) begin
+          port = 0;
+          while ((port < ports) && used[bestXp][port])
+            port++;
+          used[bestXp][port] = 1'b1;
+          load[bestXp] = load[bestXp] + 1;
+          result[ordinal].valid = 1'b1;
+          result[ordinal].nodeClass = nodeClass;
+          result[ordinal].nodeIndex = 8'(index);
+          result[ordinal].devicePort = 8'(port);
+          if (cfg.topology == MESH_2D) begin
+            result[ordinal].meshX = 8'(bestXp % cfg.meshX);
+            result[ordinal].meshY = 8'(bestXp / cfg.meshX);
+          end else begin
+            result[ordinal].meshX = 8'(bestXp);
+            result[ordinal].meshY = '0;
+          end
+          if ((nodeClass == NODE_HNF) && (index < CHI_MAX_HNF))
+            hnfXp[index] = bestXp;
+          if ((nodeClass == NODE_HNI) && (index < CHI_MAX_HNF))
+            hniXp[index] = bestXp;
+        end
+      end
+    end
+    return result;
   endfunction
 
   function automatic logic [CHI_MAX_NODEID_W-1:0] defaultNodeId(
@@ -472,48 +882,6 @@ package chi_pkg;
     placement = defaultMeshPlacement(ordinal);
     return encodeNodeId(cfg, int'(placement.meshX), int'(placement.meshY),
                         int'(placement.devicePort), ordinal);
-  endfunction
-
-  function automatic int unsigned nodeIdDeviceId(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
-    int unsigned value;
-    int signed idWidth;
-    value = 0;
-    idWidth = deviceIdWidth(cfg);
-    for (int i = 0; i < idWidth; i++) value[i] = nodeId[i];
-    return value;
-  endfunction
-
-  function automatic int unsigned nodeIdDevicePort(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
-    int unsigned value;
-    int unsigned base;
-    int unsigned portW;
-    value = 0;
-    base = deviceIdWidth(cfg);
-    portW = clog2Min1(cfg.numDevPortsPerXp);
-    for (int i = 0; i < portW; i++) value[i] = nodeId[base+i];
-    return value;
-  endfunction
-
-  function automatic int unsigned nodeIdMeshX(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
-    int unsigned value;
-    int unsigned base;
-    int unsigned xW;
-    value = 0;
-    base = deviceIdWidth(cfg) + clog2Min1(cfg.numDevPortsPerXp);
-    xW = clog2Min1(cfg.meshX);
-    for (int i = 0; i < xW; i++) value[i] = nodeId[base+i];
-    return value;
-  endfunction
-
-  function automatic int unsigned nodeIdMeshY(input chi_cfg_t cfg, input logic [CHI_MAX_NODEID_W-1:0] nodeId);
-    int unsigned value;
-    int unsigned base;
-    int unsigned yW;
-    value = 0;
-    base = deviceIdWidth(cfg) + clog2Min1(cfg.numDevPortsPerXp) + clog2Min1(cfg.meshX);
-    yW = clog2Min1(cfg.meshY);
-    for (int i = 0; i < yW; i++) value[i] = nodeId[base+i];
-    return value;
   endfunction
 
 `define CHI_PACK_FIELD(fieldName, fieldWidth) \

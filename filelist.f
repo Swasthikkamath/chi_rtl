@@ -1,4 +1,4 @@
-# Package, node-interface, link, and crossbar compile order.
+# Package, node-interface, link, fabric, endpoint, top and assertion compile order.
 rtl/pkg/chi_cfg_pkg.sv
 rtl/pkg/chi_pkg.sv
 rtl/if/chi_if.sv
@@ -8,17 +8,18 @@ rtl/link/chi_link_tx.sv
 rtl/link/chi_link_rx.sv
 rtl/link/chi_link_port.sv
 rtl/noc/chi_vc_arb.sv
-rtl/noc/chi_xbar.sv
-rtl/noc/chi_ring.sv
 rtl/noc/chi_route_compute.sv
 rtl/noc/chi_router.sv
-rtl/noc/chi_mesh_xp.sv
+rtl/noc/chi_xp.sv
 rtl/noc/chi_mesh.sv
+rtl/noc/chi_ring.sv
+rtl/noc/chi_xbar.sv
 rtl/noc/chi_noc_top.sv
 rtl/sam/chi_hn_hash.sv
 rtl/sam/chi_sam.sv
 rtl/sam/chi_prefetch_map.sv
 rtl/hni/chi_cfg_slave.sv
+rtl/hni/chi_hnf_policy_regs.sv
 rtl/hni/chi_hni_top.sv
 rtl/mn/chi_mn_dvm.sv
 rtl/hnf/chi_pos.sv
@@ -38,10 +39,12 @@ rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
 rtl/top/chi_link_compile.sv
 rtl/top/chi_hnf_compile.sv
+rtl/top/chi_noc_compile.sv
 rtl/sva/chi_link_sva.sv
 rtl/sva/chi_link_rx_sva.sv
 rtl/sva/chi_proto_sva.sv
 rtl/sva/chi_mn_sva.sv
 rtl/sva/chi_ordering_sva.sv
 rtl/sva/chi_hnf_ordering_sva.sv
+rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv

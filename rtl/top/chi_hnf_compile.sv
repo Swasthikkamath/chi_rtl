@@ -36,7 +36,7 @@ module chi_hnf_compile (
     .SN_NODE_ID(SN_NODE_ID), .NUM_RNF(NUM_RNF),
     .RNF_NODE_IDS(RNF_NODE_IDS)
   ) hnf (
-    .clk, .resetn,
+    .clk, .resetn, .policy(CHI_HNF_POLICY_DEFAULT),
     .reqInValid(1'b0), .reqInReady, .reqInFlit('0),
     .rspInValid(1'b0), .rspInReady, .rspInFlit('0),
     .datInValid(1'b0), .datInReady, .datInFlit('0),

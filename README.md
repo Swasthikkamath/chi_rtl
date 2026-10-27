@@ -6,7 +6,7 @@ claim of CHI compliance or interoperability. CHI Chip-to-Chip, CXS, CCIX and
 die-to-die transports are outside scope.
 
 The RTL covers configurable Issue H flit records, three selectable internal
-topologies, address mapping, a real CHI link layer on every node port, and
+topologies built from one crosspoint with automatic placement, address mapping, a real CHI link layer on every node port, and
 coherent and noncoherent Home Node transaction paths. Implemented protocol
 behaviour includes L-Credits and link activation, flit parity, the Request
 Retry credit loop with `RetryAck`, `PCrdGrant` and `PCrdReturn`, DMT and DWT
@@ -131,7 +131,7 @@ simulator would check that this flow cannot.
 | `rtl/pkg/` | Configuration types, opcodes, flit records, pack and unpack, NodeID helpers |
 | `rtl/if/` | The single superset node-facing `chi_if` |
 | `rtl/link/` | L-Credit manager, activation FSM, link TX and RX, and the per-port link wrapper |
-| `rtl/noc/` | Crossbar, bidirectional ring, 2D mesh, route compute, router and arbitration |
+| `rtl/noc/` | One parameterized crosspoint (`chi_xp`: router, route compute, arbitration) and the mesh, ring and crossbar wiring around it |
 | `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
 | `rtl/hnf/` | HN-F POS, hazards, directory, snoops, retry credits, DCT, DMT, DWT, stash, atomics, CMO, exclusives |
 | `rtl/hni/` | HN-I forwarding and the project-defined configuration access |

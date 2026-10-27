@@ -80,20 +80,24 @@ packed flit field by itself is carriage, not implementation.
 |------------------------|------------|--------------|--------------------------------------------------|
 | REQ/RSP/SNP/DAT records and pack/unpack | B13.9, B13.10 | Implemented | Configurable packed records match the Issue H field lists and slot widths, including every documented field overlay. Opcode-dependent field legality is not policed. |
 | Fixed flit slot widths and overlays | B13.9.1--B13.9.4 | Implemented | `TxnID` 12, `ReturnTxnID`/`StashLPID` 12, `NumReq`/`Size` 6, `GroupID` 8, RSP `DBID` 12, DAT `DBID` 16, `DataSource` 8, `CCID` 2, `DataID` 2, `CacheLineID` 6, `PAS` 3 are slot widths independent of the node-side field widths. |
-| `PAS[2:0]` replacing `NS`/`NSE` | B2.9, B13.10 | Implemented | REQ and SNP carry the three-bit Physical Address Space selector and the SAM decodes its non-secure sense. |
+| `PAS[2:0]` replacing `NS`/`NSE` | B2.8.2, B13.10.68 | Implemented | REQ and SNP carry the three-bit Physical Address Space selector and the SAM decodes its non-secure sense. |
 | One node-facing interface type | B13 | Implemented | `rtl/if/chi_if.sv` is the only interface declaration in the repository and is a superset used by all five external node-class arrays. |
 | Top-level interface count and replicated channels | B13.7 | Not implemented | Elaboration requires `numIfPerNode == 1` and `replChannels == 1`. No top-level replication exists. |
 | L-Credit manager, link TX and link RX | B13.11, B14.2 | Implemented | `chi_lcrd_mgr`, `chi_link_tx` and `chi_link_rx` implement finite credit accounting, receive buffering, and the `LCrdReturn` exchange in both directions: the transmitter spends its remaining credits on `LCrdReturn` flits when it deactivates, and the receiver recognises a zero `Opcode`, extinguishes the credit and waits for all of them before it releases `LINKACTIVEACK`. |
 | Link layer integrated at every node port | B13.11, B14.2 | Implemented | `chi_link_port` instantiates three receivers and three or four transmitters per port, and `chi_interconnect_top` instantiates one per RN-F, RN-D, RN-I, SN-F and SN-I interface. `*LCRDV` are real credit pulses, not ready echoes. |
 | Link activation and deactivation FSM | B14.5--B14.6 | Implemented | `chi_link_fsm` implements STOP, ACTIVATE, RUN and DEACTIVATE with credit-drain conditions, and is instantiated per channel per direction inside every port. |
-| System coherency interface | B14.4 | Partial | `TXSACTIVE` and `RXSACTIVE` follow reset and `SYSCOACK` echoes `SYSCOREQ`. There is no power-domain or coherency-entry sequencing. |
+| System coherency interface | B15 | Partial | `TXSACTIVE` and `RXSACTIVE` follow reset and `SYSCOACK` echoes `SYSCOREQ`. There is no power-domain or coherency-entry sequencing. |
 | Flit parity | B9.3 | Implemented | `chi_link_tx` generates per-byte flit parity and `chi_link_rx` checks it. `parityEn` is accepted at the top and a mismatch raises `linkParityError` for that node. |
 | Control and credit signal checks | B9.3 | Not implemented | The `*CHK` scalars beside control, valid and credit signals are declared in the interface and driven to zero. Only the flit parity vectors are live. |
 | Link error reporting | B9 | Implemented | `linkUp`, `linkParityError` and `linkCreditError` are per-node-ordinal top-level outputs. Credit error covers receive-buffer overflow and L-Credit overflow or underflow. |
 | Four physically separated internal channels | B2.1, B13 | Implemented | REQ, RSP, SNP and DAT have separate ready/valid arrays, arbitration and topology storage throughout. |
-| Crossbar | B1.2 | Implemented | Per-output, per-channel QoS, age and round-robin arbitration. |
-| Bidirectional ring | B1.2 | Implemented | Shortest-direction routing, clockwise tie-break, directional registers, local and transit alternation, and ejection round-robin. |
-| 2D mesh with deterministic XY routing | B1.2, B3 | Implemented | Per-channel routers, one output register per crosspoint output, and placement-driven device ports. |
+| Unified crosspoint fabric | B1.2, B3.3 | Implemented | One `chi_xp` (four `chi_router`s) builds every topology; routing uses the NodeID only. Registered two-entry output FIFOs, QoS-age-round-robin arbitration, unroutable flits dropped and flagged. Section 5. |
+| Crossbar | B1.2 | Implemented | `numXp` fully connected crosspoints, at most one network hop, `numXp = 1` is the central crossbar. |
+| Bidirectional ring | B1.2 | Implemented | `numXp` crosspoints, shortest direction with clockwise tie-break, bubble flow control for deadlock freedom. |
+| 2D mesh with deterministic XY routing | B1.2, B3 | Implemented | `meshX * meshY` crosspoints, dimension-ordered XY routing. |
+| Automatic placement and NodeID | B3.2 | Implemented | Any population and any `numHnf` on any topology; NodeID `{xpId, devicePort, deviceId}`. Custom `PLACEMENTS` validated. |
+| HN-F to SN-F pairing | Project-defined | Implemented | `hnfSnfMap` MODULO or TABLE (`HNF_TO_SNF`). |
+| Per-node DCT, DMT, DWT capability and run-time policy | B16.1.3, B16.1.5 | Implemented | `RNF_DCT_CAP`, `SNF_DMT_CAP`, `SNF_DWT_CAP` and the APB HN-F policy block gate eligibility; the direct-transfer paths themselves are described in their own rows. |
 | Per-hop L-Credits inside the fabric | B13.11 | Not implemented | Internal topology links use ready/valid with registered crosspoint outputs. CHI L-Credits terminate at the node ports. |
 | Requester SAM, HN striping and HN-I SAM | B3.1--B3.3 | Implemented | Ordered region table, security rejection, XOR-fold hash and runtime update ports. The decode result overwrites the incoming `TgtID`, which B3.3.1 permits. All five B3.3.1 cases are distinguished, including the two that bypass the address mapper; see Section 6.1. |
 | `PrefetchTgt` routing | B3.3.1, B4.2.6.2 | Implemented | `chi_prefetch_map` maps the address to an SN-F independently of the HN hash, the request bypasses the Home, and both the HN-F and HN-I accept and discard it without a response and without a RetryAck. |
@@ -144,7 +148,8 @@ which finds the matching region, applies the `PAS` check and produces a
 through `chi_prefetch_map` for a `PrefetchTgt` hint, which is routed straight
 to an SN-F because no Home resource may be consumed for it. `chi_noc_top`
 carries the flit across whichever of the three topologies was elaborated, on
-one of four independent networks. A Home Node serializes it, and anything it
+one of four independent networks, every topology built from the same
+crosspoint and routed on the `TgtID` alone. A Home Node serializes it, and anything it
 must send downstream leaves through a second `chi_link_port` to a Subordinate.
 
 Three properties of this arrangement are worth stating explicitly, because
@@ -273,7 +278,7 @@ which is the useful way to read the hierarchy.
 |----------|-----------------------------|------------------|---------------------------|
 | Link | `chi_link_port`, `chi_link_rx`, `chi_link_tx`, `chi_lcrd_mgr`, `chi_link_fsm` | 8 ports | L-Credit pools, receive buffers, activation state, parity |
 | Address decode | `chi_sam`, `chi_hn_hash`, `chi_prefetch_map` | 5 Requester-side, 1 in the HN-I | Region table, hash configuration |
-| Transport | `chi_noc_top`, and `chi_xbar`, `chi_ring` or `chi_mesh` | 1, four networks wide | Per-hop flit registers, arbiter age and round-robin state |
+| Transport | `chi_noc_top`, `chi_xp` under `chi_mesh`, `chi_ring` or `chi_xbar` | 1, four networks wide | Crosspoint output FIFOs, arbiter age and round-robin state |
 | Protocol | `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm` | 4, 1, 1 | POS, snoop filter, retry records, exclusive monitors, transaction FSM state |
 
 : Table 2.3 The four layers, their modules, their instance counts in the default configuration, and the state each owns
@@ -354,28 +359,22 @@ example.
 `chi_noc_top` is the transport layer and presents the same interface
 regardless of which topology was elaborated: `NUM_NODES` ingress ports and
 `NUM_NODES` egress ports, on each of four independent networks, all
-ready/valid. One of three topologies is built:
+ready/valid. Behind that interface every topology is built from one
+parameterized crosspoint, `chi_xp`, and every node attaches to a crosspoint
+device port:
 
-- `chi_xbar` gives every ingress a path to every egress, with per-output
-  per-channel arbitration that considers QoS first, then age, then
-  round-robin. Latency is one cycle and there is no head-of-line blocking
-  between outputs, but the crosspoint count grows with the square of the
-  node count.
-- `chi_ring` places the nodes on a bidirectional ring, routes each flit the
-  shorter way with a clockwise tie-break, and alternates between local
-  injection and transit traffic so an injecting node cannot starve traffic
-  passing through it.
-- `chi_mesh` builds a `meshX` by `meshY` grid of crosspoints, each holding
-  one `chi_router` per channel, with `numDevPortsPerXp` device ports per
-  crosspoint. Routing is deterministic XY: all X hops first, then all Y hops,
-  which is what makes it deadlock free without needing virtual channels for
-  routing.
+- `MESH_2D` is a `meshX` by `meshY` grid of crosspoints routed in XY order.
+- `RING` is `numXp` crosspoints with a clockwise and a counter-clockwise
+  ring, routed the shorter way and kept deadlock free by bubble flow control.
+- `CROSSBAR` is `numXp` fully connected crosspoints, so every route is at most
+  one network hop; `numXp = 1` is a single central crossbar.
 
-What the topologies have in common matters as much as how they differ. All
-three are ready/valid with registered outputs, and none of them carries CHI
-L-Credits internally: credits terminate at the node ports. Inside the fabric
-backpressure is a ready signal, which is why Section 2.8's handshake rules
-are stated as a design constraint rather than a coding preference.
+The crosspoints route on the NodeID alone and never look at the address. Each
+crosspoint output ends in a two-entry FIFO, so the fabric is registered at
+every crosspoint and no ready depends combinationally on a ready further
+downstream. None of the topologies carries CHI L-Credits internally: credits
+terminate at the node ports. Section 5 gives the routing, NodeID layout,
+placement, latency and deadlock arguments.
 
 ### 2.4.4 Protocol endpoints
 
@@ -477,11 +476,10 @@ chi_interconnect_top
 ├── hni_nodes[*] : chi_hni_top
 │   └── chi_sam
 ├── mn_nodes[*] : chi_mn_dvm
+├── apb_cfg/policy_regs : chi_hnf_policy_regs     [CFG_APB]
 └── chi_noc_top
-    ├── chi_xbar ── chi_vc_arb[*]                   [CROSSBAR]
-    ├── chi_ring                                    [RING]
-    └── chi_mesh                                    [MESH_2D]
-        └── chi_mesh_xp[*]
+    └── chi_mesh | chi_ring | chi_xbar              [topology]
+        └── chi_xp[*]
             └── chi_router[REQ/RSP/SNP/DAT]
                 ├── chi_route_compute[*]
                 └── chi_vc_arb[*]
@@ -529,7 +527,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `numMn` | 1 | 0 or greater | Internal MN endpoints. |
 | `dataW` | 256 | 128, 256 or 512 | DAT data and derived BE, tag, TU and check widths. |
 | `addrW` | 48 | 44 through 52 | REQ address and line and tag widths. |
-| `nodeIdW` | 11 | 7 through 16 | Active NodeID bits. Internal buses are always 16 bits wide. |
+| `nodeIdW` | 11 | 7 through 16, and at least the routing fields | Active NodeID bits. `chi_cfg_check` reports the minimum for the topology. Internal buses are always 16 bits wide. |
 | `txnIdW` | 12 | 8 through 12 | Node-side TxnID width. The flit slot is always 12 bits. |
 | `lpidW` | 5 | 1 through 5 | LPID and `StashLPID` overlay width. |
 | `rsvdcW` | 0 | 0, 4, 8, 12, 16, 24 or 32 | REQ and DAT RSVDC width. |
@@ -538,9 +536,10 @@ it is a parameter at all and what choosing it wrong costs.
 | `mpamW` | 0 | 0, 12 or 15; must be non-zero when `mpamEn` | MPAM bus width. |
 | `numIfPerNode` | 1 | exactly 1 | Metadata only; multiple interfaces are rejected. |
 | `replChannels` | 1 | exactly 1 | Metadata only; channel replication is rejected. |
-| `topology` | `MESH_2D` | `CROSSBAR`, `RING`, `MESH_2D` | Selects the generated NoC. |
-| `meshX`, `meshY` | 3, 3 | positive for mesh | Mesh coordinates and NodeID fields. |
-| `numDevPortsPerXp` | 2 | positive for mesh | Local ports per crosspoint and NodeID field. |
+| `topology` | `MESH_2D` | `CROSSBAR`, `RING`, `MESH_2D` | Selects the wiring of the crosspoints. |
+| `meshX`, `meshY` | 3, 3 | positive for mesh | Mesh crosspoint grid and the X and Y NodeID fields. |
+| `numXp` | 4 | RING: at least 2; CROSSBAR: at most `XBAR_MAX_XP` | Crosspoint count of a ring or crossbar and the xpId NodeID field. |
+| `numDevPortsPerXp` | 2 | positive; `crosspoints * numDevPortsPerXp >= NUM_NODES` | Device ports per crosspoint for every topology, and the devicePort NodeID field. |
 | `snpFilterEntries` | 1024 | positive, divisible by ways | Total Home directory entries. |
 | `snpFilterWays` | 4 | 1 through entries, exact divisor | Directory associativity. |
 | `posEntries` | 32 | positive | POS array depth. The Home is still globally serial. |
@@ -566,6 +565,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `stashEn` | 1 | if 1, RN-F and HN-F must exist | Enables stash decode, stash snoops and Data Pull. |
 | `exclEn` | 1 | if 1, a Home and monitors must exist | Enables exclusive monitors. |
 | `cfgAccess` | `CFG_PARAM_ONLY` | enum; CHI MMIO also requires HN-I | Selects no runtime writes, APB, or CHI MMIO. |
+| `hnfSnfMap` | `HNF_SNF_MAP_MODULO` | MODULO or TABLE; TABLE entries must name existing SN-Fs | HN-F to SN-F pairing, and the SN-F anchor of automatic placement. |
 
 : Table 3.1 `chi_cfg_t` fields, defaults and elaboration bounds
 
@@ -689,7 +689,7 @@ open, not because interoperability demands it.
 | `numRnf`, `numRnd`, `numRni`, `numSnf`, `numSni` | The system population is not a protocol property. | Port count, and for `numRnf` the Home sharer-vector width and snoop walk length. |
 | `numHnf`, `numHni`, `numMn` | Home count sets coherent throughput and interleaving. | More Homes means more parallelism and more directory area. |
 | `topology` | CHI specifies no transport. Any network that delivers flits is legal. | See Section 5: crossbar for latency, ring for area, mesh for scale. |
-| `meshX`, `meshY`, `numDevPortsPerXp` | Mesh shape is microarchitecture. | Hop count against crosspoint count; also consumes NodeID bits. |
+| `meshX`, `meshY`, `numXp`, `numDevPortsPerXp` | Fabric shape is microarchitecture. | Hop count against crosspoint count; also consumes NodeID bits. |
 | `snpFilterEntries`, `snpFilterWays` | CHI requires a Home to track sharers but not how. | Directory area against back-invalidation traffic. See Section 3.2.3. |
 | `posEntries` | Transaction tracking depth is unspecified. | Hazard visibility. It does not currently buy throughput. |
 | `retryRecords` | The Home decides how many retried Requesters it will remember. | Retry table area against how often the Home must back-pressure instead of retrying. |
@@ -742,15 +742,15 @@ issuing another `RetryAck`, which keeps credit accounting exact at the cost of
 holding the channel. Section 9.3 covers why that choice was made. Sizing it
 below the number of Requesters guarantees back-pressure under load.
 
-**`nodeIdW` has a floor set by the mesh geometry, not by the node count.**
-The NodeID encodes the routing fields, so
-`deviceIdWidth = nodeIdW - clog2(meshY) - clog2(meshX) - clog2(numDevPortsPerXp)`
-must stay positive. At the default 3 by 3 mesh with 2 device ports that is
-`11 - 2 - 2 - 1 = 6` bits left for the device identifier. Widening the mesh
-therefore consumes NodeID bits, and elaboration rejects a combination where
-nothing is left. This is the one parameter in Section 3.2.1 whose value is
-constrained by a Section 3.2.2 choice, which is why it cannot simply be set
-to the minimum the node count would allow.
+**`nodeIdW` has a floor set by the fabric geometry, not by the node count.**
+The NodeID carries the routing fields, so
+`deviceIdWidth = nodeIdW - width(xpId) - width(devicePort)` must not be
+negative; Section 5.2 gives the field widths per topology. At the default 3 by
+3 mesh with 2 device ports that is `11 - 4 - 1 = 6` bits left for the device
+identifier. Widening the fabric therefore consumes NodeID bits, and elaboration
+rejects a combination where the routing fields do not fit, reporting the
+minimum. A zero-width `deviceId` is legal: the crosspoint and port already
+make every NodeID unique.
 
 ### 3.2.4 Parameters accepted but not yet honoured
 
@@ -777,20 +777,25 @@ reserved for later work, not features.
 | `NUM_REGIONS` | 4; positive | SAM table depth and select width. |
 | `NUM_NODES` | sum of all node counts; must equal that sum | Fabric endpoint count and the index space for the link status outputs. |
 | `NODE_IDS` | all-ones sentinel derives the default; effective IDs must be unique | Endpoint identities and routing targets. |
-| `USE_DEFAULT_PLACEMENTS` | 1 | Selects the fixed 14-entry map; requires exactly 14 nodes. |
-| `PLACEMENTS` | each valid, correct class and index, in range, collision-free | Custom mesh and local-port placement. |
+| `USE_DEFAULT_PLACEMENTS` | 1 | 1 places any population automatically (Section 5.3); 0 uses `PLACEMENTS`. |
+| `PLACEMENTS` | each valid, correct class and index, in range, collision-free | Custom placement. For RING and CROSSBAR, `meshX` is the crosspoint index and `meshY` must be 0. |
+| `XBAR_MAX_XP` | 8; a CROSSBAR may not exceed it | Bounds the square-law link count of a crossbar. |
+| `HNF_TO_SNF` | each entry below `numSnf` when used | HN-F to SN-F table for `hnfSnfMap = HNF_SNF_MAP_TABLE`. |
+| `SNF_DMT_CAP`, `SNF_DWT_CAP` | all ones | Per-SN-F DMT and DWT capability. |
+| `RNF_DCT_CAP` | all ones | Per-RN-F capability to act as a DCT forwarder. |
 | `CFG_MMIO_BASE` | top 4 KiB of the address space | Must be 4 KiB aligned in CHI-MMIO mode. |
 | `USE_DEFAULT_REGIONS` | 1 | Selects the default map in Section 6. |
 | `REGION_*` | arrays of `NUM_REGIONS` | Custom base, inclusive limit, target and attributes. |
 
 : Table 3.6 Top-level parameters and the combinations refused at elaboration
 
-For the mesh, `meshX*meshY*numDevPortsPerXp >= NUM_NODES`,
-`deviceIdWidth(CFG) > 0`, placement coordinates and ports must fit, NodeIDs
-must encode the placement routing fields, and no NodeID or placement may
-collide. Default placement is valid only for the default 14-node population.
-HN-F to SN-F and HN-I to SN-I striping uses modulo, so the nonzero
-subordinate checks are essential.
+Every topology needs `crosspoints * numDevPortsPerXp >= NUM_NODES`, a NodeID
+wide enough for its routing fields, placements in range, NodeIDs that decode
+back to their placements, and no collisions. A RING needs at least two
+crosspoints and a CROSSBAR at most `XBAR_MAX_XP`. Automatic placement handles
+any population up to 128 nodes, 256 crosspoints, 16 device ports per
+crosspoint and 64 HN-Fs. The nonzero Subordinate checks remain essential,
+because every Home needs a Subordinate to pair with.
 
 ## 3.4 Top-level ports beyond the interfaces
 
@@ -883,93 +888,181 @@ credit contract, not a recoverable condition.
 
 # 5 Topologies, routing, arbitration and progress
 
-## 5.1 Common transport
+## 5.1 One crosspoint for every topology
 
-`chi_noc_flit_t` carries the channel, QoS, target NodeID and an opaque
-maximum-size DAT payload. REQ, RSP, SNP and DAT are separate ready/valid
-fabrics that share no buffers and no arbiters. Backpressure requires valid
-and payload stability. These are internal ready/valid channels; the CHI
-L-Credit channels terminate in `chi_link_port`.
+All three topologies are built from a single parameterized crosspoint,
+`chi_xp`. A crosspoint has `NUM_NET_PORTS` network ports, which link it to
+other crosspoints, and `numDevPortsPerXp` device ports, to which nodes attach.
+Every node of every class --- RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I and MN
+--- sits on exactly one device port. The topologies differ only in the number
+of network ports and in how the wrappers `chi_mesh`, `chi_ring` and `chi_xbar`
+wire them; the wrappers contain no routing logic.
 
-## 5.2 Crossbar
+| Topology | Crosspoints | Network ports per crosspoint | Wrapper |
+|-----------|------------------|------------------|-----------|
+| `MESH_2D` | `meshX * meshY` | 4: north, south, east, west | `chi_mesh` |
+| `RING` | `numXp` (at least 2) | 2: clockwise, counter-clockwise | `chi_ring` |
+| `CROSSBAR` | `numXp` (at most `XBAR_MAX_XP`) | `numXp - 1`: one direct link per peer | `chi_xbar` |
 
-Each output selects the highest-QoS request. Equal QoS starts at a rotating
-index. Once a request's age reaches `AGE_LIMIT`, aged requests exclude
-non-aged requests. A stalled grant locks until it is accepted. An uncongested
-output accepts one flit per channel per cycle. Unknown target IDs remain
-backpressured.
+: Table 5.1 Crosspoint shape per topology
 
-## 5.3 Bidirectional ring
+A crosspoint holds four `chi_router` instances, one per channel, that share
+nothing. Each router computes a route per input with `chi_route_compute`,
+arbitrates each output with `chi_vc_arb` (QoS first, then age, then
+round-robin), and ends every output in an `OUT_DEPTH`-entry FIFO, two entries by
+default. The FIFO makes the router fully registered: an output's valid and flit
+come from the FIFO, and an input's ready depends only on the competing inputs
+and on FIFO occupancy, never on a downstream ready. No combinational path
+crosses a crosspoint, and one input can stream at a flit per cycle.
 
-Distance is computed from endpoint array order. The shorter direction wins
-and an exact tie goes clockwise. Each node, direction and channel has one
-registered slot. When local injection and transit contend for an empty slot,
-a preference bit alternates after the winner, which prevents permanent local
-or transit starvation under continued service. Clockwise, counter-clockwise
-and local ejection requests use a three-way rotating priority. The ring has
-no QoS or age threshold.
+The SAM decides the target and writes it into the flit's `TgtID` (Section 6).
+From then on the crosspoints route on the NodeID alone and never look at the
+address.
 
-For planning, use a conservative sustained rate of 0.5 flit per cycle per
-directional link per channel under injection and transit contention. That is
-a budgeting bound, not a guarantee: uncongested trains do better and blocked
-ejection does worse.
+A flit whose `TgtID` names no attached node has no route. It is accepted and
+dropped at the first crosspoint and reported on the fabric `routeError`
+output, instead of blocking its input forever, and the bound assertion
+`NO_UNROUTABLE_FLIT` flags it.
 
-## 5.4 Mesh, placement and NodeID
+## 5.2 NodeID encoding
 
-Routing is deterministic XY: east or west to the destination X, then north or
-south to the destination Y, then the local device port. Coordinates start at
-the south-west corner `(0,0)`.
+The NodeID is project defined, as B3.2 allows:
+
+```
+NodeID   = {xpId, devicePort, deviceId}          least significant on the right
+xpId     = {Y, X} for MESH_2D, crosspoint index for RING and CROSSBAR
+widths   : X = clog2(meshX), Y = clog2(meshY), xpId = clog2(numXp) otherwise,
+           devicePort = clog2(numDevPortsPerXp), each at least 1 bit
+deviceId = nodeIdW - width(xpId) - width(devicePort)  (may be 0 bits)
+```
+
+The crosspoints route on `xpId` and `devicePort`; `deviceId` only tells nodes
+apart for software and carries the node ordinal when it is wide enough. The
+helpers `encodeXpNodeId`, `nodeIdXpIndex`, `nodeIdDevicePort` and
+`nodeIdDeviceId` in `chi_pkg` are the only place the layout is written down,
+and the SAM, the route compute and the assertions all use them.
+`chi_cfg_check` reports the minimum `nodeIdW` for the topology when the
+configured one is too small.
+
+At the defaults (3 by 3 mesh, 2 device ports, `nodeIdW = 11`) the layout is
+`[10:9]=Y`, `[8:7]=X`, `[6]=devicePort`, `[5:0]=deviceId`.
+
+## 5.3 Placement
+
+With `USE_DEFAULT_PLACEMENTS = 1` the top places any node population on any
+topology at elaboration (`autoPlacements` in `chi_pkg`):
+
+1. HN-Fs are spread as far apart as the topology allows. On a mesh each next
+   HN-F takes the free crosspoint farthest from those already placed,
+   preferring corners, then edges. On a ring HN-F `h` aims at crosspoint
+   `h * numXp / numHnf`. On a crossbar HN-F `h` aims at crosspoint `h % numXp`.
+2. Each SN-F goes on the free port nearest the first HN-F striped to it, so
+   the Home-to-memory path is short.
+3. HN-Is follow, and each SN-I goes nearest the first HN-I striped to it.
+4. The MN and the Requesters fill the least loaded crosspoints, which spreads
+   them across the fabric.
+
+Within a crosspoint the lowest free device port is used, and every tie goes to
+the lower crosspoint index, so the result is deterministic.
 
 ```
                          north
-        x=0                    x=1                    x=2
-y=2  [p0 HNF2, p1 --]     [p0 --,   p1 --]      [p0 HNF3, p1 --]
-y=1  [p0 SNI0, p1 RNF2]---[p0 MN0,  p1 HNI0]----[p0 SNF1, p1 RNF3]
-y=0  [p0 HNF0, p1 RNF0]---[p0 SNF0, p1 RNF1]----[p0 HNF1, p1 RNI0]
+        x=0                     x=1                     x=2
+y=2  [p0 HNF3, p1 --  ]   [p0 RNF2, p1 --  ]   [p0 HNF1, p1 SNF1]
+y=1  [p0 MN0,  p1 RNI0]---[p0 RNF0, p1 --  ]---[p0 RNF1, p1 --  ]
+y=0  [p0 HNF0, p1 SNF0]---[p0 HNI0, p1 SNI0]---[p0 HNF2, p1 RNF3]
                          south
 ```
 
-The project-defined NodeID encoding is:
+The default placement above gives HN-F NodeIDs HNF0 `11'h008`, HNF1 `11'h509`,
+HNF2 `11'h10a` and HNF3 `11'h40b`.
 
-```
-NodeID     = {meshY, meshX, devicePort, deviceId}
-field width = max(1, ceil(log2(cardinality)))   for Y, X and port
-deviceId width = nodeIdW - Ywidth - Xwidth - portwidth
-```
+With `USE_DEFAULT_PLACEMENTS = 0` the `PLACEMENTS` parameter is used as given.
+For RING and CROSSBAR its `meshX` field holds the crosspoint index and `meshY`
+must be zero. `chi_cfg_check` rejects a missing placement, a class or index
+that does not match the ordinal, an out-of-range crosspoint or port, two nodes
+on one port, and a NodeID whose routing fields do not decode back to the
+placement.
 
-At the defaults this gives `[10:9]=Y`, `[8:7]=X`, `[6]=port` and
-`[5:0]=ordinal`. Ordinals run RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I, MN.
-The default HN-F NodeIDs are HNF0 `11'h008`, HNF1 `11'h109`, HNF2 `11'h40a`
-and HNF3 `11'h50b`. The hash array follows ordinal order and the corner
-placement supplies the spatial distribution.
+## 5.4 Routing per topology
 
-Each `chi_router` contributes one registered crosspoint output stage, and the
-wires between crosspoints are combinational. For source `(sx,sy)` and
-destination `(dx,dy)`:
+**MESH_2D.** Dimension-ordered XY: east or west until the X coordinate
+matches, then north or south, then the device port. Coordinates start at the
+south-west corner `(0,0)`.
 
-```
-hops = |dx-sx| + |dy-sy|
-planning latency ~ (hops + 1) crosspoint cycles + endpoint and link cycles
-```
+**RING.** The shorter direction, clockwise on an exact tie. The choice is
+stable along the route --- from every crosspoint on the way the remaining
+distance in the chosen direction stays the shorter one --- so a flit never
+turns and the two directions are independent rings.
 
-Stalls add arbitration and destination-backpressure cycles. The link layer
-adds one receive-buffer cycle in each direction.
+**CROSSBAR.** One network hop: the source crosspoint sends the flit straight
+down the link to the destination crosspoint, which ejects it. `numXp = 1` has
+no network ports at all and reproduces the earlier central crossbar, now with
+registered outputs.
 
-## 5.5 Snoop distribution, deadlock and livelock
+## 5.5 Latency
 
-Home snoops are sequential unicasts in ascending sharer index, and only one
-snoop is outstanding from the generator, so latency sums the round trips of
-all sharers. HN-F `i` is statically striped to SN-F `i % numSnf`, and the
-HN-I uses the same rule for SN-I. `PrefetchTgt` does not follow that
-striping: it uses its own address-to-SN-F mapper.
+Each crosspoint a flit passes through adds one output-FIFO cycle; the links
+between crosspoints are wires. With `h` network hops the uncongested fabric
+latency is `h + 1` crosspoint cycles, and the link layer adds one
+receive-buffer cycle at each end:
 
-Separate channel fabrics prevent one protocol channel from consuming another
-channel's transport buffer, and mesh XY routing is dimension-ordered. Those
-choices remove routing-dependency cycles, but there is no complete
-protocol-level deadlock proof in this repository. Ring finite slots plus
-blocked ejection can backpressure a direction globally. Crossbar and mesh age
-arbitration and the ring's rotating preferences address local starvation, but
-there is no end-to-end livelock watchdog and no bounded-completion proof.
+| Topology | Hops `h` from crosspoint s to d | Longest route |
+|-----------|--------------------------------------|---------------|
+| `MESH_2D` | `abs(dx - sx) + abs(dy - sy)` | `(meshX - 1) + (meshY - 1)` |
+| `RING` | `min(cw, numXp - cw)`, `cw = (d - s) mod numXp` | `floor(numXp / 2)` |
+| `CROSSBAR` | `0` if `s = d`, else `1` | `1` (`0` when `numXp = 1`) |
+
+: Table 5.2 Hop count and longest route per topology
+
+Arbitration and destination back-pressure add cycles. On a ring an injecting
+flit also waits until the outgoing link has two free entries (Section 5.6).
+
+## 5.6 Deadlock freedom
+
+REQ, RSP, SNP and DAT are separate networks with separate routers, FIFOs and
+arbiters, so a flit of one channel never occupies a resource another channel
+needs. The arguments below are therefore made per channel. Each relies on the
+consumption assumption that an endpoint eventually accepts every flit addressed
+to it; Section 9 discusses what the Home does to honour it.
+
+**Mesh.** XY routing takes every X hop before any Y hop. A channel dependency
+from a Y link to an X link would need a Y-to-X turn, which the routing never
+makes, so the channel dependency graph is acyclic and the mesh cannot deadlock
+on its own buffers. The bound assertion `MESH_NO_Y_TO_X_TURN` checks the turn
+rule at every crosspoint input.
+
+**Ring.** A ring has a cyclic channel dependency by construction, so it uses
+bubble flow control. A flit entering the ring from a device port is granted a
+ring link only when that link's FIFO has at least two free entries; a flit
+already on the ring needs one. Injection therefore never takes the last free
+entry of a direction, each direction of each channel always holds at least one
+empty entry, and the empty entry lets the flit behind it advance unless that
+flit is waiting to eject. Bubble flow control was chosen over a dateline with
+two virtual channels because it needs no second buffer set and no virtual
+channel allocation, only the second FIFO entry every output already has.
+`RING_INJECTION_LEAVES_A_BUBBLE` checks the injection rule and
+`RING_DIRECTION_NEVER_FULL` checks the invariant itself. The price is that
+sustained transit traffic can delay an injection; it is not a deadlock, because
+transit traffic always drains.
+
+**Crossbar.** Every route is at most one network hop, so there is no transit
+traffic. A flit waiting at the destination crosspoint to eject holds only its
+own link, and that link carries only flits for the same destination
+crosspoint, so ejection back-pressure can never hold up traffic bound
+elsewhere.
+
+## 5.7 Snoop distribution and livelock
+
+HN-F `i` is paired with SN-F `i % numSnf` (`hnfSnfMap = HNF_SNF_MAP_MODULO`)
+or with `HNF_TO_SNF[i]` (`HNF_SNF_MAP_TABLE`); the HN-I uses the modulo rule for
+SN-I. `PrefetchTgt` does not follow that pairing: it uses its own
+address-to-SN-F mapper.
+
+Age-based promotion in every output arbiter bounds how long an input that keeps
+requesting can be passed over once it is eligible. A request keeps ageing while
+it is ineligible, so a ring injection held back by the bubble rule is served
+first when space appears. There is no end-to-end livelock watchdog.
 
 # 6 System Address Map
 
@@ -1037,7 +1130,7 @@ target        = HN_NODE_IDS[hnfIndex]
 ```
 
 At the defaults, address `0x0000_0000_10c0` gives granule number `0x43`,
-folded value `0x42`, index `2` and target HNF2 (`11'h40a`).
+folded value `0x42`, index `2` and target HNF2 (`11'h10a`).
 
 ## 6.4 `PrefetchTgt` mapping
 
@@ -1075,7 +1168,9 @@ security policy and commit protocol in this section are
 ## 7.1 APB4 map
 
 APB runs on `clk` and `PREADY` is always 1. Addresses are 12-bit and word
-aligned. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
+aligned. `PADDR[11:8]` selects a 256-byte block: block 0 is the region editor
+below, block 1 the HN-F policy registers of Table 7.1b, and every other block
+returns `PSLVERR`. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
 A write with `PPROT[1]=1` is rejected as non-secure. Unsupported or
 misaligned accesses, out-of-range SELECT writes and non-quiescent COMMIT
 writes return `PSLVERR`.
@@ -1091,7 +1186,19 @@ writes return `PSLVERR`.
 | `0x018` | ATTRIBUTES | RW | `REGION_ATTRIBUTES[n]` | Stage the low four bits. |
 | `0x01c` | COMMIT | W, reads zero | 0 | If byte strobe 0 is set and traffic is quiescent, pulse one region update. |
 
-: Table 7.1 APB4 register map of `chi_cfg_slave`
+: Table 7.1 APB4 register map of `chi_cfg_slave` (block 0)
+
+| Offset | Name | Access | Reset or read value | Write effect |
+|--------|----------------|----------|----------------------|--------------------------------------------|
+| `0x100` | POLICY_SELECT | RW | 0 | Select an HN-F; reject a value at or above `numHnf`. |
+| `0x104` | POLICY_STAGED | RW | all features enabled | Stage the selected HN-F's policy: `[0]` DCT, `[1]` DMT, `[2]` DWT, `[3]` SLC read allocate, `[4]` SLC write allocate, `[5]` SLC clean-eviction allocate, `[6]` SLC stash allocate. |
+| `0x108` | POLICY_ACTIVE | RO | all features enabled | The selected HN-F's active policy. |
+| `0x10c` | POLICY_COMMIT | W, reads zero | 0 | With `PSTRB[0]` and `PWDATA[0]` set and traffic quiescent, copy every staged policy into the active set; `PSLVERR` if not quiescent. |
+
+: Table 7.1b APB4 register map of `chi_hnf_policy_regs` (block 1)
+
+A policy bit only narrows what the configuration allows: the HN-F ANDs it with
+the global enable in `chi_cfg_t` and with the capability of the node involved.
 
 The required software order is SELECT, stage all changed fields, stop
 initiators, observe system-specific quiescence, then COMMIT. A COMMIT with
@@ -1390,11 +1497,13 @@ sequenced link power-down is left to integration.
 
 Reference throughput limits:
 
-- Crossbar: at most one accepted flit per output, per channel, per cycle.
-- Ring: one slot per node, direction and channel; use the conservative
-  0.5 flit per cycle planning rate from Section 5.3.
-- Mesh: one registered slot per crosspoint output and channel; no-contention
-  network latency is approximately `hops+1` crosspoint cycles.
+- Every topology: each crosspoint output accepts at most one flit per channel
+  per cycle and holds two; uncongested latency is `hops + 1` crosspoint cycles
+  (Section 5.5).
+- Ring: an injection additionally waits for two free entries on the outgoing
+  link, so sustained transit traffic lowers the injection rate.
+- Crossbar: at most one network hop, so latency is one or two crosspoint
+  cycles.
 - Link: one receive-buffer cycle per direction, and a channel stalls whenever
   its credit count reaches zero, so `lcrdDepth` bounds the round-trip
   bandwidth of each channel.
@@ -1417,6 +1526,7 @@ or performance guarantees are supplied.
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
 | `chi_ordering_sva.sv` | pairwise `NO_DUPLICATE_ACTIVE_LINE`, per-entry `ALLOCATION_LINE_NOT_ACTIVE` | none |
 | `chi_hnf_ordering_sva.sv` | `ORDERED_REQUEST_STARTS_QUIESCENT`, `ACTIVE_ORDERED_REQUEST_SERIALIZES` | none |
+| `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
 
 : Table 12.1 Bound SVA files with assertion and cover counts
 
@@ -1490,17 +1600,18 @@ rtl/link/chi_link_tx.sv
 rtl/link/chi_link_rx.sv
 rtl/link/chi_link_port.sv
 rtl/noc/chi_vc_arb.sv
-rtl/noc/chi_xbar.sv
-rtl/noc/chi_ring.sv
 rtl/noc/chi_route_compute.sv
 rtl/noc/chi_router.sv
-rtl/noc/chi_mesh_xp.sv
+rtl/noc/chi_xp.sv
 rtl/noc/chi_mesh.sv
+rtl/noc/chi_ring.sv
+rtl/noc/chi_xbar.sv
 rtl/noc/chi_noc_top.sv
 rtl/sam/chi_hn_hash.sv
 rtl/sam/chi_sam.sv
 rtl/sam/chi_prefetch_map.sv
 rtl/hni/chi_cfg_slave.sv
+rtl/hni/chi_hnf_policy_regs.sv
 rtl/hni/chi_hni_top.sv
 rtl/mn/chi_mn_dvm.sv
 rtl/hnf/chi_pos.sv
@@ -1520,18 +1631,22 @@ rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
 rtl/top/chi_link_compile.sv
 rtl/top/chi_hnf_compile.sv
+rtl/top/chi_noc_compile.sv
 rtl/sva/chi_link_sva.sv
 rtl/sva/chi_link_rx_sva.sv
 rtl/sva/chi_proto_sva.sv
 rtl/sva/chi_mn_sva.sv
 rtl/sva/chi_ordering_sva.sv
 rtl/sva/chi_hnf_ordering_sva.sv
+rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```
 
 `rtl/top/chi_stage1_compile.sv`, `rtl/top/chi_sam_compile.sv`,
 `rtl/top/chi_xbar_compile.sv`, `rtl/top/chi_ring_compile.sv` and
-`rtl/top/chi_mesh_compile.sv` are supplemental elaboration harnesses. They are
+`rtl/top/chi_mesh_compile.sv` are supplemental elaboration harnesses. The last
+three each build `chi_noc_compile`, which elaborates the fabric alone for one
+configuration. They are
 not entries in `filelist.f` and are not product hierarchy.
 
 `tb/chi_node_link_bfm.sv`, `tb/chi_sim_harness.sv` and `tb/chi_smoke_tb.sv`
@@ -1716,8 +1831,10 @@ the cross-references in the prose stay correct in every output format.
 9. Runtime SAM writes lack complete validation, CHI-MMIO lacks security and
    quiescent commit, and APB quiescence does not inspect every internal
    topology slot.
-10. An unknown fabric destination is back-pressured indefinitely and has no
-    error sink.
+10. A flit for an unknown fabric destination is dropped at its first
+    crosspoint and flagged on the internal `routeError` signal; it is not
+    answered with an error response, so the transaction it belongs to does not
+    complete.
 11. System coherency and link power sequencing are placeholders. Nothing in
     the design asserts `deactivate`, so although the link layer now implements
     the `LCrdReturn` exchange in both directions, the deactivation path has
@@ -1752,9 +1869,13 @@ the cross-references in the prose stay correct in every output format.
 | `PrefetchTgt` target | A separate address-to-SN-F mapper | The hint reaches memory without consuming Home resources. |
 | HN selection | XOR-folded granule modulo `numHnf` | Supports non-power-of-two Home counts. |
 | SAM overlap | The lowest region index wins | A security rejection at the first match does not fall through. |
-| NodeID | `{Y, X, port, ordinal}` | Placement and route fields must agree. |
+| Fabric | One crosspoint for every topology | Mesh, ring and crossbar share routing, arbitration and buffering; wrappers only wire. |
+| NodeID | `{xpId, devicePort, deviceId}` | Crosspoints route on the first two fields; `deviceId` may be empty. |
+| Placement | Automatic, HN-F spread first, SN-F next to its HN-F | Any population; custom placements still accepted and validated. |
 | Mesh route | Deterministic XY | Simple dependency ordering, no adaptive balancing. |
-| Ring tie | Clockwise | Deterministic equal-distance selection. |
+| Ring route and deadlock | Shorter direction, clockwise on a tie, bubble flow control | No virtual channels; injection may wait behind sustained transit. |
+| Crosspoint output | Two-entry FIFO | Fully registered crosspoint at one flit per cycle per output. |
+| Unroutable flit | Dropped and flagged at the first crosspoint | The channel never wedges; the transaction is lost. |
 | Snoop and DVM fanout | Sequential unicast | Minimal replication state, additive target latency. |
 | Home to subordinate mapping | Index modulo the subordinate count | Static striping rather than address-based balancing. |
 | Atomic execution point | Always the Home | No far-atomic negotiation, but one serialization point. |

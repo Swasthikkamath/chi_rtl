@@ -176,19 +176,18 @@ module chi_stage1_compile #(
         initial $fatal(1, "Interleave granule must be a power of two of at least 64 bytes");
       end
       if ((CFG.topology == MESH_2D)
-          && ((CFG.meshX == 0) || (CFG.meshY == 0) || (CFG.numDevPortsPerXp == 0))) begin : check_mesh_dims
-        initial $fatal(1, "Mesh dimensions and device-port count must be positive");
+          && ((CFG.meshX == 0) || (CFG.meshY == 0))) begin : check_mesh_dims
+        initial $fatal(1, "Mesh dimensions must be positive");
       end
-      if ((CFG.topology == MESH_2D)
-          && ((CFG.meshX * CFG.meshY * CFG.numDevPortsPerXp) < NUM_LOGICAL_NODES)) begin : check_mesh_capacity
-        initial $fatal(1, "Mesh placement capacity is smaller than the logical node count");
+      if ((numXpOf(CFG) == 0) || (CFG.numDevPortsPerXp == 0)) begin : check_xp_dims
+        initial $fatal(1, "Crosspoint and device-port counts must be positive");
       end
-      if ((CFG.topology == MESH_2D) && (deviceIdWidth(CFG) <= 0)) begin : check_device_id_w
-        initial $fatal(1, "NodeID has no deviceId bits");
+      if ((numXpOf(CFG) * CFG.numDevPortsPerXp) < NUM_LOGICAL_NODES) begin : check_fabric_capacity
+        initial $fatal(1, "Fabric device-port capacity is smaller than the logical node count");
       end
-      if ((CFG.topology == MESH_2D)
-          && (NUM_LOGICAL_NODES > (1 << deviceIdWidth(CFG)))) begin : check_device_id_capacity
-        initial $fatal(1, "Logical node ordinal does not fit the NodeID deviceId field");
+      // The NodeID must hold {xpId, devicePort}; deviceId may be empty.
+      if (deviceIdWidth(CFG) < 0) begin : check_device_id_w
+        initial $fatal(1, "NodeID is too narrow for the routing fields");
       end
       if ((CFG.cfgAccess == CFG_CHI_MMIO) && (CFG.numHni == 0)) begin : check_cfg_endpoint
         initial $fatal(1, "CHI-MMIO configuration requires an HN-I endpoint");
