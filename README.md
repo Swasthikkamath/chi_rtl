@@ -9,9 +9,10 @@ The RTL covers configurable Issue H flit records, three selectable internal
 topologies built from one crosspoint with automatic placement, address mapping, a real CHI link layer on every node port, and
 coherent and noncoherent Home Node transaction paths. Implemented protocol
 behaviour includes L-Credits and link activation, flit parity, the Request
-Retry credit loop with `RetryAck`, `PCrdGrant` and `PCrdReturn`, DMT and DWT
-direct transfers, atomic transactions, cache stashing with Data Pull, and
-`PrefetchTgt` routing.
+Retry credit loop with `RetryAck`, `PCrdGrant` and `PCrdReturn`, a coherent
+Home that runs one transaction per POS entry concurrently with same-location
+ordering, a directory with dirty-safe eviction, atomic transactions, cache
+stashing with Data Pull, and `PrefetchTgt` routing.
 
 Behaviour that is deliberately partial or absent includes multiple interfaces
 per node, replicated channels, per-hop L-Credits inside the fabric, an RN-side
@@ -133,7 +134,7 @@ simulator would check that this flow cannot.
 | `rtl/link/` | L-Credit manager, activation FSM, link TX and RX, and the per-port link wrapper |
 | `rtl/noc/` | One parameterized crosspoint (`chi_xp`: router, route compute, arbitration) and the mesh, ring and crossbar wiring around it |
 | `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
-| `rtl/hnf/` | HN-F POS, hazards, directory, snoops, retry credits, DCT, DMT, DWT, stash, atomics, CMO, exclusives |
+| `rtl/hnf/` | HN-F per-entry transactions: POS and hazards, directory and victim buffer, snoops, downstream trackers, retry credits, stash, atomics, exclusives; DCT, DMT and DWT decision blocks |
 | `rtl/hni/` | HN-I forwarding and the project-defined configuration access |
 | `rtl/mn/` | Sequential DVM distribution |
 | `rtl/sva/` | Bound local safety, stability and protocol-field assertions with covers |

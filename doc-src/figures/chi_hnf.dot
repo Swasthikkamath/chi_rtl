@@ -2,8 +2,9 @@
 // Rendered by the doc target; see Makefile.
 //
 // Laid out top to bottom so the figure fits a portrait page: a request is
-// admitted or retried, serialized against the POS, driven by one globally
-// serial FSM, and dispatched to whichever engine the opcode selects.
+// admitted or retried, allocated a POS entry, held by the hazard check until
+// it is the oldest transaction for its location, started against the
+// directory, and then runs its own obligations through the shared engines.
 digraph chiHnf {
   rankdir=TB;
   splines=polyline;
@@ -18,61 +19,58 @@ digraph chiHnf {
   req [label="REQ in from NoC", shape=note, fillcolor="#ffffff"];
 
   subgraph cluster_admit {
-    label="Admission and serialization";
+    label="Admission and ordering";
     style="rounded"; color="#bba060"; fontcolor="#6b5520";
-    retry  [label="chi_retry\nRetryAck, PCrdGrant,\nPCrdReturn\nretryRecords entries", fillcolor="#fdf0d5"];
-    pos    [label="chi_pos\nposEntries entries\nline addresses", fillcolor="#fdf0d5"];
-    hazard [label="chi_hazard\nsame-line and\nordering hazards", fillcolor="#fdf0d5"];
+    retry  [label="chi_retry\nRetryAck, PCrdGrant,\nPCrdReturn", fillcolor="#fdf0d5"];
+    pos    [label="chi_pos\nposEntries entries, age matrix,\n{PAS, line} keys", fillcolor="#fdf0d5"];
+    hazard [label="chi_hazard\nsame location, Endpoint Order,\nvictim lines", fillcolor="#fdf0d5"];
   }
 
-  fsm [label="Home FSM   22 states, globally serial", fillcolor="#f7dce9", width=3.4];
-
-  subgraph cluster_ops {
-    label="Operations";
-    style="rounded"; color="#8888bb"; fontcolor="#333377";
-    alu  [label="chi_atomic_alu\nStore, Load, Swap, Compare\n64-bit datapath", fillcolor="#e0e0f0"];
-    cmo  [label="chi_cmo\ncache maintenance", fillcolor="#e0e0f0"];
-    excl [label="chi_excl_mon\nexclMonitors entries", fillcolor="#e0e0f0"];
-  }
-
-  subgraph cluster_fwd {
-    label="Forwarding and offload";
-    style="rounded"; color="#77aa77"; fontcolor="#2f6b2f";
-    dmt   [label="chi_dmt_ctrl\nReturnNID, ReturnTxnID", fillcolor="#e8f0e0"];
-    dwt   [label="chi_dwt_ctrl\nDoDWT", fillcolor="#e8f0e0"];
-    stash [label="chi_stash_ctrl\nstash snoop, Data Pull", fillcolor="#e8f0e0"];
-  }
+  entries [label="Per-entry transactions   posEntries in parallel\nobligations: snoops, Requester data, memory ops,\nresponses, CompAck, directory update",
+    fillcolor="#f7dce9", width=3.8];
 
   subgraph cluster_coh {
     label="Coherence";
     style="rounded"; color="#7799bb"; fontcolor="#224466";
-    sf     [label="chi_snoop_filter\nsnpFilterEntries / snpFilterWays\nprecise sharer vector", fillcolor="#dce9f7"];
-    snpgen [label="chi_snp_gen\nsequential unicast", fillcolor="#dce9f7"];
-    dct    [label="chi_dct_ctrl\nforwarding snoops", fillcolor="#dce9f7"];
+    sf     [label="chi_snoop_filter\nlookup port, update port,\nlocked-way eviction", fillcolor="#dce9f7"];
+    snpgen [label="chi_snp_gen\nsnoop issue, TxnID = owner", fillcolor="#dce9f7"];
+    vb     [label="victim buffer\nSnpCleanInvalid + writeback", fillcolor="#dce9f7"];
   }
 
-  out [label="RSP / SNP / DAT out, and downstream REQ to SN-F",
+  subgraph cluster_mem {
+    label="Memory side";
+    style="rounded"; color="#77aa77"; fontcolor="#2f6b2f";
+    tracker [label="chi_sn_tracker\nReadNoSnp, WriteNoSnp, CMO\nRetry, PCrdReturn", fillcolor="#e8f0e0"];
+    buf     [label="line buffers\nRequester, snoop, memory bytes", fillcolor="#e8f0e0"];
+  }
+
+  subgraph cluster_ops {
+    label="Operations";
+    style="rounded"; color="#8888bb"; fontcolor="#333377";
+    alu   [label="chi_atomic_alu\n64-bit datapath", fillcolor="#e0e0f0"];
+    excl  [label="chi_excl_mon", fillcolor="#e0e0f0"];
+    stash [label="chi_stash_ctrl\nstash snoop, Data Pull", fillcolor="#e0e0f0"];
+  }
+
+  out [label="RSP / SNP / DAT / REQ out through chi_flit_fifo",
     shape=note, fillcolor="#ffffff"];
 
   req -> pos   [label="  allocate"];
-  req -> retry [label="  no resource"];
+  req -> retry [label="  no entry"];
   pos -> hazard;
-  hazard -> fsm [label="  stall or proceed"];
+  hazard -> entries [label="  oldest for its location"];
 
-  fsm -> sf [label="  lookup"];
-  sf -> snpgen [label="  sharer vector"];
-  snpgen -> dct [label="  eligible peer"];
-
-  // Each engine group is chained into a column rather than spread across a
-  // rank, so the figure stays narrow enough to be legible on a portrait page.
-  fsm -> dmt; dmt -> dwt [style=invis]; dwt -> stash [style=invis];
-  fsm -> alu; alu -> cmo [style=invis]; cmo -> excl [style=invis];
-  fsm -> dwt [style=invis]; fsm -> stash [style=invis];
-  fsm -> cmo [style=invis]; fsm -> excl [style=invis];
+  entries -> sf [label="  start: lookup"];
+  entries -> snpgen;
+  sf -> vb [label="  eviction"];
+  vb -> snpgen;
+  entries -> tracker;
+  vb -> tracker;
+  tracker -> buf [dir=both];
+  entries -> alu; alu -> excl [style=invis]; excl -> stash [style=invis];
 
   snpgen -> out;
-  dct -> out; dmt -> out; dwt -> out; stash -> out;
-  alu -> out; cmo -> out; excl -> out;
-  fsm -> out;
+  tracker -> out;
+  entries -> out;
   retry -> out;
 }

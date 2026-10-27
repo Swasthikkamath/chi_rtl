@@ -404,6 +404,12 @@ module chi_interconnect_top #(
             || (CFG.snpFilterWays > CFG.snpFilterEntries)
             || ((CFG.snpFilterEntries % CFG.snpFilterWays) != 0))
           $fatal(1, "Invalid snoop-filter geometry");
+        // The set index is taken straight from the low line-address bits.
+        if (((CFG.snpFilterEntries / CFG.snpFilterWays) < 2)
+            || (((CFG.snpFilterEntries / CFG.snpFilterWays)
+                 & ((CFG.snpFilterEntries / CFG.snpFilterWays) - 1)) != 0))
+          $fatal(1, "snpFilterEntries / snpFilterWays = %0d sets must be a power of two of at least 2",
+                 CFG.snpFilterEntries / CFG.snpFilterWays);
         if ((CFG.interleaveGranule < 64)
             || ((CFG.interleaveGranule & (CFG.interleaveGranule - 1)) != 0))
           $fatal(1, "Interleave granule must be a power of two at least 64");

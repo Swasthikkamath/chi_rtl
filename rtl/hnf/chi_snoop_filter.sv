@@ -1,178 +1,185 @@
+// Inclusive, precise snoop filter (directory) of one HN-F.
+//
+// Each way records which RN-Fs may hold a location and whether one of them
+// may hold it in an owning state (UC, UD or SD). An RN-F may drop a clean
+// copy silently (IHI 0050H B4.6), so the sharer vector is a superset: a stale
+// bit costs a snoop that is answered SnpResp_I, never a missed copy.
+//
+// Lookup is combinational and serves the one entry that starts each cycle.
+// Because entries for one location run one at a time, the state an entry
+// reads stays valid until that entry writes it back.
+//
+// An update that needs a way in a full set evicts one. The HN-F supplies the
+// ways whose location an active transaction holds, and those are never
+// chosen. The evicted location, with its sharers, goes to the victim buffer,
+// which snoops it out with SnpCleanInvalid and writes back any Dirty data
+// before anything else may touch the location (IHI 0050H B4.4: a back
+// invalidation uses SnpUnique or SnpCleanInvalid). When every unlocked way
+// would need a victim entry and none is free, the update waits.
 module chi_snoop_filter #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned ENTRIES = CFG.snpFilterEntries,
   parameter int unsigned WAYS = CFG.snpFilterWays,
-  parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1
+  parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
+  parameter int unsigned KEY_W = CFG.addrW - 6,
+  parameter int unsigned RNF_W = chi_pkg::clog2Min1(NUM_RNF)
 ) (
   input  logic clk,
   input  logic resetn,
-  input  logic lookupValid,
-  input  logic [CFG.addrW-7:0] lookupLineAddr,
+  input  logic [KEY_W-1:0] lookupKey,
   output logic lookupHit,
   output logic [NUM_RNF-1:0] lookupSharers,
-  output logic lookupPrecise,
-  output logic lookupHasOwner,
-  output logic [chi_pkg::clog2Min1(NUM_RNF)-1:0] lookupOwner,
+  output logic lookupOwnerValid,
+  output logic [RNF_W-1:0] lookupOwner,
   input  logic updateValid,
-  output logic updateReady,
-  input  logic [CFG.addrW-7:0] updateLineAddr,
+  input  logic [KEY_W-1:0] updateKey,
+  // A zero sharer vector removes the location.
   input  logic [NUM_RNF-1:0] updateSharers,
-  input  logic updatePrecise,
-  input  logic updateHasOwner,
-  input  logic [chi_pkg::clog2Min1(NUM_RNF)-1:0] updateOwner,
-  input  logic invalidate,
-  output logic backInvValid,
-  input  logic backInvReady,
-  output logic [CFG.addrW-7:0] backInvLineAddr,
-  output logic [NUM_RNF-1:0] backInvSharers,
-  input  logic backInvDone
+  input  logic updateOwnerValid,
+  input  logic [RNF_W-1:0] updateOwner,
+  // Keys of the ways in the update set, so the HN-F can mark the locked ones.
+  output logic [WAYS-1:0][KEY_W-1:0] updateSetKeys,
+  output logic [WAYS-1:0] updateSetValid,
+  input  logic [WAYS-1:0] updateLockedWays,
+  input  logic victimReady,
+  output logic updateReady,
+  output logic victimValid,
+  output logic [KEY_W-1:0] victimKey,
+  output logic [NUM_RNF-1:0] victimSharers,
+  output logic victimOwnerValid,
+  output logic [RNF_W-1:0] victimOwner
 );
   import chi_pkg::*;
 
   localparam int unsigned SETS = (ENTRIES / WAYS) > 0 ? (ENTRIES / WAYS) : 1;
   localparam int unsigned SET_W = clog2Min1(SETS);
   localparam int unsigned WAY_W = clog2Min1(WAYS);
-  localparam int unsigned LINE_W = CFG.addrW - 6;
-  localparam int unsigned TAG_W = LINE_W - SET_W;
+  localparam int unsigned TAG_W = KEY_W - SET_W;
 
   logic validRam [SETS][WAYS];
   logic [TAG_W-1:0] tagRam [SETS][WAYS];
   logic [NUM_RNF-1:0] sharerRam [SETS][WAYS];
-  logic preciseRam [SETS][WAYS];
   logic ownerValidRam [SETS][WAYS];
-  logic [clog2Min1(NUM_RNF)-1:0] ownerRam [SETS][WAYS];
+  logic [RNF_W-1:0] ownerRam [SETS][WAYS];
   logic [WAY_W-1:0] replaceWay [SETS];
-
-  logic pendingReplacement;
-  logic pendingIssued;
-  logic [SET_W-1:0] pendingSet;
-  logic [WAY_W-1:0] pendingWay;
-  logic [TAG_W-1:0] pendingTag;
-  logic [NUM_RNF-1:0] pendingSharers;
-  logic pendingPrecise;
-  logic pendingHasOwner;
-  logic pendingInvalidate;
-  logic [clog2Min1(NUM_RNF)-1:0] pendingOwner;
 
   logic [SET_W-1:0] lookupSet;
   logic [TAG_W-1:0] lookupTag;
-  logic updateHit;
-  logic [WAY_W-1:0] updateHitWay;
-  logic updateHasInvalid;
-  logic [WAY_W-1:0] updateInvalidWay;
   logic [SET_W-1:0] updateSet;
   logic [TAG_W-1:0] updateTag;
+  logic updateHit;
+  logic [WAY_W-1:0] updateHitWay;
+  logic freeWayFound;
+  logic [WAY_W-1:0] freeWay;
+  logic victimFound;
+  logic [WAY_W-1:0] victimWay;
+  logic writeWay;
+  logic [WAY_W-1:0] targetWay;
+  logic removeLocation;
+  int unsigned candidate;
 
   always_comb begin
-    lookupSet = lookupLineAddr[SET_W-1:0];
-    lookupTag = lookupLineAddr[LINE_W-1:SET_W];
+    lookupSet = lookupKey[SET_W-1:0];
+    lookupTag = lookupKey[KEY_W-1:SET_W];
     lookupHit = 1'b0;
     lookupSharers = '0;
-    lookupPrecise = 1'b0;
-    lookupHasOwner = 1'b0;
+    lookupOwnerValid = 1'b0;
     lookupOwner = '0;
     for (int unsigned way = 0; way < WAYS; way++) begin
-      if (lookupValid && validRam[lookupSet][way]
-          && (tagRam[lookupSet][way] == lookupTag)) begin
+      if (validRam[lookupSet][way] && (tagRam[lookupSet][way] == lookupTag)) begin
         lookupHit = 1'b1;
         lookupSharers = sharerRam[lookupSet][way];
-        lookupPrecise = preciseRam[lookupSet][way];
-        lookupHasOwner = ownerValidRam[lookupSet][way];
+        lookupOwnerValid = ownerValidRam[lookupSet][way];
         lookupOwner = ownerRam[lookupSet][way];
       end
     end
   end
 
   always_comb begin
-    updateSet = updateLineAddr[SET_W-1:0];
-    updateTag = updateLineAddr[LINE_W-1:SET_W];
+    updateSet = updateKey[SET_W-1:0];
+    updateTag = updateKey[KEY_W-1:SET_W];
     updateHit = 1'b0;
     updateHitWay = '0;
-    updateHasInvalid = 1'b0;
-    updateInvalidWay = '0;
+    freeWayFound = 1'b0;
+    freeWay = '0;
     for (int unsigned way = 0; way < WAYS; way++) begin
+      updateSetKeys[way] = {tagRam[updateSet][way], updateSet};
+      updateSetValid[way] = validRam[updateSet][way];
       if (validRam[updateSet][way] && (tagRam[updateSet][way] == updateTag)) begin
         updateHit = 1'b1;
-        updateHitWay = way[WAY_W-1:0];
+        updateHitWay = WAY_W'(way);
       end
-      if (!updateHasInvalid && !validRam[updateSet][way]) begin
-        updateHasInvalid = 1'b1;
-        updateInvalidWay = way[WAY_W-1:0];
+      if (!freeWayFound && !validRam[updateSet][way]) begin
+        freeWayFound = 1'b1;
+        freeWay = WAY_W'(way);
       end
     end
-    updateReady = !pendingReplacement;
-    backInvValid = pendingReplacement && !pendingIssued;
-    backInvLineAddr = {tagRam[pendingSet][pendingWay], pendingSet};
-    backInvSharers = sharerRam[pendingSet][pendingWay];
+
+    // Victim: the first unlocked way at or after the rotating pointer.
+    victimFound = 1'b0;
+    victimWay = '0;
+    candidate = 0;
+    for (int unsigned offset = 0; offset < WAYS; offset++) begin
+      candidate = int'(replaceWay[updateSet]) + offset;
+      if (candidate >= WAYS)
+        candidate = candidate - WAYS;
+      if (!victimFound && !updateLockedWays[candidate]) begin
+        victimFound = 1'b1;
+        victimWay = WAY_W'(candidate);
+      end
+    end
+
+    removeLocation = updateSharers == '0;
+    writeWay = 1'b0;
+    targetWay = '0;
+    victimValid = 1'b0;
+    updateReady = 1'b0;
+    if (removeLocation) begin
+      updateReady = 1'b1;
+      writeWay = updateHit;
+      targetWay = updateHitWay;
+    end else if (updateHit) begin
+      updateReady = 1'b1;
+      writeWay = 1'b1;
+      targetWay = updateHitWay;
+    end else if (freeWayFound) begin
+      updateReady = 1'b1;
+      writeWay = 1'b1;
+      targetWay = freeWay;
+    end else if (victimFound && victimReady) begin
+      updateReady = 1'b1;
+      writeWay = 1'b1;
+      targetWay = victimWay;
+      victimValid = updateValid;
+    end
+
+    victimKey = {tagRam[updateSet][victimWay], updateSet};
+    victimSharers = sharerRam[updateSet][victimWay];
+    victimOwnerValid = ownerValidRam[updateSet][victimWay];
+    victimOwner = ownerRam[updateSet][victimWay];
   end
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      pendingReplacement <= 1'b0;
-      pendingIssued <= 1'b0;
-      pendingSet <= '0;
-      pendingWay <= '0;
-      pendingTag <= '0;
-      pendingSharers <= '0;
-      pendingPrecise <= 1'b0;
-      pendingHasOwner <= 1'b0;
-      pendingInvalidate <= 1'b0;
-      pendingOwner <= '0;
       for (int unsigned set = 0; set < SETS; set++) begin
         replaceWay[set] <= '0;
         for (int unsigned way = 0; way < WAYS; way++) begin
           validRam[set][way] <= 1'b0;
           tagRam[set][way] <= '0;
           sharerRam[set][way] <= '0;
-          preciseRam[set][way] <= 1'b0;
           ownerValidRam[set][way] <= 1'b0;
           ownerRam[set][way] <= '0;
         end
       end
-    end else begin
-      if (backInvValid && backInvReady)
-        pendingIssued <= 1'b1;
-      if (pendingReplacement && pendingIssued && backInvDone) begin
-        validRam[pendingSet][pendingWay] <= !pendingInvalidate;
-        tagRam[pendingSet][pendingWay] <= pendingTag;
-        sharerRam[pendingSet][pendingWay] <= pendingSharers;
-        preciseRam[pendingSet][pendingWay] <= pendingPrecise;
-        ownerValidRam[pendingSet][pendingWay] <= pendingHasOwner;
-        ownerRam[pendingSet][pendingWay] <= pendingOwner;
-        if (pendingWay == WAY_W'(WAYS - 1))
-          replaceWay[pendingSet] <= '0;
-        else
-          replaceWay[pendingSet] <= pendingWay + 1'b1;
-        pendingReplacement <= 1'b0;
-        pendingIssued <= 1'b0;
-      end
-      if (updateValid && updateReady) begin
-        if (updateHit || updateHasInvalid) begin
-          validRam[updateSet][updateHit ? updateHitWay : updateInvalidWay]
-            <= !invalidate;
-          tagRam[updateSet][updateHit ? updateHitWay : updateInvalidWay]
-            <= updateTag;
-          sharerRam[updateSet][updateHit ? updateHitWay : updateInvalidWay]
-            <= updateSharers;
-          preciseRam[updateSet][updateHit ? updateHitWay : updateInvalidWay]
-            <= updatePrecise;
-          ownerValidRam[updateSet][updateHit ? updateHitWay : updateInvalidWay]
-            <= updateHasOwner;
-          ownerRam[updateSet][updateHit ? updateHitWay : updateInvalidWay]
-            <= updateOwner;
-        end else begin
-          pendingReplacement <= 1'b1;
-          pendingIssued <= 1'b0;
-          pendingSet <= updateSet;
-          pendingWay <= replaceWay[updateSet];
-          pendingTag <= updateTag;
-          pendingSharers <= updateSharers;
-          pendingPrecise <= updatePrecise;
-          pendingHasOwner <= updateHasOwner;
-          pendingInvalidate <= invalidate;
-          pendingOwner <= updateOwner;
-        end
-      end
+    end else if (updateValid && updateReady && writeWay) begin
+      validRam[updateSet][targetWay] <= !removeLocation;
+      tagRam[updateSet][targetWay] <= updateTag;
+      sharerRam[updateSet][targetWay] <= updateSharers;
+      ownerValidRam[updateSet][targetWay] <= updateOwnerValid && !removeLocation;
+      ownerRam[updateSet][targetWay] <= updateOwner;
+      if (victimValid)
+        replaceWay[updateSet] <= (int'(victimWay) == (WAYS - 1))
+                                 ? '0 : (victimWay + 1'b1);
     end
   end
 endmodule

@@ -55,6 +55,7 @@ package chi_pkg;
     REQ_CLEAN_UNIQUE                   = 7'h0B,
     REQ_MAKE_UNIQUE                    = 7'h0C,
     REQ_EVICT                          = 7'h0D,
+    REQ_CLEAN_INVALID_STORAGE          = 7'h0E,
     REQ_READ_NO_SNP_SEP                = 7'h11,
     REQ_CLEAN_SHARED_PERSIST_SEP       = 7'h13,
     REQ_DVM_OP                         = 7'h14,
@@ -107,9 +108,11 @@ package chi_pkg;
     REQ_WRITE_NO_SNP_FULL_CLEAN_SH_PER_SEP = 7'h52,
     REQ_WRITE_UNIQUE_FULL_CLEAN_SH     = 7'h54,
     REQ_WRITE_UNIQUE_FULL_CLEAN_SH_PER_SEP = 7'h56,
+    REQ_WRITE_UNIQUE_FULL_CLEAN_INV_STRG = 7'h57,
     REQ_WRITE_BACK_FULL_CLEAN_SH       = 7'h58,
     REQ_WRITE_BACK_FULL_CLEAN_INV      = 7'h59,
     REQ_WRITE_BACK_FULL_CLEAN_SH_PER_SEP = 7'h5A,
+    REQ_WRITE_BACK_FULL_CLEAN_INV_STRG = 7'h5B,
     REQ_WRITE_CLEAN_FULL_CLEAN_SH      = 7'h5C,
     REQ_WRITE_CLEAN_FULL_CLEAN_SH_PER_SEP = 7'h5E,
     REQ_WRITE_NO_SNP_PTL_CLEAN_SH      = 7'h60,
@@ -119,6 +122,7 @@ package chi_pkg;
     REQ_WRITE_UNIQUE_PTL_CLEAN_SH_PER_SEP = 7'h66,
     REQ_WRITE_NO_SNP_PTL_CLEAN_INV_POPA = 7'h70,
     REQ_WRITE_NO_SNP_FULL_CLEAN_INV_POPA = 7'h71,
+    REQ_WRITE_NO_SNP_FULL_CLEAN_INV_STRG = 7'h72,
     REQ_WRITE_BACK_FULL_CLEAN_INV_POPA = 7'h79
   } chi_req_opcode_e;
 

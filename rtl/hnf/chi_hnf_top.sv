@@ -1,3 +1,33 @@
+// Coherent Home Node (HN-F).
+//
+// Every request the Home accepts gets its own POS entry, and every entry runs
+// its own transaction: there is no global FSM. Transactions to different
+// locations proceed together; transactions to one location run one at a time
+// in arrival order, held back by chi_hazard until the older one frees
+// (IHI 0050H B4.11.2). An entry is a set of obligations — responses it owes
+// the Requester, snoops it must send and collect, data it must receive,
+// memory operations it must have performed — and it frees once every
+// obligation is met and the directory is updated.
+//
+// Owners. The snoop engine, the downstream trackers and the line buffers are
+// shared by POS entries (owners 0 .. POS_DEPTH-1) and victim-buffer entries
+// (owners POS_DEPTH ..). A victim entry holds a location the directory had to
+// evict; it snoops the location out with SnpCleanInvalid and writes back any
+// Dirty data, and while it does so the location is hazarded like a POS entry.
+//
+// Identifiers. Towards a Requester the Home uses the entry index as DBID, so
+// write data and CompAck index the entry directly (IHI 0050H B2.4.3). Towards
+// an RN-F a snoop carries the owner index as TxnID, and towards the
+// Subordinate a request carries the owner index as TxnID; neither ever carries
+// a Requester's TxnID.
+//
+// Data. Each owner has a 64-byte line buffer with three byte-valid masks:
+// bytes written by the Requester, bytes from a snoop, bytes from memory. A
+// later source never overwrites a more recent one, so a partial write merges
+// over Dirty snoop data, which merges over memory data.
+//
+// Direct transfers (DCT, DMT, DWT) are not used by this engine yet; every
+// transaction moves its data through the Home.
 module chi_hnf_top #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0] HN_NODE_ID = '0,
@@ -5,13 +35,13 @@ module chi_hnf_top #(
   parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     RNF_NODE_IDS [NUM_RNF] = '{default:'0},
-  parameter bit COMBINED_COMP_DBID = 1'b1,
-  parameter bit COMBINED_COMP_STASH_DONE = 1'b1,
   // Capabilities of the SN-F this Home is striped to and of every RN-F as a
   // DCT forwarder (IHI 0050H B16.1.3, B16.1.5).
   parameter bit SN_DMT_CAP = 1'b1,
   parameter bit SN_DWT_CAP = 1'b1,
-  parameter logic [NUM_RNF-1:0] RNF_DCT_CAP = '1
+  parameter logic [NUM_RNF-1:0] RNF_DCT_CAP = '1,
+  // Victim-buffer entries for directory evictions.
+  parameter int unsigned VICTIM_DEPTH = 2
 ) (
   input  logic clk,
   input  logic resetn,
@@ -42,1175 +72,653 @@ module chi_hnf_top #(
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
+  import chi_hnf_pkg::*;
 
   localparam int unsigned POS_DEPTH = (CFG.posEntries > 0) ? CFG.posEntries : 1;
+  localparam int unsigned NUM_VB = (VICTIM_DEPTH > 0) ? VICTIM_DEPTH : 1;
+  localparam int unsigned NUM_OWNERS = POS_DEPTH + NUM_VB;
+  localparam int unsigned OWNER_W = clog2Min1(NUM_OWNERS);
+  localparam int unsigned POS_W = clog2Min1(POS_DEPTH);
+  localparam int unsigned VB_W = clog2Min1(NUM_VB);
+  localparam int unsigned RNF_W = clog2Min1(NUM_RNF);
+  // A location is a 64-byte line in one Physical Address Space: PAS is part
+  // of the address for every snoopable access (IHI 0050H B2.8.2), so it is
+  // part of every key the Home compares, stores or snoops with.
+  localparam int unsigned LINE_W = CFG.addrW - 6;
+  localparam int unsigned KEY_W = LINE_W + CHI_PAS_W;
   localparam int unsigned RETRY_RECORDS =
     (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
   localparam int unsigned DAT_BYTES = CFG.dataW / 8;
-  localparam int unsigned DAT_OFF_W = clog2Min1(DAT_BYTES);
-  // A snoop response always carries a whole 64-byte line, however wide the
-  // data bus is (IHI 0050H B4.9.1).
-  localparam int unsigned LINE_BEATS =
-    (512 / CFG.dataW > 0) ? (512 / CFG.dataW) : 1;
+  localparam int unsigned STEP = datIdStep(CFG);
+  localparam int unsigned POISON_PER_BEAT = CFG.dataW / 64;
+  localparam int unsigned SF_WAYS =
+    (CFG.snpFilterWays > 0) ? CFG.snpFilterWays : 1;
+  localparam logic [63:0] ALL_BYTES = '1;
 
-  typedef enum logic [4:0] {
-    HNF_IDLE, HNF_SNOOP_START, HNF_SNOOP_WAIT, HNF_REQ_SEND,
-    HNF_WAIT_RESPONSE, HNF_WAIT_COMP_ACK, HNF_BACKINV_START,
-    HNF_BACKINV_WAIT, HNF_ATOMIC_DBID, HNF_ATOMIC_OPERAND,
-    HNF_ATOMIC_READ, HNF_ATOMIC_INITIAL, HNF_ATOMIC_WRITE,
-    HNF_ATOMIC_WDATA, HNF_ATOMIC_WCOMP, HNF_ATOMIC_RETURN,
-    HNF_ORDER_RECEIPT, HNF_DMT_RESP, HNF_STASH_COMP, HNF_STASH_DONE,
-    HNF_PULL_REQ, HNF_PULL_DATA, HNF_DATALESS_COMP, HNF_SNOOP_DATA_SEND,
-    HNF_SNOOP_WB_REQ, HNF_SNOOP_WB_DATA, HNF_SNOOP_WB_COMP
-  } hnf_state_e;
-  hnf_state_e state;
+  generate
+    begin : chi_cfg_check
+      initial begin
+        if (VICTIM_DEPTH == 0)
+          $fatal(1, "chi_hnf_top VICTIM_DEPTH must be at least 1: a directory eviction needs a victim entry to snoop out and write back the evicted line");
+        // The owner index is the TxnID of every snoop and every downstream
+        // request, and the POS index is the DBID, so both must fit TxnID.
+        if (NUM_OWNERS > (1 << CFG.txnIdW))
+          $fatal(1, "posEntries (%0d) plus VICTIM_DEPTH (%0d) owners do not fit the %0d-bit TxnID the Home uses for snoops, downstream requests and DBID",
+                 CFG.posEntries, VICTIM_DEPTH, CFG.txnIdW);
+      end
+    end
+  endgenerate
 
+  // ---------------------------------------------------------------------
+  // Per-entry transaction state. Fields are grouped by what owns them:
+  // the request and its decode never change after allocation; the
+  // directory snapshot and the plan are written once when the entry
+  // starts; the rest moves as messages arrive and leave.
+  // ---------------------------------------------------------------------
+  typedef struct packed {
+    // Life cycle.
+    chi_hnf_phase_e     phase;
+    // Request as received, and its decode.
+    chi_req_flit_t      req;
+    chi_hnf_kind_e      kind;
+    chi_hnf_cmo_e       cmo;
+    chi_hnf_err_e       err;         // NDERR cause, decided before start
+    logic               reqIsRnf;    // the Requester is a tracked RN-F
+    logic [RNF_W-1:0]   reqRnf;      // its RN-F index
+    // Directory snapshot taken when the entry starts.
+    logic               sfHit;
+    logic [NUM_RNF-1:0] sfSharers;
+    logic               sfOwnerValid;
+    logic [RNF_W-1:0]   sfOwner;
+    // Exclusive result, decided when the entry starts.
+    logic               exclLoad;    // an Exclusive Load the monitor accepted
+    logic               exclStore;   // an Exclusive Store transaction
+    logic               exclPass;    // the Exclusive Store passed
+    // Snoops.
+    logic [NUM_RNF-1:0] snpTargets;  // every RN-F this entry snoops
+    logic [NUM_RNF-1:0] snpToSend;   // not yet sent
+    logic [NUM_RNF-1:0] snpPending;  // sent, response outstanding
+    logic [NUM_RNF-1:0] snpKeep;     // Snoopee kept a copy
+    logic [NUM_RNF-1:0] snpOwns;     // Snoopee kept UC, UD or SD
+    chi_snp_opcode_e    snpOpcode;   // snoop for every target but the stash target
+    logic               snpRetToSrc;
+    logic [3:0]         snpGranules; // snoop data granules received
+    logic               snpGotData;  // a whole line came back with a snoop
+    logic               snpDirty;    // that line carried PassDirty
+    logic               snpPtl;      // the Dirty data was partial
+    logic               snpErr;      // a snoop response reported an error
+    // Stashing.
+    logic               stashValid;  // a stash snoop goes to stashTarget
+    logic [RNF_W-1:0]   stashTarget;
+    chi_snp_opcode_e    stashOpcode;
+    logic               stashLpidValid;
+    logic [CHI_MAX_LPID_W-1:0] stashLpid;
+    logic               stashUnique;
+    chi_resp_e          pullResp;    // state the Data Pull CompData grants
+    logic               pullValid;   // the stash target asked for a Data Pull
+    logic [CHI_TXNID_FLIT_W-1:0] pullTxnId;
+    logic [3:0]         pullGranSent;
+    logic               pullAckOwed; // CompAck owed by the stash target
+    // Requester data.
+    logic               wrOwed;      // write data still owed by the Requester
+    logic [3:0]         wrGranules;
+    logic               wrCancel;    // WriteDataCancel or CopyBackWriteData_I
+    chi_resp_e          wrResp;      // CopyBack data state
+    logic [CFG.dataW-1:0] atomicBeat;   // the packet carrying the operand
+    logic [1:0]         atomicBeatId;
+    // Atomic result.
+    logic               atomicDone;
+    logic               atomicUpdate; // the operation changed the location
+    logic [63:0]        atomicOrig;   // value returned to the Requester
+    // Downstream.
+    logic               dnBusy;      // an operation is with the SN tracker
+    chi_hnf_dn_e        dnKind;      // the one in flight
+    logic               dnReadDone;
+    logic               dnWriteDone;
+    logic               dnCmoDone;
+    // Responses owed to the Requester.
+    logic               receiptOwed; // ReadReceipt
+    logic               dbidOwed;    // DBIDResp, or CompDBIDResp if dbidWithComp
+    logic               dbidWithComp;
+    logic               compOwed;    // Comp, CompData or CompStashDone
+    logic [3:0]         compGranSent;
+    logic               compCmoOwed; // CompCMO of a Combined write
+    logic               compAckOwed; // CompAck from the Requester
+    logic               sfUpdOwed;   // directory write at retirement
+  } entry_t;
+
+  // Victim-buffer entry. The key holds the evicted location, PAS included.
+  typedef struct packed {
+    logic               valid;
+    logic [KEY_W-1:0]   key;
+    logic [NUM_RNF-1:0] snpToSend;
+    logic [NUM_RNF-1:0] snpPending;
+    logic [3:0]         snpGranules;
+    logic               snpDirty;
+    logic               dnBusy;
+    logic               dnWriteDone;
+  } victim_t;
+
+  // ---------------------------------------------------------------------
+  // Decode of the three inputs.
+  // ---------------------------------------------------------------------
   chi_req_flit_t incomingReq;
-  chi_req_flit_t activeReq;
   chi_rsp_flit_t incomingRsp;
   chi_dat_flit_t incomingDat;
-  chi_req_flit_t downstreamReq;
-  chi_rsp_flit_t responseFlit;
-  chi_dat_flit_t requesterDat;
-  logic [CFG.addrW-7:0] incomingLine;
-  logic incomingDatLast;
-  logic pullDatLast;
-  logic coherentRequest;
-  logic activeCoherent;
-  logic activeWrite;
-  logic activeCmo;
-  logic cmoWrite;
-  logic cmoCombined;
-  logic cmoSnoop;
-  logic cmoPersist;
-  logic [2:0] cmoCategory;
-  logic cmoCompletionPending;
-  logic cmoPersistPending;
-  logic cmoDone;
+  logic [KEY_W-1:0] incomingKey;
 
-  logic posAllocReady;
-  logic [clog2Min1(POS_DEPTH)-1:0] posAllocIndex;
-  logic [clog2Min1(POS_DEPTH)-1:0] activePosIndex;
-  logic posFree;
-  logic [POS_DEPTH-1:0] posActive;
-  logic [POS_DEPTH-1:0] posReadyToFree;
-  logic [POS_DEPTH-1:0][CFG.addrW-7:0] posLine;
-  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] posRequester [POS_DEPTH];
-  logic [CFG.txnIdW-1:0] posTxn [POS_DEPTH];
-  chi_req_opcode_e posOpcode [POS_DEPTH];
-  logic [2:0] posLifecycle [POS_DEPTH];
-  logic sameAddressBusy;
-
-  logic sfHit;
-  logic [NUM_RNF-1:0] sfSharers;
-  logic sfPrecise;
-  logic sfHasOwner;
-  logic [clog2Min1(NUM_RNF)-1:0] sfOwner;
-  logic sfUpdate;
-  logic sfUpdateReady;
-  logic [NUM_RNF-1:0] sfUpdateSharers;
-  logic sfInvalidate;
-  logic sfBackInvValid;
-  logic sfBackInvReady;
-  logic [CFG.addrW-7:0] sfBackInvLine;
-  logic [NUM_RNF-1:0] sfBackInvSharers;
-  logic sfBackInvDone;
-
-  logic snpStart;
-  logic snpStartReady;
-  logic [NUM_RNF-1:0] snpStartSharers;
-  logic [CFG.addrW-7:0] snpStartLine;
-  chi_snp_opcode_e snpStartOpcode;
-  logic [CFG.txnIdW-1:0] snpStartTxn;
-  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] snpFwdNid;
-  logic [CFG.txnIdW-1:0] snpFwdTxn;
-  logic snpRetToSrc;
-  logic snpBusy;
-  logic snpDone;
-  logic snpRspReady;
-
-  // A snoop with RetToSrc set asks the snooped Requester for the line, and it
-  // answers on the data channel with SnpRespData rather than on the response
-  // channel (IHI 0050H B4.9.1). That reply is both the snoop response the
-  // generator is waiting for and the data the requesting Requester needs, so it
-  // is counted as a response here and streamed straight through to the
-  // Requester. Without this the line would be read from memory, which is stale
-  // whenever the snooped copy was dirty.
-  logic snpRspDataValid;
-  logic snpRspDataLast;
-  logic snpRspDataAccept;
-  logic snoopSuppliedData;
-  logic snoopDataSupplied;
-  logic snoopDataDropped;
-  // A line returned by a snoop cannot be passed straight through to the
-  // Requester: the remaining peers have not been snooped yet, and CompData is
-  // the completion, which must not overtake those invalidations
-  // (IHI 0050H B2.3.1). The line is held here until the snoop burst is done.
-  chi_dat_flit_t snoopDatBuf [LINE_BEATS];
-  logic [$clog2(LINE_BEATS+1)-1:0] snoopDatFill;
-  logic [$clog2(LINE_BEATS+1)-1:0] snoopDatSend;
-  logic snoopDatCapture;
-  logic snoopDataWanted;
-  // A dataless request takes the dirty copy away from its holder without
-  // giving it to anybody, so the Home owes that line to memory before it can
-  // complete (IHI 0050H B2.11.2).
-  chi_dat_flit_t writeBackDat;
-  chi_req_flit_t writeBackReq;
-  logic [CFG.txnIdW-1:0] writeBackDbid;
-  logic writeBackDbidSeen;
-  logic writeBackCompSeen;
-  chi_dat_flit_t snoopDat;
-
-  logic dctEligible;
-  logic dctEligibleRaw;
-  logic dctFallback;
-  chi_snp_opcode_e dctOpcode;
-  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] dctFwdNid;
-  logic [CFG.txnIdW-1:0] dctFwdTxn;
-  logic dctRetToSrc;
-
-  logic retryAccept;
-  logic retryAck;
-  logic [3:0] retryClass;
-  logic [1:0] retryCategory;
-  logic retryRecordFull;
-  logic retryAckSend;
-  logic retryGrantValid;
-  logic retryGrantReady;
-  logic retryGrantSend;
-  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] retryGrantTgtId;
-  logic [3:0] retryGrantClass;
-  logic retryCreditsPending;
-  logic [7:0] retryPending [CHI_CREDIT_TYPES];
-  logic [7:0] retryOutstanding [CHI_CREDIT_TYPES];
-  chi_rsp_flit_t grantFlit;
-  logic resourcesAvailable;
-  logic droppedRequest;
-  logic rspOutBusy;
-  logic hazardBlocked;
-  logic hazardLine;
-  logic hazardOrder;
-  logic [POS_DEPTH-1:0] activeOrdered;
-  logic requestHandshake;
-  logic retryHandshake;
-  logic activeNeedsSnoop;
-  logic exclReserveReady;
-  logic exclOkay;
-  logic activeExclOkay;
-  logic activeNeedPersist;
-  logic activeGotComp;
-  logic activeGotPersist;
-
-  logic dmtEligible;
-  logic dmtEligibleRaw;
-  logic dmtSeparateResponse;
-  logic [CHI_NODEID_SLOT_W-1:0] dmtReturnNid;
-  logic [CHI_TXNID_FLIT_W-1:0] dmtReturnTxnId;
-  logic dwtEligible;
-  logic dwtEligibleRaw;
-  logic dwtDoDwt;
-  logic [CHI_NODEID_SLOT_W-1:0] dwtReturnNid;
-  logic [CHI_TXNID_FLIT_W-1:0] dwtReturnTxnId;
-  logic activeDmt;
-  logic activeDmtSeparate;
-  logic activeDwt;
-  logic orderedReceiptRequired;
-  chi_rsp_flit_t orderResponse;
-
-  logic stashIsStash;
-  logic stashIndependent;
-  logic stashSeparateDone;
-  logic stashTargetValid;
-  logic [NUM_RNF-1:0] stashTargetMask;
-  chi_snp_opcode_e stashTargetSnoop;
-  logic stashLpidValid;
-  logic [chi_cfg_pkg::CHI_MAX_LPID_W-1:0] stashLpid;
-  chi_req_opcode_e stashPullOpcode;
-  chi_resp_e stashPullResp;
-  logic stashUnique;
-  logic activeStash;
-  logic activeStashUnique;
-  logic activeStashIndependent;
-  logic activeStashSeparate;
-  logic [NUM_RNF-1:0] activeStashTargetMask;
-  chi_snp_opcode_e activeStashSnoop;
-  logic activeStashLpidValid;
-  logic [chi_cfg_pkg::CHI_MAX_LPID_W-1:0] activeStashLpid;
-  chi_resp_e activeStashPullResp;
-  logic dataPullValid;
-  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] dataPullTarget;
-  logic [chi_cfg_pkg::CHI_RSP_DBID_SLOT_W-1:0] dataPullTxnId;
-  logic stashPullPending;
-  logic stashDirUpdate;
-  logic sfUpdateHasOwner;
-  logic [clog2Min1(NUM_RNF)-1:0] sfUpdateOwner;
-  chi_req_flit_t pullReq;
-  chi_dat_flit_t pullDat;
-  chi_rsp_flit_t stashResponse;
-  chi_rsp_flit_t datalessResponse;
-
-  logic atomicRequest;
-  logic activeAtomic;
-  logic atomicOpcodeValid;
-  logic atomicReturnsData;
-  logic atomicUpdateEnable;
-  logic [2:0] atomicOperandSize;
-  logic [DAT_OFF_W-1:0] atomicByteOffset;
-  logic [63:0] atomicTransactionData;
-  logic [63:0] atomicCompareData;
-  logic [63:0] atomicInitialWord;
-  logic [63:0] atomicUpdateWord;
-  logic [63:0] atomicOriginalWord;
-  logic [CFG.dataW-1:0] atomicOperandBuffer;
-  logic [CFG.dataW-1:0] atomicInitialBuffer;
-  logic atomicInitialFromSnoop;
-  logic atomicDbidSeen;
-  logic atomicCompSeen;
-  logic atomicDataSent;
-  chi_req_flit_t atomicDownstreamReq;
-  chi_dat_flit_t atomicDownstreamDat;
-  chi_dat_flit_t atomicReturnDat;
-  chi_rsp_flit_t atomicResponse;
-  logic atomicStateActive;
-
-  function automatic logic [63:0] extractWord(
-    input logic [CFG.dataW-1:0] bus,
-    input logic [DAT_OFF_W-1:0] byteOffset
+  function automatic logic [KEY_W-1:0] locationKey(
+    input logic [CHI_MAX_ADDR_W-1:0] addr,
+    input chi_pas_e pas
   );
-    logic [63:0] result;
-    int unsigned index;
-    result = '0;
-    for (int unsigned b = 0; b < 8; b++) begin
-      index = int'(byteOffset) + b;
-      if (index < DAT_BYTES)
-        result[b*8 +: 8] = bus[index*8 +: 8];
-    end
-    return result;
+    return {pas, addr[CFG.addrW-1:6]};
   endfunction
 
-  function automatic logic [CFG.dataW-1:0] insertWord(
-    input logic [CFG.dataW-1:0] bus,
-    input logic [DAT_OFF_W-1:0] byteOffset,
-    input logic [63:0] value,
-    input logic [2:0] operandSize
+  function automatic logic [LINE_W-1:0] keyLine(input logic [KEY_W-1:0] key);
+    return key[LINE_W-1:0];
+  endfunction
+
+  function automatic chi_pas_e keyPas(input logic [KEY_W-1:0] key);
+    return chi_pas_e'(key[KEY_W-1:LINE_W]);
+  endfunction
+
+  function automatic logic isRnf(input logic [CHI_NODEID_SLOT_W-1:0] nodeId);
+    logic match;
+    match = 1'b0;
+    for (int unsigned i = 0; i < NUM_RNF; i++)
+      if ((i < CFG.numRnf) && (nodeId == RNF_NODE_IDS[i]))
+        match = 1'b1;
+    return match;
+  endfunction
+
+  function automatic logic [RNF_W-1:0] rnfIndex(
+    input logic [CHI_NODEID_SLOT_W-1:0] nodeId
   );
-    logic [CFG.dataW-1:0] result;
-    int unsigned index;
-    int unsigned validBytes;
-    result = bus;
-    validBytes = 1 << operandSize;
-    for (int unsigned b = 0; b < 8; b++) begin
-      index = int'(byteOffset) + b;
-      if ((b < validBytes) && (index < DAT_BYTES))
-        result[index*8 +: 8] = value[b*8 +: 8];
-    end
-    return result;
-  endfunction
-
-  function automatic logic [CFG.dataW/8-1:0] operandByteEnables(
-    input logic [DAT_OFF_W-1:0] byteOffset,
-    input logic [2:0] operandSize
-  );
-    logic [CFG.dataW/8-1:0] result;
-    int unsigned index;
-    int unsigned validBytes;
-    result = '0;
-    validBytes = 1 << operandSize;
-    for (int unsigned b = 0; b < 8; b++) begin
-      index = int'(byteOffset) + b;
-      if ((b < validBytes) && (index < DAT_BYTES))
-        result[index] = 1'b1;
-    end
-    return result;
-  endfunction
-
-  function automatic logic isCoherent(input chi_req_opcode_e op);
-    return (op == REQ_READ_SHARED) || (op == REQ_READ_CLEAN)
-           || (op == REQ_READ_UNIQUE) || (op == REQ_READ_NOT_SHARED_DIRTY)
-           || (op == REQ_READ_PREFER_UNIQUE) || (op == REQ_CLEAN_SHARED)
-           || (op == REQ_CLEAN_INVALID) || (op == REQ_MAKE_INVALID)
-           || (op == REQ_CLEAN_UNIQUE) || (op == REQ_MAKE_UNIQUE);
-  endfunction
-
-  // ReadOnce leaves the Requester with no cached copy, so it never changes the
-  // directory, but it still has to be snooped: a peer may hold the line dirty
-  // and memory would answer with a stale value (IHI 0050H B4.4.2).
-  function automatic logic isSnoopable(input chi_req_opcode_e op);
-    return isCoherent(op) || isSnoopableWrite(op) || (op == REQ_READ_ONCE)
-           || (op == REQ_READ_ONCE_CLEAN_INVALID)
-           || (op == REQ_READ_ONCE_MAKE_INVALID);
-  endfunction
-
-  // WriteUnique comes from a Requester that holds no copy of the line, so the
-  // Home has to invalidate every cached copy before the value reaches memory,
-  // or a stale cached copy outlives the write. The other writes come from a
-  // Requester that already owns the line and need no snoop
-  // (IHI 0050H B4.5.1).
-  function automatic logic isSnoopableWrite(input chi_req_opcode_e op);
-    return (op inside {REQ_WRITE_UNIQUE_FULL, REQ_WRITE_UNIQUE_PTL,
-                       REQ_WRITE_UNIQUE_ZERO,
-                       REQ_WRITE_UNIQUE_FULL_STASH,
-                       REQ_WRITE_UNIQUE_PTL_STASH});
-  endfunction
-
-  function automatic logic isAtomicOpcode(input chi_req_opcode_e op);
-    return ((op >= REQ_ATOMIC_STORE_ADD) && (op <= REQ_ATOMIC_LOAD_UMIN))
-           || (op == REQ_ATOMIC_SWAP) || (op == REQ_ATOMIC_COMPARE);
-  endfunction
-
-  function automatic logic isWrite(input chi_req_opcode_e op);
-    return (op inside {REQ_WRITE_EVICT_FULL, REQ_WRITE_CLEAN_FULL,
-                       REQ_WRITE_UNIQUE_PTL, REQ_WRITE_UNIQUE_FULL,
-                       REQ_WRITE_BACK_PTL, REQ_WRITE_BACK_FULL,
-                       REQ_WRITE_NO_SNP_PTL, REQ_WRITE_NO_SNP_FULL,
-                       REQ_WRITE_UNIQUE_ZERO, REQ_WRITE_NO_SNP_ZERO,
-                       REQ_WRITE_UNIQUE_FULL_STASH,
-                       REQ_WRITE_UNIQUE_PTL_STASH});
-  endfunction
-
-  // The cache state a coherent read is granted. A Subordinate knows nothing of
-  // coherence and answers every read with the same Resp, so the Home has to
-  // replace it with the state its own directory justifies before the line
-  // reaches the Requester: Unique only when no other Requester keeps a copy
-  // (IHI 0050H B4.4.1, Table B4-5).
-  function automatic chi_resp_e grantedReadResp(
-    input chi_req_opcode_e op,
-    input logic [NUM_RNF-1:0] otherSharers
-  );
-    if ((op == REQ_READ_UNIQUE) || (op == REQ_MAKE_UNIQUE)
-        || (op == REQ_CLEAN_UNIQUE))
-      return RESP_UC_UD;
-    if ((op == REQ_READ_SHARED) || (op == REQ_READ_CLEAN)
-        || (op == REQ_READ_NOT_SHARED_DIRTY) || (op == REQ_READ_PREFER_UNIQUE))
-      return (otherSharers != '0) ? RESP_SC : RESP_UC_UD;
-    // ReadOnce and the non-coherent reads leave the Requester without a
-    // cached copy, so the line arrives Invalid.
-    return RESP_I;
-  endfunction
-
-  // Requests the Home answers out of the snoop phase alone: they change who
-  // may hold the line but move no data to the Requester, so there is nothing
-  // to fetch from memory and the completion is a bare Comp
-  // (IHI 0050H B2.3.2).
-  function automatic logic isDatalessRequest(input chi_req_opcode_e op);
-    return (op inside {REQ_CLEAN_UNIQUE, REQ_MAKE_UNIQUE, REQ_MAKE_INVALID,
-                       REQ_CLEAN_SHARED, REQ_CLEAN_INVALID, REQ_EVICT});
-  endfunction
-
-  // The snoop that makes a request's target state reachable. A request that
-  // asks for Unique has to take every other copy away, so it snoops with an
-  // invalidating opcode; a shared read only has to downgrade the peers
-  // (IHI 0050H Table B4-6).
-  function automatic chi_snp_opcode_e snoopForRequest(
-    input chi_req_opcode_e op
-  );
-    case (op)
-      REQ_READ_UNIQUE, REQ_CLEAN_UNIQUE: return SNP_UNIQUE;
-      REQ_MAKE_UNIQUE, REQ_MAKE_INVALID: return SNP_MAKE_INVALID;
-      REQ_CLEAN_INVALID:                 return SNP_CLEAN_INVALID;
-      REQ_CLEAN_SHARED:                  return SNP_CLEAN_SHARED;
-      REQ_READ_NOT_SHARED_DIRTY:         return SNP_NOT_SHARED_DIRTY;
-      REQ_READ_CLEAN:                    return SNP_CLEAN;
-      REQ_READ_PREFER_UNIQUE:            return SNP_PREFER_UNIQUE;
-      REQ_READ_ONCE:                     return SNP_ONCE;
-      default:                           return SNP_SHARED;
-    endcase
-  endfunction
-
-  // The data-channel opcodes a Requester uses to push a line towards memory,
-  // as opposed to the ones a Subordinate or a snooped peer uses to return one
-  // (IHI 0050H Table B13.8).
-  function automatic logic isWriteData(input chi_dat_opcode_e op);
-    return (op inside {DAT_COPY_BACK_WR_DATA, DAT_NON_COPY_BACK_WR_DATA,
-                       DAT_NCB_WR_DATA_COMP_ACK, DAT_WRITE_DATA_CANCEL});
-  endfunction
-
-  function automatic logic [NUM_RNF-1:0] requesterBit(
-    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] nodeId
-  );
-    logic [NUM_RNF-1:0] result;
-    result = '0;
+    logic [RNF_W-1:0] index;
+    index = '0;
     for (int unsigned i = 0; i < NUM_RNF; i++)
       if (nodeId == RNF_NODE_IDS[i])
-        result[i] = 1'b1;
-    return result;
+        index = RNF_W'(i);
+    return index;
   endfunction
 
-  function automatic logic [clog2Min1(NUM_RNF)-1:0] requesterIndex(
-    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] nodeId
+  // Line-buffer byte positions of one DAT packet.
+  function automatic logic [63:0] beatBytes(input logic [1:0] dataId);
+    logic [63:0] mask;
+    mask = '0;
+    for (int unsigned b = 0; b < DAT_BYTES; b++)
+      mask[int'(dataId) * 16 + b] = 1'b1;
+    return mask;
+  endfunction
+
+  function automatic logic [63:0] beatEnables(
+    input logic [1:0] dataId,
+    input logic [63:0] be
   );
-    logic [clog2Min1(NUM_RNF)-1:0] result;
-    result = '0;
-    for (int unsigned i = 0; i < NUM_RNF; i++)
-      if (nodeId == RNF_NODE_IDS[i])
-        result = i[clog2Min1(NUM_RNF)-1:0];
-    return result;
+    logic [63:0] mask;
+    mask = '0;
+    for (int unsigned b = 0; b < DAT_BYTES; b++)
+      mask[int'(dataId) * 16 + b] = be[b];
+    return mask;
+  endfunction
+
+  // Granules one received packet accounts for, including the packets that
+  // Limited Data Elision lets it stand in for (IHI 0050H B2.9.5).
+  function automatic logic [3:0] packetGranules(
+    input logic [1:0] dataId,
+    input logic [1:0] numDat
+  );
+    logic [3:0] mask;
+    mask = '0;
+    for (int unsigned g = 0; g < 4; g++)
+      if ((g >= int'(dataId))
+          && (g < (int'(dataId) + (int'(numDat) + 1) * STEP)))
+        mask[g] = 1'b1;
+    return mask;
+  endfunction
+
+  function automatic logic [63:0] transferBytes(
+    input logic [CHI_MAX_ADDR_W-1:0] addr,
+    input logic [2:0] size
+  );
+    logic [63:0] mask;
+    int unsigned bytes;
+    int unsigned first;
+    bytes = 32'd1 << size;
+    first = 32'(addr[5:0]) & ~(bytes - 1);
+    mask = '0;
+    for (int unsigned b = 0; b < 64; b++)
+      if ((b >= first) && (b < (first + bytes)))
+        mask[b] = 1'b1;
+    return mask;
+  endfunction
+
+  // A write that is not cancelled and not a failing exclusive will be
+  // written; Comp and CompCMO wait for it when they have to.
+  function automatic logic eNeedWritebackPossible(
+    input entry_t e,
+    input logic [63:0] wrBe
+  );
+    if (e.kind == HNF_KIND_COPYBACK)
+      return respPassDirty(e.wrResp) && !e.wrCancel;
+    if (e.kind == HNF_KIND_WRITE)
+      return !e.wrCancel && !(e.exclStore && !e.exclPass);
+    return 1'b0;
+  endfunction
+
+  // A WriteNoSnp is forwarded with its own address, Size and attributes,
+  // because the location may be Device or Non-cacheable; everything else the
+  // Home writes is a whole line.
+  function automatic logic dnExactWrite(input entry_t e);
+    return (e.kind == HNF_KIND_WRITE) && !isWriteUnique(e.req.opcode);
   endfunction
 
   always_comb begin
     incomingReq = unpackReqFlit(CFG, reqInFlit.payload[CHI_MAX_REQ_FLIT_W-1:0]);
     incomingRsp = unpackRspFlit(CFG, rspInFlit.payload[CHI_MAX_RSP_FLIT_W-1:0]);
     incomingDat = unpackDatFlit(CFG, datInFlit.payload[CHI_MAX_DAT_FLIT_W-1:0]);
-    incomingLine = incomingReq.addr[CFG.addrW-1:6];
-    // A data message occupies as many DAT packets as the data bus needs to
-    // carry Size bytes, so the end of the message is a function of the
-    // transaction and not of the packet alone (IHI 0050H B2.4.6).
-    incomingDatLast = datLastPacket(CFG, incomingDat.dataId, incomingDat.numDat,
-                                    activeReq.addr, activeReq.size);
-    // The stash data pull always reads a whole line.
-    pullDatLast = datLastPacket(CFG, incomingDat.dataId, incomingDat.numDat,
-                                activeReq.addr, 3'd6);
-    coherentRequest = isCoherent(incomingReq.opcode);
-    atomicRequest = CFG.atomicEn && isAtomicOpcode(incomingReq.opcode);
+    incomingKey = locationKey(incomingReq.addr, incomingReq.pas);
   end
 
-  // Resource evaluation sits in its own block because the retry tracker turns
-  // it into the RetryAck decision that the output block below consumes.
-  always_comb begin
-    // PCrdReturn carries no transaction, and PrefetchTgt has no response and
-    // must never be retried, so both are accepted and discarded here
-    // (IHI 0050H B2.5.6, B4.2.6.2).
-    droppedRequest = (incomingReq.opcode == REQ_PCRD_RETURN)
-                     || (incomingReq.opcode == REQ_PREFETCH_TGT);
-    resourcesAvailable = droppedRequest
-                         || ((state == HNF_IDLE) && posAllocReady
-                             && !hazardBlocked && !sfBackInvValid);
-    // The response channel belongs to the active transaction in these states,
-    // so neither a RetryAck nor a PCrdGrant can use it.
-    rspOutBusy = (state == HNF_WAIT_RESPONSE) || (state == HNF_ORDER_RECEIPT)
-                 || (state == HNF_DMT_RESP) || (state == HNF_ATOMIC_DBID)
-                 || (state == HNF_ATOMIC_RETURN) || (state == HNF_STASH_COMP)
-                 || (state == HNF_STASH_DONE)
-                 || (state == HNF_DATALESS_COMP)
-                 || (state == HNF_SNOOP_WB_DATA)
-                 || (state == HNF_SNOOP_WB_COMP);
-  end
+  // ---------------------------------------------------------------------
+  // State.
+  // ---------------------------------------------------------------------
+  entry_t entry [POS_DEPTH];
+  victim_t victim [NUM_VB];
+  logic [511:0] bufData [NUM_OWNERS];
+  logic [63:0] bufWrBe [NUM_OWNERS];
+  logic [63:0] bufSnpBe [NUM_OWNERS];
+  logic [63:0] bufMemBe [NUM_OWNERS];
+  logic [7:0] bufPoison [NUM_OWNERS];
+  logic [NUM_OWNERS-1:0] bufDataErr;
 
-  // Everything this block drives is a flit or a valid, so none of it may look
-  // at the ready it is paired with. The response channel is shared by the
-  // active transaction, a RetryAck and a PCrdGrant, and that contention is
-  // resolved here without the ready.
-  always_comb begin
-    retryAckSend = reqInValid && !resourcesAvailable && retryAck && !rspOutBusy;
-    retryGrantSend = retryGrantValid && !retryAckSend && !rspOutBusy;
-    requestHandshake = reqInValid && resourcesAvailable;
-    idle = (state == HNF_IDLE) && !sfBackInvValid;
+  // chi_pos.
+  logic posAllocValid;
+  logic posAllocReady;
+  logic [POS_W-1:0] posAllocIndex;
+  logic [POS_DEPTH-1:0] posStartMask;
+  logic [POS_DEPTH-1:0] posFreeMask;
+  logic [POS_DEPTH-1:0] posActive;
+  logic [POS_DEPTH-1:0] posStarted;
+  logic [POS_W:0] posFreeCount;
+  logic [POS_DEPTH-1:0][KEY_W-1:0] posKey;
+  logic [POS_DEPTH-1:0][CHI_NODEID_SLOT_W-1:0] posRequester;
+  logic [POS_DEPTH-1:0][CHI_TXNID_FLIT_W-1:0] posTxnId;
+  chi_req_opcode_e [POS_DEPTH-1:0] posOpcode;
+  chi_order_e [POS_DEPTH-1:0] posOrder;
+  logic [POS_DEPTH-1:0][POS_DEPTH-1:0] posOlder;
 
-    downstreamReq = activeReq;
-    downstreamReq.tgtId = SN_NODE_ID;
-    downstreamReq.srcId = HN_NODE_ID;
-    // A direct transfer names the Requester in the downstream request and
-    // uses a Home-unique TxnID that the Subordinate reflects as DBID.
-    if (activeDmt || activeDwt) begin
-      downstreamReq.txnId = CHI_TXNID_FLIT_W'(activePosIndex);
-      downstreamReq.returnNidOrStashNidOrDataTarget = activeReq.srcId;
-      downstreamReq.returnTxnIdOrStashLpid = activeReq.txnId;
-      downstreamReq.snpAttrOrDoDwt = activeDwt;
-    end
-    reqOutFlit = '0;
-    reqOutFlit.channel = CHI_CHANNEL_REQ;
-    reqOutFlit.targetNodeId = SN_NODE_ID;
-    reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] =
-      packReqFlit(CFG, downstreamReq);
-    reqOutValid = state == HNF_REQ_SEND;
+  // chi_hazard.
+  logic [NUM_VB-1:0] victimActive;
+  logic [NUM_VB-1:0][KEY_W-1:0] victimKey;
+  logic [POS_DEPTH-1:0] hazardLine;
+  logic [POS_DEPTH-1:0] hazardOrder;
+  logic [POS_DEPTH-1:0] hazardVictim;
+  logic [POS_DEPTH-1:0] mayStart;
 
-    responseFlit = incomingRsp;
-    responseFlit.tgtId = activeReq.srcId;
-    responseFlit.srcId = HN_NODE_ID;
-    responseFlit.txnId = activeReq.txnId;
-    // With DWT the Subordinate has already sent DBIDResp to the Requester, so
-    // the Home must forward only the completion.
-    if (COMBINED_COMP_DBID && activeWrite && !activeDwt
-        && (incomingRsp.opcode == RSP_COMP))
-      responseFlit.opcode = RSP_COMP_DBID_RESP;
-    if (activeReq.exclOrSnoopMeOrCah && activeExclOkay)
-      responseFlit.respErr = RESP_ERR_EXOK;
-    rspOutFlit = '0;
-    rspOutFlit.channel = CHI_CHANNEL_RSP;
-    rspOutFlit.targetNodeId = activeReq.srcId;
-    rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
-      packRspFlit(CFG, responseFlit);
-    rspOutValid = 1'b0;
+  // Admission and Request Retry.
+  logic dropRequest;
+  logic resourcesAvailable;
+  logic retryAccept;
+  logic retryAck;
+  logic [3:0] retryClass;
+  logic retryRecordFull;
+  logic [1:0] retryCategory;
+  logic retryAckWant;
+  logic retryHandshake;
+  logic retryGrantValid;
+  logic retryGrantReady;
+  logic [CHI_NODEID_SLOT_W-1:0] retryGrantTgtId;
+  logic [3:0] retryGrantClass;
+  logic retryCreditsPending;
+  logic [7:0] retryPending [CHI_CREDIT_TYPES];
+  logic [7:0] retryOutstanding [CHI_CREDIT_TYPES];
+  logic requestHandshake;
+  entry_t allocEntry;
 
-    // Write data travels towards memory and read data towards the Requester.
-    // The two are told apart by the opcode the flit carries rather than by
-    // comparing its SrcID against the active request: a Requester can only send
-    // its write data once the DBID has reached it, by which time this Home may
-    // have moved on to another transaction, and a SrcID comparison would then
-    // deliver that write data to an unrelated Requester as its read data
-    // (IHI 0050H B2.9.1).
-    requesterDat = incomingDat;
-    requesterDat.tgtId = isWriteData(incomingDat.opcode)
-                         ? SN_NODE_ID : activeReq.srcId;
-    requesterDat.srcId = HN_NODE_ID;
-    requesterDat.txnId = activeReq.txnId;
-    if (!activeAtomic && (incomingDat.opcode == DAT_COMP_DATA))
-      requesterDat.resp = grantedReadResp(
-        activeReq.opcode, sfSharers & ~requesterBit(activeReq.srcId));
+  // Start (directory lookup and plan).
+  logic startValid;
+  logic [POS_W-1:0] startIndex;
+  logic [POS_W-1:0] startPointer;
+  entry_t planEntry;
+  logic sfLookupHit;
+  logic [NUM_RNF-1:0] sfLookupSharers;
+  logic sfLookupOwnerValid;
+  logic [RNF_W-1:0] sfLookupOwner;
 
-    // A snoop response carrying data is retargeted at the Requester that asked
-    // for the line and presented as its CompData.
-    snpRspDataValid = datInValid
-                      && ((incomingDat.opcode == DAT_SNP_RESP_DATA)
-                          || (incomingDat.opcode == DAT_SNP_RESP_DATA_PTL));
-    // A snoop response always carries a whole line, whatever Size the original
-    // request used, so the end of the message is measured over a full line.
-    snpRspDataLast = snpRspDataValid && pullDatLast;
-    // The line is kept when the Requester asked for data, and also when a
-    // dataless request has pulled a dirty copy out of a peer, because that
-    // copy is now the Home's to write back. Once a whole line is held any
-    // further copy is drained and dropped: every copy of a line holds the
-    // same value, a Shared Dirty holder differing from a Shared Clean one
-    // only in who owes the writeback.
-    // A snoopable write overwrites the line, so a dirty copy pulled out of a
-    // peer is of no use to anyone and is dropped rather than buffered.
-    snoopDataWanted = !snoopSuppliedData && !activeWrite
-                      && ((snoopDatFill != '0)
-                          || !isDatalessRequest(activeReq.opcode)
-                          || incomingDat.resp[2]);
-    snoopDataDropped = !snoopDataWanted;
-    snoopDatCapture = (state == HNF_SNOOP_WAIT) && !activeAtomic
-                      && snpRspDataValid && snoopDataWanted
-                      && (snoopDatFill < LINE_BEATS);
-    // The snoop generator only retires the snoop it currently has outstanding,
-    // so the last beat is not taken until that generator agrees the flit came
-    // from the node it is waiting on.
-    snpRspDataAccept = (state == HNF_SNOOP_WAIT) && !activeAtomic
-                       && snpRspDataLast && snpRspReady;
-    snoopDataSupplied = snoopSuppliedData
-                        || (snoopDatCapture
-                            && (snoopDatFill == (LINE_BEATS - 1)));
+  // Exclusive monitor.
+  logic exclReserveValid;
+  logic exclReserveReady;
+  logic exclCheckValid;
+  logic exclOkay;
+  logic exclConflictValid;
 
-    snoopDat = snoopDatBuf[snoopDatSend];
-    snoopDat.tgtId = activeReq.srcId;
-    snoopDat.srcId = HN_NODE_ID;
-    snoopDat.txnId = activeReq.txnId;
-    snoopDat.opcode = DAT_COMP_DATA;
-    // The state the Requester is granted follows what it asked for, and a
-    // sharer supplying the line generally keeps its own copy, so a shared read
-    // lands Shared. PassDirty in the snoop response says the snooped Requester
-    // has given up the dirty responsibility, so it moves to this Requester
-    // rather than to memory, but only where the Requester ends up with a copy
-    // to hold it in (IHI 0050H B2.11.2).
-    snoopDat.resp = grantedReadResp(activeReq.opcode,
-                                    sfSharers & ~requesterBit(activeReq.srcId));
-    if (snoopDatBuf[snoopDatSend].resp[2] && (snoopDat.resp != RESP_I))
-      snoopDat.resp = chi_resp_e'({1'b1, snoopDat.resp[1:0]});
-    datOutFlit = '0;
-    datOutFlit.channel = CHI_CHANNEL_DAT;
-    datOutFlit.targetNodeId = requesterDat.tgtId;
-    datOutFlit.payload = packDatFlit(CFG, requesterDat);
-    datOutValid = 1'b0;
+  // Stash decode of the starting entry.
+  logic stashIsStash;
+  logic stashIndependent;
+  logic stashSeparateDone;
+  logic stashUniqueDec;
+  logic stashTargetValidDec;
+  logic [NUM_RNF-1:0] stashTargetMaskDec;
+  chi_snp_opcode_e stashTargetSnoopDec;
+  logic stashLpidValidDec;
+  logic [CHI_MAX_LPID_W-1:0] stashLpidDec;
+  chi_req_opcode_e stashPullOpcodeDec;
+  chi_resp_e stashPullRespDec;
 
-    // A ReadReceipt from the Subordinate is not forwarded: the Requester has
-    // already had the Home's own ReadReceipt from HNF_ORDER_RECEIPT and must
-    // see only one (IHI 0050H B2.7.3). It is drained in the ready block below,
-    // so forwarding it would also drop a presented response flit whenever the
-    // Requester is not ready.
-    if ((state == HNF_WAIT_RESPONSE) && rspInValid
-        && (incomingRsp.opcode != RSP_SNP_RESP)
-        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED)
-        && (incomingRsp.opcode != RSP_READ_RECEIPT))
-      rspOutValid = 1'b1;
-    if ((state == HNF_WAIT_RESPONSE) && datInValid)
-      datOutValid = 1'b1;
+  // Per-entry derived conditions.
+  logic [POS_DEPTH-1:0] eSnpDone;
+  logic [POS_DEPTH-1:0] eLineComplete;
+  logic [POS_DEPTH-1:0] eOthersKeep;
+  logic [POS_DEPTH-1:0] eMruHold;
+  logic [POS_DEPTH-1:0] eDataPath;
+  logic [POS_DEPTH-1:0] eNeedMemRead;
+  logic [POS_DEPTH-1:0] eNeedWriteback;
+  logic [POS_DEPTH-1:0] eNeedCmoFwd;
+  logic [POS_DEPTH-1:0] eCompReady;
+  logic [POS_DEPTH-1:0] eCompIsData;
+  logic [POS_DEPTH-1:0] eCompCmoReady;
+  logic [POS_DEPTH-1:0] eDbidReady;
+  logic [POS_DEPTH-1:0] ePullReady;
+  logic [POS_DEPTH-1:0] eAtomicReady;
+  logic [POS_DEPTH-1:0] eAllDone;
+  logic [POS_DEPTH-1:0] eReceiptOwed;
+  logic [POS_DEPTH-1:0] eCompOwed;
+  logic [POS_DEPTH-1:0][63:0] eWriteBe;
+  logic [POS_DEPTH-1:0][3:0] eCompGranules;
+  chi_resp_e [POS_DEPTH-1:0] eGrant;
 
-    // The captured line is replayed to the Requester as its CompData once
-    // every peer has answered its snoop.
-    if (state == HNF_SNOOP_DATA_SEND) begin
-      datOutValid = 1'b1;
-      datOutFlit.targetNodeId = activeReq.srcId;
-      datOutFlit.payload = packDatFlit(CFG, snoopDat);
-    end
+  // Snoop engine.
+  logic [NUM_OWNERS-1:0][NUM_RNF-1:0] ownerToSend;
+  logic [NUM_OWNERS-1:0][NUM_RNF-1:0] ownerPending;
+  logic snpIssueValid;
+  logic [OWNER_W-1:0] snpIssueOwner;
+  logic [RNF_W-1:0] snpIssueTarget;
+  logic [31:0] snpOutstanding;
+  chi_noc_flit_t snpIssueFlit;
 
-    if ((state == HNF_ORDER_RECEIPT) || (state == HNF_DMT_RESP)) begin
-      rspOutValid = 1'b1;
-      rspOutFlit.targetNodeId = activeReq.srcId;
-      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
-        packRspFlit(CFG, orderResponse);
-    end
+  // Snoop responses.
+  logic snpRspValid;
+  logic [OWNER_W-1:0] snpRspOwner;
+  logic [RNF_W-1:0] snpRspTarget;
+  logic snpDatValid;
+  logic [OWNER_W-1:0] snpDatOwner;
+  logic [RNF_W-1:0] snpDatTarget;
+  logic [3:0] snpDatGranules;
+  logic snpDatLast;
 
-    if ((state == HNF_STASH_COMP) || (state == HNF_STASH_DONE)) begin
-      rspOutValid = 1'b1;
-      rspOutFlit.targetNodeId = activeReq.srcId;
-      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
-        packRspFlit(CFG, stashResponse);
-    end
+  // Requester data and CompAck.
+  logic wrDatValid;
+  logic [POS_W-1:0] wrDatEntry;
+  logic [3:0] wrDatGranules;
+  logic compAckValid;
+  logic [POS_W-1:0] compAckEntry;
 
-    if (state == HNF_SNOOP_WB_REQ) begin
-      reqOutValid = 1'b1;
-      reqOutFlit.targetNodeId = SN_NODE_ID;
-      reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] =
-        packReqFlit(CFG, writeBackReq);
-    end
+  // Downstream trackers.
+  logic [NUM_OWNERS-1:0] dnStartValid;
+  chi_hnf_dn_e [NUM_OWNERS-1:0] dnStartKind;
+  logic [NUM_OWNERS-1:0][3:0] dnStartGranules;
+  logic [NUM_OWNERS-1:0] dnStartNoData;
+  logic [NUM_OWNERS-1:0] dnStartWantReceipt;
+  logic [NUM_OWNERS-1:0] dnBusy;
+  logic [NUM_OWNERS-1:0] dnDone;
+  logic [NUM_OWNERS-1:0] dnResend;
+  logic [NUM_OWNERS-1:0][3:0] dnResendType;
+  logic dnReqValid;
+  logic [OWNER_W-1:0] dnReqOwner;
+  logic dnReqCreditReturn;
+  logic [3:0] dnReqCreditType;
+  logic dnDatValid;
+  logic [OWNER_W-1:0] dnDatOwner;
+  logic [1:0] dnDatDataId;
+  logic [CHI_RSP_DBID_SLOT_W-1:0] dnDatTxnId;
+  logic snRspValid;
+  logic snDatValid;
+  logic memDatValid;
+  logic [OWNER_W-1:0] memDatOwner;
+  chi_noc_flit_t dnReqFlit;
+  chi_noc_flit_t dnDatFlit;
 
-    if ((state == HNF_SNOOP_WB_DATA) && writeBackDbidSeen) begin
-      datOutValid = 1'b1;
-      datOutFlit.targetNodeId = SN_NODE_ID;
-      datOutFlit.payload = packDatFlit(CFG, writeBackDat);
-    end
+  // Output stages.
+  logic reqFifoReady;
+  logic rspFifoReady;
+  logic snpFifoReady;
+  logic datFifoReady;
+  logic rspPushValid;
+  chi_noc_flit_t rspPushFlit;
+  logic datPushValid;
+  chi_noc_flit_t datPushFlit;
+  logic [1:0] reqFifoCount;
+  logic [1:0] rspFifoCount;
+  logic [1:0] snpFifoCount;
+  logic [1:0] datFifoCount;
 
-    if (state == HNF_DATALESS_COMP) begin
-      rspOutValid = 1'b1;
-      rspOutFlit.targetNodeId = activeReq.srcId;
-      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
-        packRspFlit(CFG, datalessResponse);
-    end
+  // Response arbitration.
+  logic [POS_DEPTH-1:0] rspWant;
+  logic rspEntryValid;
+  logic [POS_W-1:0] rspEntry;
+  logic [POS_W-1:0] rspPointer;
+  logic rspGrantSend;
+  logic rspEntrySend;
+  logic [POS_DEPTH-1:0] datWant;
+  logic datEntryValid;
+  logic [POS_W-1:0] datEntry;
+  logic [POS_W-1:0] datPointer;
+  logic datTrackerTurn;
+  logic datEntrySend;
+  logic datTrackerSend;
+  logic datEntryToPull;
+  logic [1:0] datEntryDataId;
 
-    if (state == HNF_PULL_REQ) begin
-      reqOutValid = 1'b1;
-      reqOutFlit.targetNodeId = SN_NODE_ID;
-      reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] = packReqFlit(CFG, pullReq);
-    end
+  // Atomic execution.
+  logic atomicValid;
+  logic [POS_W-1:0] atomicEntry;
+  logic [2:0] atomicOperandSize;
+  logic [63:0] atomicInitialWord;
+  logic [63:0] atomicTransactionWord;
+  logic [63:0] atomicCompareWord;
+  logic atomicOpValid;
+  logic atomicReturnsData;
+  logic atomicUpdateEnable;
+  logic [63:0] atomicUpdateWord;
+  logic [63:0] atomicOriginalWord;
 
-    if (state == HNF_PULL_DATA) begin
-      datOutValid = datInValid && (incomingDat.opcode == DAT_COMP_DATA);
-      datOutFlit.targetNodeId = dataPullTarget;
-      datOutFlit.payload = packDatFlit(CFG, pullDat);
-    end
+  // Directory update and victims.
+  logic sfUpdateValid;
+  logic [POS_W-1:0] sfUpdateEntry;
+  logic [POS_W-1:0] sfUpdatePointer;
+  logic [KEY_W-1:0] sfUpdateKey;
+  logic [NUM_RNF-1:0] sfUpdateSharers;
+  logic sfUpdateOwnerValid;
+  logic [RNF_W-1:0] sfUpdateOwner;
+  logic [SF_WAYS-1:0][KEY_W-1:0] sfUpdateSetKeys;
+  logic [SF_WAYS-1:0] sfUpdateSetValid;
+  logic [SF_WAYS-1:0] sfUpdateLockedWays;
+  logic sfUpdateReady;
+  logic sfVictimValid;
+  logic [KEY_W-1:0] sfVictimKey;
+  logic [NUM_RNF-1:0] sfVictimSharers;
+  logic sfVictimOwnerValid;
+  logic [RNF_W-1:0] sfVictimOwner;
+  logic victimFree;
+  logic [VB_W-1:0] victimFreeIndex;
 
-    if (retryAckSend) begin
-      responseFlit = '0;
-      responseFlit.tgtId = incomingReq.srcId;
-      responseFlit.srcId = HN_NODE_ID;
-      responseFlit.txnId = incomingReq.txnId;
-      responseFlit.opcode = RSP_RETRY_ACK;
-      responseFlit.pCrdType = retryClass;
-      rspOutFlit.targetNodeId = incomingReq.srcId;
-      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
-        packRspFlit(CFG, responseFlit);
-      rspOutValid = 1'b1;
-    end
-
-    if (retryGrantSend) begin
-      rspOutValid = 1'b1;
-      rspOutFlit.targetNodeId = retryGrantTgtId;
-      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] = packRspFlit(CFG, grantFlit);
-    end
-
-    if (atomicStateActive) begin
-      rspOutValid = (state == HNF_ATOMIC_DBID)
-                    || ((state == HNF_ATOMIC_RETURN) && !atomicReturnsData);
-      rspOutFlit.targetNodeId = activeReq.srcId;
-      rspOutFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] =
-        packRspFlit(CFG, atomicResponse);
-
-      reqOutValid = atomicOpcodeValid
-                    && ((state == HNF_ATOMIC_READ)
-                        || ((state == HNF_ATOMIC_WRITE)
-                            && atomicUpdateEnable));
-      reqOutFlit.targetNodeId = SN_NODE_ID;
-      reqOutFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] =
-        packReqFlit(CFG, atomicDownstreamReq);
-
-      datOutValid = (state == HNF_ATOMIC_WDATA)
-                    || ((state == HNF_ATOMIC_RETURN) && atomicReturnsData);
-      if (state == HNF_ATOMIC_WDATA) begin
-        datOutFlit.targetNodeId = SN_NODE_ID;
-        datOutFlit.payload = packDatFlit(CFG, atomicDownstreamDat);
-      end else begin
-        datOutFlit.targetNodeId = activeReq.srcId;
-        datOutFlit.payload = packDatFlit(CFG, atomicReturnDat);
-      end
-    end
-  end
-
-  // The ready outputs are the only place a downstream ready is consumed. They
-  // are kept in a block of their own so that the flits and valids above stay
-  // independent of them, which is what makes the ready/valid handshake on
-  // every channel free of a combinational loop.
-  always_comb begin
-    // RetryAck is optional: when the retry record table is full the request is
-    // held with back-pressure instead, which keeps the credit accounting exact.
-    reqInReady = resourcesAvailable || (retryAckSend && rspOutReady);
-    retryHandshake = retryAckSend && rspOutReady;
-    retryGrantReady = retryGrantSend && rspOutReady;
-    rspInReady = 1'b0;
-    datInReady = 1'b0;
-
-    if ((state == HNF_WAIT_RESPONSE) && rspInValid
-        && (incomingRsp.opcode != RSP_SNP_RESP)
-        && (incomingRsp.opcode != RSP_SNP_RESP_FWDED)
-        && (incomingRsp.opcode != RSP_READ_RECEIPT))
-      rspInReady = rspOutReady;
-    if ((state == HNF_WAIT_RESPONSE) && datInValid)
-      datInReady = datOutReady;
-    // snpRspReady is qualified by the SrcID presented to the generator, which
-    // a concurrent data-channel snoop response takes over, so the response
-    // channel must not read it as an acceptance of its own flit.
-    if ((state == HNF_SNOOP_WAIT) || (state == HNF_BACKINV_WAIT))
-      rspInReady = snpRspReady && !snpRspDataValid;
-    // A snoop that invalidates a dirty peer copy supplies the value the
-    // atomic operates on, which removes the downstream read.
-    if ((state == HNF_SNOOP_WAIT) && activeAtomic)
-      datInReady = 1'b1;
-    // Otherwise a data-bearing snoop response is taken straight into the line
-    // buffer, or drained and dropped when a copy is already held.
-    if ((state == HNF_SNOOP_WAIT) && !activeAtomic && snpRspDataValid)
-      datInReady = 1'b1;
-    if (state == HNF_PULL_DATA)
-      datInReady = datOutReady;
-    // The Subordinate's DBID and Comp for the Home's own writeback are
-    // consumed here; neither is forwarded to the Requester.
-    if ((state == HNF_SNOOP_WB_DATA) || (state == HNF_SNOOP_WB_COMP))
-      rspInReady = 1'b1;
-    // A ReadReceipt from the Subordinate is optional and carries no state the
-    // Home needs once the read has been forwarded, so it is always drained.
-    if (rspInValid && (incomingRsp.opcode == RSP_READ_RECEIPT))
-      rspInReady = 1'b1;
-    if (state == HNF_WAIT_COMP_ACK)
-      rspInReady = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
-                   && (incomingRsp.srcId == activeReq.srcId);
-    if (atomicStateActive) begin
-      datInReady = (state == HNF_ATOMIC_OPERAND)
-                   || (state == HNF_ATOMIC_INITIAL);
-      rspInReady = (state == HNF_ATOMIC_WCOMP);
-    end
-  end
-
-  chi_cmo cmo_decode (
-    .clk, .resetn, .opcode(incomingReq.opcode),
-    .startValid(requestHandshake), .completionValid(
-      (state == HNF_WAIT_RESPONSE) && rspInValid && rspInReady
-      && ((incomingRsp.opcode == RSP_COMP)
-          || (incomingRsp.opcode == RSP_COMP_DBID_RESP)
-          || (incomingRsp.opcode == RSP_COMP_CMO)
-          || (incomingRsp.opcode == RSP_COMP_PERSIST))),
-    .persistValid((state == HNF_WAIT_RESPONSE) && rspInValid && rspInReady
-                  && ((incomingRsp.opcode == RSP_PERSIST)
-                      || (incomingRsp.opcode == RSP_COMP_PERSIST))),
-    .isCmo(activeCmo), .isWrite(cmoWrite),
-    .combinedWriteCmo(cmoCombined), .requiresSnoopCompletion(cmoSnoop),
-    .requiresPersist(cmoPersist), .category(cmoCategory),
-    .completionPending(cmoCompletionPending),
-    .persistPending(cmoPersistPending), .done(cmoDone)
+  // ---------------------------------------------------------------------
+  // Transaction table, hazards, directory, exclusive monitor, stash decode.
+  // ---------------------------------------------------------------------
+  chi_pos #(
+    .CFG(CFG), .DEPTH(POS_DEPTH), .KEY_W(KEY_W), .RESERVED(0)
+  ) pos (
+    .clk, .resetn,
+    .allocValid(posAllocValid), .allocCredited(!incomingReq.allowRetry),
+    .allocReady(posAllocReady), .allocIndex(posAllocIndex),
+    .allocKey(incomingKey), .allocRequester(incomingReq.srcId),
+    .allocTxnId(incomingReq.txnId), .allocOpcode(incomingReq.opcode),
+    .allocOrder(incomingReq.order),
+    .startMask(posStartMask), .freeMask(posFreeMask),
+    .active(posActive), .started(posStarted), .freeCount(posFreeCount),
+    .key(posKey), .requester(posRequester), .txnId(posTxnId),
+    .opcode(posOpcode), .order(posOrder), .older(posOlder)
   );
 
   always_comb begin
-    activeOrdered = '0;
-    if (activeReq.order != ORDER_NONE)
-      activeOrdered = posActive;
+    for (int unsigned v = 0; v < NUM_VB; v++) begin
+      victimActive[v] = victim[v].valid;
+      victimKey[v] = victim[v].key;
+    end
   end
 
-  chi_hazard #(.CFG(CFG), .DEPTH(POS_DEPTH)) hazard (
-    .requestLineAddr(incomingLine), .requestOrder(incomingReq.order),
-    .active(posActive), .activeLineAddr(posLine), .activeOrdered,
-    .lineHazard(hazardLine), .orderHazard(hazardOrder), .blocked(hazardBlocked)
+  chi_hazard #(
+    .CFG(CFG), .DEPTH(POS_DEPTH), .KEY_W(KEY_W), .NUM_VB(NUM_VB)
+  ) hazard (
+    .active(posActive), .key(posKey), .requester(posRequester),
+    .order(posOrder), .older(posOlder),
+    .victimActive, .victimKey,
+    .lineHazard(hazardLine), .orderHazard(hazardOrder),
+    .victimHazard(hazardVictim), .mayStart
   );
+
+  chi_snoop_filter #(
+    .CFG(CFG),
+    .ENTRIES((CFG.snpFilterEntries > 0) ? CFG.snpFilterEntries : 1),
+    .WAYS(SF_WAYS), .NUM_RNF(NUM_RNF), .KEY_W(KEY_W)
+  ) snoop_filter (
+    .clk, .resetn,
+    .lookupKey(posKey[startIndex]),
+    .lookupHit(sfLookupHit), .lookupSharers(sfLookupSharers),
+    .lookupOwnerValid(sfLookupOwnerValid), .lookupOwner(sfLookupOwner),
+    .updateValid(sfUpdateValid), .updateKey(sfUpdateKey),
+    .updateSharers(sfUpdateSharers), .updateOwnerValid(sfUpdateOwnerValid),
+    .updateOwner(sfUpdateOwner),
+    .updateSetKeys(sfUpdateSetKeys), .updateSetValid(sfUpdateSetValid),
+    .updateLockedWays(sfUpdateLockedWays), .victimReady(victimFree),
+    .updateReady(sfUpdateReady),
+    .victimValid(sfVictimValid), .victimKey(sfVictimKey),
+    .victimSharers(sfVictimSharers), .victimOwnerValid(sfVictimOwnerValid),
+    .victimOwner(sfVictimOwner)
+  );
+
+  // The monitor is consulted when an entry starts, after chi_hazard has
+  // ordered it behind every older transaction to the same location.
+  always_comb begin
+    entry_t starting;
+    logic exclRequest;
+    starting = entry[startIndex];
+    exclRequest = startValid && starting.req.exclOrSnoopMeOrCah
+                  && (starting.err == HNF_ERR_NONE) && CFG.exclEn;
+    exclReserveValid = exclRequest
+                       && (starting.req.opcode inside {
+                             REQ_READ_SHARED, REQ_READ_CLEAN,
+                             REQ_READ_NOT_SHARED_DIRTY, REQ_READ_PREFER_UNIQUE,
+                             REQ_READ_NO_SNP});
+    exclCheckValid = exclRequest
+                     && (starting.req.opcode inside {
+                           REQ_CLEAN_UNIQUE, REQ_WRITE_NO_SNP_FULL,
+                           REQ_WRITE_NO_SNP_PTL});
+    exclConflictValid = startValid && (starting.err == HNF_ERR_NONE)
+                        && !starting.req.exclOrSnoopMeOrCah
+                        && ((starting.kind == HNF_KIND_WRITE)
+                            || (starting.kind == HNF_KIND_WRITE_ZERO)
+                            || (starting.kind == HNF_KIND_COPYBACK)
+                            || (starting.kind == HNF_KIND_ATOMIC));
+  end
 
   chi_excl_mon #(
     .CFG(CFG), .MONITORS((CFG.exclMonitors > 0) ? CFG.exclMonitors : 1)
   ) exclusive_monitor (
     .clk, .resetn,
-    .reserveValid(requestHandshake && incomingReq.exclOrSnoopMeOrCah
-                  && !isWrite(incomingReq.opcode)),
-    .reserveReady(exclReserveReady), .reserveLineAddr(incomingLine),
-    .reserveRequester(incomingReq.srcId),
-    .exclusiveCheckValid(requestHandshake && incomingReq.exclOrSnoopMeOrCah
-                         && isWrite(incomingReq.opcode)),
-    .exclusiveLineAddr(incomingLine),
-    .exclusiveRequester(incomingReq.srcId), .exclusiveOkay(exclOkay),
-    .conflictValid((requestHandshake && isWrite(incomingReq.opcode))
-                   || snpOutValid),
-    .conflictIsWriteOrSnoop(1'b1),
-    .conflictLineAddr(requestHandshake ? incomingLine : snpStartLine)
+    .reserveValid(exclReserveValid), .reserveReady(exclReserveReady),
+    .reserveLineAddr(keyLine(posKey[startIndex])),
+    .reserveRequester(entry[startIndex].req.srcId),
+    .exclusiveCheckValid(exclCheckValid),
+    .exclusiveLineAddr(keyLine(posKey[startIndex])),
+    .exclusiveRequester(entry[startIndex].req.srcId),
+    .exclusiveOkay(exclOkay),
+    .conflictValid(exclConflictValid), .conflictIsWriteOrSnoop(1'b1),
+    .conflictLineAddr(keyLine(posKey[startIndex]))
   );
-
-  chi_dct_ctrl #(.CFG(CFG)) dct_ctrl (
-    .requestOpcode(activeReq.opcode), .requestOrder(activeReq.order),
-    .requester(activeReq.srcId), .requesterTxnId(activeReq.txnId),
-    .forwarderKnown(sfHasOwner), .forwarder(RNF_NODE_IDS[sfOwner]),
-    .forwarderClean(sfPrecise), .dataPresent(sfHit), .dataFullLine(sfPrecise),
-    .dataPoison(1'b0), .dataError(1'b0), .responseCompatible(1'b1),
-    .mteCompatible(!CFG.mteEn), .eligible(dctEligibleRaw),
-    .fallbackToHome(dctFallback), .snoopOpcode(dctOpcode),
-    .fwdNid(dctFwdNid), .fwdTxnId(dctFwdTxn), .retToSrc(dctRetToSrc)
-  );
-
-  chi_dmt_ctrl #(.CFG(CFG)) dmt_ctrl (
-    .requestOpcode(incomingReq.opcode), .requestOrder(incomingReq.order),
-    .requester(incomingReq.srcId), .requesterTxnId(incomingReq.txnId),
-    .snoopRequired(sfHit && (sfSharers != '0)), .errorDetected(1'b0),
-    .exclusiveAccess(incomingReq.exclOrSnoopMeOrCah),
-    .atomicAccess(atomicRequest), .eligible(dmtEligibleRaw),
-    .separateResponse(dmtSeparateResponse), .returnNid(dmtReturnNid),
-    .returnTxnId(dmtReturnTxnId)
-  );
-
-  chi_dwt_ctrl #(.CFG(CFG)) dwt_ctrl (
-    .requestOpcode(incomingReq.opcode), .requestOrder(incomingReq.order),
-    .requester(incomingReq.srcId), .requesterTxnId(incomingReq.txnId),
-    .snoopRequired(sfHit && (sfSharers != '0)), .errorDetected(1'b0),
-    .exclusiveAccess(incomingReq.exclOrSnoopMeOrCah),
-    .atomicAccess(atomicRequest),
-    .tagOperation(incomingReq.tagOp != TAG_OP_INVALID),
-    .eligible(dwtEligibleRaw), .doDwt(dwtDoDwt), .returnNid(dwtReturnNid),
-    .returnTxnId(dwtReturnTxnId)
-  );
-
-  // A direct transfer needs the global enable (inside each controller), the
-  // capability of the node involved, and the run-time policy.
-  always_comb begin
-    dctEligible = dctEligibleRaw && policy.dctEn && RNF_DCT_CAP[sfOwner];
-    dmtEligible = dmtEligibleRaw && policy.dmtEn && SN_DMT_CAP;
-    dwtEligible = dwtEligibleRaw && policy.dwtEn && SN_DWT_CAP;
-  end
-
-  // ReadReceipt tells the Requester its request has been accepted and will
-  // not be retried, which is what Order = Request accepted asks for
-  // (IHI 0050H B2.7).
-  always_comb begin
-    orderedReceiptRequired = (incomingReq.order == ORDER_REQUEST_ACCEPTED)
-                             && ((incomingReq.opcode == REQ_READ_NO_SNP)
-                                 || (incomingReq.opcode == REQ_READ_NO_SNP_SEP)
-                                 || (incomingReq.opcode == REQ_READ_ONCE));
-    orderResponse = '0;
-    orderResponse.qos = activeReq.qos;
-    orderResponse.tgtId = activeReq.srcId;
-    orderResponse.srcId = HN_NODE_ID;
-    orderResponse.txnId = activeReq.txnId;
-    orderResponse.opcode = (state == HNF_ORDER_RECEIPT)
-                           ? RSP_READ_RECEIPT : RSP_RESP_SEP_DATA;
-    orderResponse.resp = RESP_I;
-    orderResponse.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(activePosIndex);
-  end
 
   chi_stash_ctrl #(
     .CFG(CFG), .NUM_RNF(NUM_RNF), .RNF_NODE_IDS(RNF_NODE_IDS)
   ) stash_ctrl (
-    .requestOpcode(incomingReq.opcode),
-    .requestStashNidValid(incomingReq.stashNidValidOrEndianOrDeep),
-    .requestStashNid(incomingReq.returnNidOrStashNidOrDataTarget),
-    .requestStashLpidSlot(incomingReq.returnTxnIdOrStashLpid),
-    .homeHasLatestCopy(sfHit && !sfHasOwner), .isStash(stashIsStash),
-    .isIndependentStash(stashIndependent),
-    .isSeparateStashDone(stashSeparateDone),
-    .isUniqueStash(stashUnique),
-    .targetValid(stashTargetValid), .targetMask(stashTargetMask),
-    .targetSnoopOpcode(stashTargetSnoop), .stashLpidValid(stashLpidValid),
-    .stashLpid(stashLpid), .dataPullOpcode(stashPullOpcode),
-    .dataPullResp(stashPullResp)
+    .requestOpcode(entry[startIndex].req.opcode),
+    .requestStashNidValid(entry[startIndex].req.stashNidValidOrEndianOrDeep),
+    .requestStashNid(entry[startIndex].req.returnNidOrStashNidOrDataTarget),
+    .requestStashLpidSlot(entry[startIndex].req.returnTxnIdOrStashLpid),
+    .homeHasLatestCopy(!sfLookupOwnerValid),
+    .isStash(stashIsStash), .isIndependentStash(stashIndependent),
+    .isSeparateStashDone(stashSeparateDone), .isUniqueStash(stashUniqueDec),
+    .targetValid(stashTargetValidDec), .targetMask(stashTargetMaskDec),
+    .targetSnoopOpcode(stashTargetSnoopDec),
+    .stashLpidValid(stashLpidValidDec), .stashLpid(stashLpidDec),
+    .dataPullOpcode(stashPullOpcodeDec), .dataPullResp(stashPullRespDec)
   );
 
-  // A stash target that answered with Data Pull is owed the cache line, so the
-  // Home reads it and returns CompData under the TxnID the target supplied
-  // (IHI 0050H B7.1.1).
+  // ---------------------------------------------------------------------
+  // Admission. A request is allocated, dropped, or given RetryAck. A
+  // location conflict is no reason to refuse it: it is allocated and waits
+  // in chi_hazard, so requests to other locations behind it keep flowing.
+  // ---------------------------------------------------------------------
   always_comb begin
-    stashPullPending = activeStash && dataPullValid;
-
-    stashResponse = '0;
-    stashResponse.qos = activeReq.qos;
-    stashResponse.tgtId = activeReq.srcId;
-    stashResponse.srcId = HN_NODE_ID;
-    stashResponse.txnId = activeReq.txnId;
-    // Comp_I is the correct answer whenever the Home does not know that the
-    // line is held in the next-level cache (IHI 0050H B7.3).
-    stashResponse.resp = RESP_I;
-    // StashDone reuses the DBID slot for the Requester's StashGroupID.
-    stashResponse.dbIdOrGroupId =
-      CHI_RSP_DBID_SLOT_W'(activeReq.groupIdOrLpid);
-    if (state == HNF_STASH_DONE)
-      stashResponse.opcode = RSP_STASH_DONE;
-    else if (activeStashSeparate && COMBINED_COMP_STASH_DONE)
-      stashResponse.opcode = RSP_COMP_STASH_DONE;
-    else
-      stashResponse.opcode = RSP_COMP;
-
-    writeBackReq = '0;
-    writeBackReq.qos = activeReq.qos;
-    writeBackReq.tgtId = SN_NODE_ID;
-    writeBackReq.srcId = HN_NODE_ID;
-    writeBackReq.txnId = CHI_TXNID_FLIT_W'(activePosIndex);
-    writeBackReq.addr = activeReq.addr;
-    writeBackReq.pas = activeReq.pas;
-    writeBackReq.memAttr = activeReq.memAttr;
-    writeBackReq.size = 3'd6;
-    writeBackReq.opcode = REQ_WRITE_NO_SNP_FULL;
-
-    writeBackDat = snoopDatBuf[snoopDatSend];
-    writeBackDat.tgtId = SN_NODE_ID;
-    writeBackDat.srcId = HN_NODE_ID;
-    writeBackDat.txnId = writeBackDbid;
-    writeBackDat.opcode = DAT_NON_COPY_BACK_WR_DATA;
-    writeBackDat.resp = RESP_I;
-    writeBackDat.respErr = RESP_ERR_OK;
-    writeBackDat.be = {64{1'b1}};
-
-    datalessResponse = '0;
-    datalessResponse.qos = activeReq.qos;
-    datalessResponse.tgtId = activeReq.srcId;
-    datalessResponse.srcId = HN_NODE_ID;
-    datalessResponse.txnId = activeReq.txnId;
-    datalessResponse.opcode = RSP_COMP;
-    // CleanUnique and MakeUnique leave the Requester holding the line alone;
-    // the CMOs leave it without a copy (IHI 0050H Table B4-7).
-    datalessResponse.resp = ((activeReq.opcode == REQ_CLEAN_UNIQUE)
-                             || (activeReq.opcode == REQ_MAKE_UNIQUE))
-                            ? RESP_UC_UD : RESP_I;
-    if (activeReq.exclOrSnoopMeOrCah && activeExclOkay)
-      datalessResponse.respErr = RESP_ERR_EXOK;
-
-    pullReq = '0;
-    pullReq.qos = activeReq.qos;
-    pullReq.tgtId = SN_NODE_ID;
-    pullReq.srcId = HN_NODE_ID;
-    pullReq.txnId = CHI_TXNID_FLIT_W'(activePosIndex);
-    pullReq.addr = activeReq.addr;
-    pullReq.pas = activeReq.pas;
-    pullReq.memAttr = activeReq.memAttr;
-    pullReq.size = 3'd6;
-    pullReq.opcode = REQ_READ_NO_SNP;
-
-    pullDat = incomingDat;
-    pullDat.tgtId = dataPullTarget;
-    pullDat.srcId = HN_NODE_ID;
-    pullDat.txnId = CHI_MAX_TXNID_W'(dataPullTxnId);
-    pullDat.homeNidOrPbha = HN_NODE_ID;
-    pullDat.opcode = DAT_COMP_DATA;
-    pullDat.resp = activeStashPullResp;
-    pullDat.dbId = '0;
-    pullDat.dataPull = 1'b0;
-  end
-
-  // PCrdGrant names the recorded Requester and carries no TxnID or DBID
-  // (IHI 0050H B2.5.5).
-  always_comb begin
-    grantFlit = '0;
-    grantFlit.tgtId = retryGrantTgtId;
-    grantFlit.srcId = HN_NODE_ID;
-    grantFlit.txnId = '0;
-    grantFlit.dbIdOrGroupId = '0;
-    grantFlit.opcode = RSP_PCRD_GRANT;
-    grantFlit.pCrdType = retryGrantClass;
-    grantFlit.resp = RESP_I;
-  end
-
-  always_comb begin
-    atomicByteOffset = activeReq.addr[DAT_OFF_W-1:0];
-    // AtomicCompare carries the compare value and the swap value together, so
-    // its Size covers both and each operand is half of it (IHI 0050H B4.2.5).
-    atomicOperandSize = (activeReq.opcode == REQ_ATOMIC_COMPARE)
-                        ? (activeReq.size - 3'd1) : activeReq.size;
-    // The compare value occupies the lower-addressed half of the outbound
-    // data and the swap value the upper half. The specification names the two
-    // values but does not state this placement in the text available here.
-    if (activeReq.opcode == REQ_ATOMIC_COMPARE) begin
-      atomicCompareData = extractWord(atomicOperandBuffer, atomicByteOffset);
-      atomicTransactionData = extractWord(
-        atomicOperandBuffer,
-        atomicByteOffset + DAT_OFF_W'(1 << atomicOperandSize));
-    end else begin
-      atomicCompareData = '0;
-      atomicTransactionData =
-        extractWord(atomicOperandBuffer, atomicByteOffset);
-    end
-    atomicInitialWord = extractWord(atomicInitialBuffer, atomicByteOffset);
-    atomicStateActive = (state == HNF_ATOMIC_DBID)
-                        || (state == HNF_ATOMIC_OPERAND)
-                        || (state == HNF_ATOMIC_READ)
-                        || (state == HNF_ATOMIC_INITIAL)
-                        || (state == HNF_ATOMIC_WRITE)
-                        || (state == HNF_ATOMIC_WDATA)
-                        || (state == HNF_ATOMIC_WCOMP)
-                        || (state == HNF_ATOMIC_RETURN);
-  end
-
-  chi_atomic_alu atomic_alu (
-    .opcode(activeReq.opcode), .size(atomicOperandSize),
-    .bigEndian(activeReq.stashNidValidOrEndianOrDeep),
-    .initialData(atomicInitialWord),
-    .transactionData(atomicTransactionData),
-    .compareData(atomicCompareData), .isAtomic(atomicOpcodeValid),
-    .returnsData(atomicReturnsData), .updateEnable(atomicUpdateEnable),
-    .updateData(atomicUpdateWord), .originalData(atomicOriginalWord)
-  );
-
-  // The Home Node is the Point of Coherency for a far atomic, so it reads the
-  // line, applies the operation, and writes the result back downstream
-  // (IHI 0050H B4.2.5). Atomics may not use DMT or DWT.
-  always_comb begin
-    atomicDownstreamReq = '0;
-    atomicDownstreamReq.qos = activeReq.qos;
-    atomicDownstreamReq.tgtId = SN_NODE_ID;
-    atomicDownstreamReq.srcId = HN_NODE_ID;
-    atomicDownstreamReq.txnId = activeReq.txnId;
-    atomicDownstreamReq.addr = activeReq.addr;
-    atomicDownstreamReq.pas = activeReq.pas;
-    atomicDownstreamReq.memAttr = activeReq.memAttr;
-    atomicDownstreamReq.size = 3'd6;
-    atomicDownstreamReq.opcode = (state == HNF_ATOMIC_WRITE)
-                                 ? REQ_WRITE_NO_SNP_PTL : REQ_READ_NO_SNP;
-
-    atomicDownstreamDat = '0;
-    atomicDownstreamDat.qos = activeReq.qos;
-    atomicDownstreamDat.tgtId = SN_NODE_ID;
-    atomicDownstreamDat.srcId = HN_NODE_ID;
-    atomicDownstreamDat.txnId = activeReq.txnId;
-    atomicDownstreamDat.homeNidOrPbha = HN_NODE_ID;
-    atomicDownstreamDat.opcode = DAT_NON_COPY_BACK_WR_DATA;
-    atomicDownstreamDat.resp = RESP_I;
-    atomicDownstreamDat.data[CFG.dataW-1:0] =
-      insertWord(atomicInitialBuffer, atomicByteOffset, atomicUpdateWord,
-                 atomicOperandSize);
-    atomicDownstreamDat.be[DAT_BYTES-1:0] =
-      operandByteEnables(atomicByteOffset, atomicOperandSize);
-
-    atomicReturnDat = '0;
-    atomicReturnDat.qos = activeReq.qos;
-    atomicReturnDat.tgtId = activeReq.srcId;
-    atomicReturnDat.srcId = HN_NODE_ID;
-    atomicReturnDat.txnId = activeReq.txnId;
-    atomicReturnDat.homeNidOrPbha = HN_NODE_ID;
-    atomicReturnDat.opcode = DAT_COMP_DATA;
-    // Atomic return data must not be cached at the Requester.
-    atomicReturnDat.resp = RESP_I;
-    atomicReturnDat.dbId = CHI_DAT_DBID_SLOT_W'(activeReq.txnId);
-    atomicReturnDat.be[DAT_BYTES-1:0] =
-      operandByteEnables(atomicByteOffset, atomicOperandSize);
-    atomicReturnDat.data[CFG.dataW-1:0] =
-      insertWord('0, atomicByteOffset, atomicOriginalWord,
-                 atomicOperandSize);
-
-    atomicResponse = '0;
-    atomicResponse.qos = activeReq.qos;
-    atomicResponse.tgtId = activeReq.srcId;
-    atomicResponse.srcId = HN_NODE_ID;
-    atomicResponse.txnId = activeReq.txnId;
-    atomicResponse.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(activeReq.txnId);
-    atomicResponse.resp = RESP_I;
-    atomicResponse.opcode = (state == HNF_ATOMIC_DBID) ? RSP_DBID_RESP
-                                                       : RSP_COMP;
-  end
-
-  chi_pos #(.CFG(CFG), .DEPTH(POS_DEPTH)) pos (
-    .clk, .resetn,
-    .allocValid(requestHandshake && !droppedRequest),
-    .allocReady(posAllocReady), .allocLineAddr(incomingLine),
-    .allocRequester(incomingReq.srcId), .allocTxnId(incomingReq.txnId),
-    .allocOpcode(incomingReq.opcode), .allocNeedSnoop(coherentRequest && sfHit),
-    .allocNeedData(1'b1), .allocNeedComp(1'b1),
-    .allocNeedCompAck(incomingReq.expCompAck), .allocIndex(posAllocIndex),
-    .freeValid(posFree), .freeIndex(activePosIndex),
-    .progressValid(posFree), .progressIndex(activePosIndex),
-    .progressSnoopDone(posFree), .progressDataDone(posFree),
-    .progressCompDone(posFree), .progressCompAckDone(posFree),
-    .sameAddressBusy, .queryLineAddr(incomingLine), .active(posActive),
-    .readyToFree(posReadyToFree), .lineAddr(posLine), .requester(posRequester),
-    .txnId(posTxn), .opcode(posOpcode), .lifecycle(posLifecycle)
-  );
-
-  chi_snoop_filter #(
-    .CFG(CFG), .ENTRIES((CFG.snpFilterEntries > 0) ? CFG.snpFilterEntries : 1),
-    .WAYS((CFG.snpFilterWays > 0) ? CFG.snpFilterWays : 1), .NUM_RNF(NUM_RNF)
-  ) snoop_filter (
-    .clk, .resetn, .lookupValid(1'b1), .lookupLineAddr(
-      (state == HNF_IDLE) ? incomingLine : activeReq.addr[CFG.addrW-1:6]),
-    .lookupHit(sfHit), .lookupSharers(sfSharers), .lookupPrecise(sfPrecise),
-    .lookupHasOwner(sfHasOwner), .lookupOwner(sfOwner),
-    .updateValid(sfUpdate), .updateReady(sfUpdateReady),
-    .updateLineAddr(activeReq.addr[CFG.addrW-1:6]),
-    .updateSharers(sfUpdateSharers), .updatePrecise(1'b1),
-    .updateHasOwner(sfUpdateHasOwner), .updateOwner(sfUpdateOwner),
-    .invalidate(sfInvalidate),
-    .backInvValid(sfBackInvValid), .backInvReady(sfBackInvReady),
-    .backInvLineAddr(sfBackInvLine), .backInvSharers(sfBackInvSharers),
-    .backInvDone(sfBackInvDone)
-  );
-
-  // A Data Pull hands the stash target a copy of the line, so the directory
-  // records that target rather than the stash Requester.
-  always_comb begin
-    sfUpdateOwner = stashDirUpdate ? requesterIndex(dataPullTarget)
-                                   : requesterIndex(activeReq.srcId);
-    sfUpdateHasOwner = !sfInvalidate
-                       && (stashDirUpdate ? activeStashUnique
-                           : ((activeReq.opcode == REQ_READ_UNIQUE)
-                              || (activeReq.opcode == REQ_MAKE_UNIQUE)));
-  end
-
-  always_comb begin
-    snpStart = (state == HNF_SNOOP_START) || (state == HNF_BACKINV_START);
-    // An independent stash request only hints the target; a write with stash
-    // hint invalidates the peers as well (IHI 0050H B7.2, B7.3). The target is
-    // snooped whether or not the directory records it as a sharer.
-    // The Requester of the transaction is never snooped for it: a CleanUnique
-    // or ReadUnique from a current sharer would otherwise invalidate the very
-    // copy it is asking to upgrade (IHI 0050H B4.2.1).
-    snpStartSharers = (state == HNF_BACKINV_START) ? sfBackInvSharers
-                      : (activeStashIndependent ? activeStashTargetMask
-                         : ((sfSharers | activeStashTargetMask)
-                            & ~requesterBit(activeReq.srcId)));
-    snpStartLine = (state == HNF_BACKINV_START)
-                   ? sfBackInvLine : activeReq.addr[CFG.addrW-1:6];
-    // An atomic must leave every peer copy Invalid, and CleanInvalid also
-    // recovers a dirty copy for the read-modify-write.
-    snpStartOpcode = (state == HNF_BACKINV_START) ? SNP_MAKE_INVALID :
-                     (activeAtomic ? SNP_CLEAN_INVALID :
-                      (dctEligible ? dctOpcode :
-                       // A full-line write replaces the line outright, so the
-                       // peers are invalidated without being asked for it.
-                       (activeWrite
-                        ? ((activeReq.opcode == REQ_WRITE_UNIQUE_PTL)
-                           || (activeReq.opcode == REQ_WRITE_UNIQUE_PTL_STASH)
-                           ? SNP_UNIQUE : SNP_MAKE_INVALID)
-                        : snoopForRequest(activeReq.opcode))));
-    snpStartTxn = (state == HNF_BACKINV_START) ? '0 : activeReq.txnId;
-    snpFwdNid = dctEligible ? dctFwdNid : '0;
-    snpFwdTxn = dctEligible ? dctFwdTxn : '0;
-    // A write has no use for the line it is displacing, so its snoops do not
-    // ask for it back.
-    snpRetToSrc = (dctEligible && !activeAtomic) ? dctRetToSrc : !activeWrite;
-    sfBackInvReady = state == HNF_BACKINV_START && snpStartReady;
-    sfBackInvDone = state == HNF_BACKINV_WAIT && snpDone;
-  end
-
-  chi_snp_gen #(
-    .CFG(CFG), .NUM_RNF(NUM_RNF), .RNF_NODE_IDS(RNF_NODE_IDS),
-    .HN_NODE_ID(HN_NODE_ID)
-  ) snoop_generator (
-    .clk, .resetn, .startValid(snpStart), .startReady(snpStartReady),
-    .startSharers(snpStartSharers), .startLineAddr(snpStartLine),
-    .startOpcode(snpStartOpcode), .startTxnId(snpStartTxn),
-    .startFwdNid(snpFwdNid), .startFwdTxnId(snpFwdTxn),
-    .startRetToSrc(snpRetToSrc), .startPas(activeReq.pas),
-    .startStashTarget(activeStashTargetMask),
-    .startStashOpcode(activeStashSnoop),
-    .startStashLpidValid(activeStashLpidValid),
-    .startStashLpid(activeStashLpid),
-    .snpValid(snpOutValid), .snpReady(snpOutReady), .snpFlit(snpOutFlit),
-    // A snooped Requester answers either on the response channel or, when it
-    // is returning the line, on the data channel. Both retire the snoop.
-    .responseValid((rspInValid
-      && ((incomingRsp.opcode == RSP_SNP_RESP)
-          || (incomingRsp.opcode == RSP_SNP_RESP_FWDED)))
-      || snpRspDataAccept),
-    // and the generator matches the responder against the node it snooped, so
-    // the SrcID has to be taken from whichever channel carries the answer.
-    .responseReady(snpRspReady),
-    .responseSource(snpRspDataValid ? incomingDat.srcId : incomingRsp.srcId),
-    // DataPull occupies the low bit of the shared FwdState slot and the TxnID
-    // for the implied read arrives in DBID (IHI 0050H Table B13.7).
-    .responseDataPull(incomingRsp.fwdState[0]),
-    .responseDbId(incomingRsp.dbIdOrGroupId),
-    .dataPullValid(dataPullValid), .dataPullTarget(dataPullTarget),
-    .dataPullTxnId(dataPullTxnId), .busy(snpBusy), .done(snpDone)
-  );
-
-  // The Home Node partitions its P-Credits by request category so that a
-  // stalled write cannot hold back a read (IHI 0050H B2.10).
-  always_comb begin
-    if (atomicRequest)
+    // PCrdReturn carries no transaction, and PrefetchTgt has no response and
+    // must never be retried (IHI 0050H B2.5.6, B2.10.2.1).
+    dropRequest = (incomingReq.opcode == REQ_PCRD_RETURN)
+                  || (incomingReq.opcode == REQ_PREFETCH_TGT);
+    resourcesAvailable = dropRequest || posAllocReady;
+    if (isAtomicOpcode(incomingReq.opcode))
       retryCategory = 2'd3;
-    else if (isWrite(incomingReq.opcode))
+    else if (hnfKind(incomingReq.opcode) inside {
+               HNF_KIND_WRITE, HNF_KIND_WRITE_ZERO, HNF_KIND_WRITE_DEF,
+               HNF_KIND_COPYBACK})
       retryCategory = 2'd1;
-    else if (isCoherent(incomingReq.opcode))
+    else if (hnfKind(incomingReq.opcode) inside {
+               HNF_KIND_READ, HNF_KIND_DATALESS, HNF_KIND_CMO,
+               HNF_KIND_STASH_ONCE})
       retryCategory = 2'd2;
     else
       retryCategory = 2'd0;
+    // RetryAck is optional: when the record table is full the request is held
+    // with back-pressure instead, which keeps the credit accounting exact.
+    retryAckWant = reqInValid && !resourcesAvailable && retryAck;
+    retryHandshake = retryAckWant && rspFifoReady;
+    requestHandshake = reqInValid && resourcesAvailable;
+    posAllocValid = requestHandshake && !dropRequest;
+  end
+
+  always_comb begin
+    reqInReady = resourcesAvailable || retryHandshake;
+  end
+
+  // The entry a request starts as.
+  always_comb begin
+    chi_hnf_kind_e kind;
+    allocEntry = '0;
+    kind = hnfKind(incomingReq.opcode);
+    allocEntry.phase = PH_WAIT;
+    allocEntry.req = incomingReq;
+    allocEntry.kind = kind;
+    allocEntry.cmo = hnfCmo(incomingReq.opcode);
+    allocEntry.err = (kind == HNF_KIND_ILLEGAL) ? HNF_ERR_UNSUPPORTED
+                                                : HNF_ERR_NONE;
+    allocEntry.reqIsRnf = isRnf(incomingReq.srcId);
+    allocEntry.reqRnf = rnfIndex(incomingReq.srcId);
+    allocEntry.snpOpcode = SNP_SHARED;
+    allocEntry.stashOpcode = SNP_STASH_SHARED;
+    allocEntry.wrResp = RESP_I;
+    allocEntry.pullResp = RESP_I;
+    allocEntry.dnKind = HNF_DN_READ;
+    // An ordered ReadNoSnp or ReadOnce* learns from ReadReceipt that the
+    // Home has accepted it and will keep it in order (IHI 0050H B2.7.5.1).
+    // The POS is that ordering point, so the receipt goes out as soon as the
+    // request is allocated.
+    allocEntry.receiptOwed =
+      ((kind == HNF_KIND_READ_NOSNP) || (kind == HNF_KIND_READ_ONCE))
+      && ((incomingReq.order == ORDER_REQUEST_ORDER)
+          || (incomingReq.order == ORDER_ENDPOINT));
   end
 
   chi_retry #(
-    .NODEID_W(chi_cfg_pkg::CHI_NODEID_SLOT_W), .ENTRIES(RETRY_RECORDS),
+    .NODEID_W(CHI_NODEID_SLOT_W), .ENTRIES(RETRY_RECORDS),
     .CREDIT_TYPES(CHI_CREDIT_TYPES)
   ) retry (
     .clk, .resetn, .requestValid(reqInValid),
@@ -1219,439 +727,1534 @@ module chi_hnf_top #(
     .requestQos(incomingReq.qos), .acceptRequest(retryAccept),
     .sendRetryAck(retryAck), .retryAckSent(retryHandshake),
     .retryClass, .recordFull(retryRecordFull),
-    .creditUseValid(requestHandshake && !incomingReq.allowRetry
-                    && !droppedRequest),
+    .creditUseValid(posAllocValid && !incomingReq.allowRetry),
     .creditUseClass(incomingReq.pCrdType),
-    .creditReturnValid(reqInValid && reqInReady
+    .creditReturnValid(requestHandshake
                        && (incomingReq.opcode == REQ_PCRD_RETURN)),
     .creditReturnClass(incomingReq.pCrdType),
-    // Only one credit is outstanding at a time, so the resource the grant
-    // promises is still free when the credited request arrives.
-    .grantAllowed((state == HNF_IDLE) && posAllocReady && !sfBackInvValid
-                  && !retryCreditsPending),
+    // A grant promises the next request a POS entry; one credit is
+    // outstanding at a time.
+    .grantAllowed(posAllocReady && !retryCreditsPending),
     .grantValid(retryGrantValid), .grantReady(retryGrantReady),
     .grantTgtId(retryGrantTgtId), .grantClass(retryGrantClass),
     .pendingCount(retryPending), .creditsOutstanding(retryOutstanding),
     .creditsPending(retryCreditsPending)
   );
 
+  // ---------------------------------------------------------------------
+  // Start: one waiting entry per cycle reads the directory and is given its
+  // plan. Round-robin among entries that chi_hazard lets start.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    found = 1'b0;
+    startIndex = '0;
+    candidate = 0;
+    for (int unsigned offset = 0; offset < POS_DEPTH; offset++) begin
+      candidate = int'(startPointer) + offset;
+      if (candidate >= POS_DEPTH)
+        candidate = candidate - POS_DEPTH;
+      if (!found && (entry[candidate].phase == PH_WAIT) && mayStart[candidate]) begin
+        found = 1'b1;
+        startIndex = POS_W'(candidate);
+      end
+    end
+    startValid = found;
+    posStartMask = '0;
+    if (startValid)
+      posStartMask[startIndex] = 1'b1;
+  end
+
+  // The plan of the starting entry: who to snoop and with which snoop,
+  // which responses are owed, and the exclusive and stash outcome. Memory
+  // reads and writes are not planned here; they follow from what the snoops
+  // return (see the derived conditions below).
+  always_comb begin
+    entry_t e;
+    logic [NUM_RNF-1:0] reqBit;
+    logic [NUM_RNF-1:0] others;
+    logic [NUM_RNF-1:0] ownerBit;
+    logic [NUM_RNF-1:0] targets;
+    logic ownerElsewhere;
+    logic stashOk;
+    e = entry[startIndex];
+    reqBit = '0;
+    if (e.reqIsRnf)
+      reqBit[e.reqRnf] = 1'b1;
+    others = sfLookupHit ? (sfLookupSharers & ~reqBit) : '0;
+    ownerBit = '0;
+    if (sfLookupHit && sfLookupOwnerValid)
+      ownerBit[sfLookupOwner] = 1'b1;
+    ownerElsewhere = sfLookupHit && sfLookupOwnerValid
+                     && !(e.reqIsRnf && (sfLookupOwner == e.reqRnf));
+
+    e.phase = PH_RUN;
+    e.sfHit = sfLookupHit;
+    e.sfSharers = sfLookupHit ? sfLookupSharers : '0;
+    e.sfOwnerValid = sfLookupHit && sfLookupOwnerValid;
+    e.sfOwner = sfLookupOwner;
+    e.snpOpcode = snoopForRequest(e.req.opcode, CFG.mteEn);
+    e.snpRetToSrc = 1'b0;
+    e.exclLoad = exclReserveValid && exclReserveReady;
+    e.exclStore = exclCheckValid;
+    e.exclPass = exclCheckValid && exclOkay;
+    targets = '0;
+
+    if (e.err == HNF_ERR_NONE) begin
+      case (e.kind)
+        HNF_KIND_READ: begin
+          if ((e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
+              && sfLookupHit && sfLookupSharers[e.reqRnf]) begin
+            // The Requester still holds the line, so the other copies are
+            // invalidated and a Comp without data upgrades it
+            // (IHI 0050H B2.3.1.1 alt 6).
+            targets = others;
+          end else if ((e.req.opcode == REQ_READ_UNIQUE)
+                       || (e.req.opcode == REQ_MAKE_READ_UNIQUE)) begin
+            targets = others;
+            e.snpOpcode = SNP_UNIQUE;
+            e.snpRetToSrc = 1'b1;
+          end else begin
+            // A shared read only needs the copy that may be Dirty or
+            // Unique; Shared Clean copies stay as they are
+            // (IHI 0050H B4.4.1).
+            targets = ownerElsewhere ? ownerBit : '0;
+            e.snpRetToSrc = 1'b1;
+          end
+          e.compOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_READ_ONCE: begin
+          targets = ownerElsewhere ? ownerBit : '0;
+          e.snpRetToSrc = 1'b1;
+          e.compOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_READ_NOSNP: begin
+          e.compOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_DATALESS: begin
+          // A failing Exclusive CleanUnique propagates nothing: no snoop and
+          // no upgrade (IHI 0050H B6.2.1, Table B6.2).
+          if ((e.req.opcode != REQ_EVICT) && !(e.exclStore && !e.exclPass))
+            targets = others;
+          e.compOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_CMO: begin
+          // Only a copy that may be Dirty needs cleaning; an invalidating
+          // CMO removes every copy but the Requester's, which the Requester
+          // has already dealt with (IHI 0050H B4.2.2.1, Table B4.11).
+          if (cmoInvalidates(e.cmo))
+            targets = others;
+          else
+            targets = ownerElsewhere ? ownerBit : '0;
+          e.compOwed = 1'b1;
+        end
+        HNF_KIND_STASH_ONCE: begin
+          // Stash only when memory holds the latest copy, so the implied
+          // read of a Data Pull can be served from memory; a Unique stash
+          // also needs no other copy to exist. Stashing is a hint, so
+          // skipping it is always legal (IHI 0050H B7.4).
+          stashOk = stashTargetValidDec && !ownerElsewhere
+                    && (!stashUniqueDec
+                        || ((others & ~stashTargetMaskDec) == '0));
+          e.stashValid = stashOk;
+          e.stashTarget = rnfIndex(e.req.returnNidOrStashNidOrDataTarget);
+          e.stashOpcode = stashTargetSnoopDec;
+          e.stashLpidValid = stashLpidValidDec;
+          e.stashLpid = stashLpidDec;
+          e.stashUnique = stashUniqueDec;
+          e.pullResp = stashPullRespDec;
+          targets = stashOk ? stashTargetMaskDec : '0;
+          e.compOwed = 1'b1;
+        end
+        HNF_KIND_WRITE: begin
+          if (isWriteUnique(e.req.opcode))
+            targets = others;
+          if (isStashWrite(e.req.opcode) && stashTargetValidDec) begin
+            e.stashValid = 1'b1;
+            e.stashTarget = rnfIndex(e.req.returnNidOrStashNidOrDataTarget);
+            e.stashOpcode = stashTargetSnoopDec;
+            e.stashLpidValid = stashLpidValidDec;
+            e.stashLpid = stashLpidDec;
+            e.stashUnique = 1'b1;
+            e.pullResp = RESP_UC_UD;
+            targets = targets | stashTargetMaskDec;
+          end
+          e.dbidOwed = 1'b1;
+          // With nothing to snoop and an early write acknowledge allowed,
+          // the Home is the point of serialization and can combine the
+          // completion with the data request (IHI 0050H B2.3.2.1 alt 2a2).
+          e.dbidWithComp = (targets == '0) && e.req.memAttr[0]
+                           && (e.cmo == HNF_CMO_NONE) && !e.stashValid
+                           && !e.exclStore;
+          e.compOwed = !e.dbidWithComp;
+          e.compCmoOwed = e.cmo != HNF_CMO_NONE;
+          e.wrOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_WRITE_ZERO: begin
+          if (isWriteUnique(e.req.opcode))
+            targets = others;
+          e.dbidOwed = 1'b1;
+          e.dbidWithComp = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_WRITE_DEF: begin
+          // An HN-F does not forward WriteNoSnpDef; it answers
+          // OK/Unsupported and the Requester completes the write flow
+          // (IHI 0050H B4.5.1.3.1).
+          e.dbidOwed = 1'b1;
+          e.dbidWithComp = 1'b1;
+          e.wrOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_COPYBACK: begin
+          // The Home completes a CopyBack itself with CompDBIDResp and takes
+          // the data (IHI 0050H B2.3.2.3); DWT never applies to it
+          // (IHI 0050H B13.10.24).
+          e.dbidOwed = 1'b1;
+          e.dbidWithComp = 1'b1;
+          e.compCmoOwed = e.cmo != HNF_CMO_NONE;
+          e.wrOwed = 1'b1;
+          e.compAckOwed = e.req.expCompAck;
+        end
+        HNF_KIND_ATOMIC: begin
+          targets = others;
+          // SnoopMe asks the Home to snoop the Requester as well
+          // (IHI 0050H B13.10.33).
+          if (e.req.exclOrSnoopMeOrCah && e.reqIsRnf && sfLookupHit
+              && sfLookupSharers[e.reqRnf])
+            targets = targets | reqBit;
+          e.snpRetToSrc = 1'b1;
+          e.dbidOwed = 1'b1;
+          e.compOwed = 1'b1;
+          e.wrOwed = 1'b1;
+        end
+        default: begin
+          e.compOwed = 1'b1;
+        end
+      endcase
+    end else begin
+      // An error completes with the transaction's own message structure and
+      // NDERR, and touches nothing else.
+      case (e.kind)
+        HNF_KIND_WRITE, HNF_KIND_WRITE_DEF, HNF_KIND_COPYBACK: begin
+          e.dbidOwed = 1'b1;
+          e.dbidWithComp = 1'b1;
+          e.compCmoOwed = e.cmo != HNF_CMO_NONE;
+          e.wrOwed = 1'b1;
+        end
+        HNF_KIND_WRITE_ZERO: begin
+          e.dbidOwed = 1'b1;
+          e.dbidWithComp = 1'b1;
+        end
+        HNF_KIND_ATOMIC: begin
+          e.dbidOwed = 1'b1;
+          e.compOwed = 1'b1;
+          e.wrOwed = 1'b1;
+        end
+        default:
+          e.compOwed = 1'b1;
+      endcase
+      e.compAckOwed = e.req.expCompAck;
+    end
+
+    e.snpTargets = targets;
+    e.snpToSend = targets;
+    e.snpPending = '0;
+    e.sfUpdOwed = (e.err == HNF_ERR_NONE)
+                  && (e.kind inside {HNF_KIND_READ, HNF_KIND_READ_ONCE,
+                                     HNF_KIND_DATALESS, HNF_KIND_CMO,
+                                     HNF_KIND_STASH_ONCE, HNF_KIND_WRITE,
+                                     HNF_KIND_WRITE_ZERO, HNF_KIND_COPYBACK,
+                                     HNF_KIND_ATOMIC})
+                  && (e.sfHit || e.reqIsRnf || e.stashValid);
+    planEntry = e;
+  end
+
+  // ---------------------------------------------------------------------
+  // Derived per-entry conditions. Each obligation becomes ready once the
+  // obligations it depends on are met.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      entry_t e;
+      logic [63:0] valid;
+      logic [63:0] needed;
+      logic takesDirty;
+      e = entry[i];
+      valid = bufWrBe[i] | bufSnpBe[i] | bufMemBe[i];
+      needed = (e.kind == HNF_KIND_READ_NOSNP)
+               ? transferBytes(e.req.addr, e.req.size) : ALL_BYTES;
+      eSnpDone[i] = (e.snpToSend == '0) && (e.snpPending == '0);
+      eLineComplete[i] = (needed & ~valid) == '0;
+      eOthersKeep[i] = ((e.sfSharers & ~e.snpTargets
+                         & ~(e.reqIsRnf ? (NUM_RNF'(1) << e.reqRnf) : '0))
+                        != '0)
+                       || (e.snpKeep != '0);
+      eMruHold[i] = (e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
+                    && e.sfHit && e.sfSharers[e.reqRnf];
+      eDataPath[i] = (e.err == HNF_ERR_NONE)
+                     && (((e.kind == HNF_KIND_READ) && !eMruHold[i])
+                         || (e.kind == HNF_KIND_READ_ONCE)
+                         || (e.kind == HNF_KIND_READ_NOSNP));
+      takesDirty = readTakesDirty(e.req.opcode, eOthersKeep[i]);
+      eGrant[i] = readCompResp(e.req.opcode, eOthersKeep[i],
+                               e.snpDirty && takesDirty);
+
+      // Memory is read when the snoops did not bring a whole line: for a
+      // read, for the initial value of an atomic, and for the line a Data
+      // Pull asks for.
+      eNeedMemRead[i] = (e.phase == PH_RUN) && !e.dnReadDone && eSnpDone[i]
+                        && !eLineComplete[i]
+                        && (eDataPath[i]
+                            || ((e.kind == HNF_KIND_ATOMIC)
+                                && (e.err == HNF_ERR_NONE))
+                            || (e.pullValid
+                                && ((e.kind == HNF_KIND_STASH_ONCE)
+                                    || e.dnWriteDone)));
+
+      // Data that has to reach memory: Dirty snoop data the Requester does
+      // not take, the data of a write, the result of an atomic.
+      eWriteBe[i] = bufSnpBe[i];
+      eNeedWriteback[i] = 1'b0;
+      if ((e.phase == PH_RUN) && (e.err == HNF_ERR_NONE) && !e.dnWriteDone) begin
+        case (e.kind)
+          HNF_KIND_READ, HNF_KIND_READ_ONCE, HNF_KIND_READ_NOSNP:
+            eNeedWriteback[i] = eSnpDone[i] && e.snpDirty && !takesDirty
+                                && (!e.snpPtl || eLineComplete[i]);
+          HNF_KIND_DATALESS:
+            // MakeUnique lets the Dirty copy be discarded; CleanUnique and
+            // Evict do not (IHI 0050H B4.2.2).
+            eNeedWriteback[i] = eSnpDone[i] && e.snpDirty
+                                && (e.req.opcode != REQ_MAKE_UNIQUE);
+          HNF_KIND_CMO:
+            // MakeInvalid permits Dirty data to be discarded.
+            eNeedWriteback[i] = eSnpDone[i] && e.snpDirty
+                                && (e.cmo != HNF_CMO_MAKE_INVALID);
+          HNF_KIND_WRITE: begin
+            eWriteBe[i] = bufWrBe[i] | bufSnpBe[i];
+            // A failing Exclusive WriteNoSnp writes nothing
+            // (IHI 0050H B6.3.4).
+            eNeedWriteback[i] = eSnpDone[i] && !e.wrOwed
+                                && ((!e.wrCancel && !(e.exclStore && !e.exclPass))
+                                    || e.snpDirty);
+          end
+          HNF_KIND_WRITE_ZERO: begin
+            eWriteBe[i] = ALL_BYTES;
+            eNeedWriteback[i] = eSnpDone[i];
+          end
+          HNF_KIND_COPYBACK: begin
+            eWriteBe[i] = bufWrBe[i];
+            eNeedWriteback[i] = !e.wrOwed && !e.wrCancel
+                                && respPassDirty(e.wrResp);
+          end
+          HNF_KIND_ATOMIC: begin
+            eWriteBe[i] = ALL_BYTES;
+            eNeedWriteback[i] = e.atomicDone && (e.atomicUpdate || e.snpDirty);
+          end
+          default:
+            eNeedWriteback[i] = 1'b0;
+        endcase
+      end
+
+      // Persist and Storage maintenance is forwarded once any write it must
+      // follow has reached memory.
+      eNeedCmoFwd[i] = (e.phase == PH_RUN) && (e.err == HNF_ERR_NONE)
+                       && !e.dnCmoDone && cmoForwarded(e.cmo)
+                       && eSnpDone[i] && !e.wrOwed && !eNeedWriteback[i];
+
+      eAtomicReady[i] = (e.phase == PH_RUN) && (e.kind == HNF_KIND_ATOMIC)
+                        && (e.err == HNF_ERR_NONE) && !e.atomicDone
+                        && eSnpDone[i] && !e.wrOwed && eLineComplete[i];
+
+      // DBIDResp or CompDBIDResp.
+      eDbidReady[i] = (e.phase == PH_RUN) && e.dbidOwed;
+      if (e.kind == HNF_KIND_WRITE_ZERO)
+        eDbidReady[i] = eDbidReady[i]
+                        && ((e.err != HNF_ERR_NONE)
+                            || (eSnpDone[i]
+                                && (e.req.memAttr[0] || e.dnWriteDone)));
+
+      // The completion. Nothing completes while a snoop for the location is
+      // outstanding (IHI 0050H B4.11.2), and an ordered read's CompData
+      // follows its ReadReceipt.
+      eCompIsData[i] = (eDataPath[i]
+                        || ((e.kind == HNF_KIND_ATOMIC)
+                            && !isAtomicStore(e.req.opcode))
+                        || ((e.err != HNF_ERR_NONE)
+                            && (e.kind inside {HNF_KIND_READ,
+                                               HNF_KIND_READ_ONCE,
+                                               HNF_KIND_READ_NOSNP})
+                            && !eMruHold[i]));
+      eCompGranules[i] = (e.kind == HNF_KIND_ATOMIC)
+                         ? messageGranules(CFG, e.req.addr,
+                                           (e.req.opcode == REQ_ATOMIC_COMPARE)
+                                           ? (e.req.size - 3'd1) : e.req.size)
+                         : messageGranules(CFG, e.req.addr, e.req.size);
+      eCompReady[i] = 1'b0;
+      if ((e.phase == PH_RUN) && e.compOwed && !e.receiptOwed && !e.dbidOwed) begin
+        if (e.err != HNF_ERR_NONE) begin
+          eCompReady[i] = !e.wrOwed || !(e.kind == HNF_KIND_ATOMIC);
+        end else begin
+          case (e.kind)
+            HNF_KIND_READ, HNF_KIND_READ_ONCE, HNF_KIND_READ_NOSNP:
+              eCompReady[i] = eSnpDone[i] && (eMruHold[i] || eLineComplete[i]);
+            HNF_KIND_DATALESS, HNF_KIND_STASH_ONCE:
+              eCompReady[i] = eSnpDone[i];
+            HNF_KIND_CMO:
+              // A CMO completes once every copy is clean and any Dirty data
+              // has reached memory, or the forwarded CMO has completed.
+              eCompReady[i] = eSnpDone[i] && !eNeedWriteback[i]
+                              && (!cmoForwarded(e.cmo) || e.dnCmoDone);
+            HNF_KIND_WRITE:
+              // Comp once the write is serialized: snoops done and data
+              // received; without Early Write Acknowledge only once memory
+              // has it (IHI 0050H B2.8.3.1).
+              eCompReady[i] = eSnpDone[i] && !e.wrOwed
+                              && (e.req.memAttr[0] || e.dnWriteDone
+                                  || !eNeedWritebackPossible(e, bufWrBe[i]));
+            HNF_KIND_ATOMIC:
+              eCompReady[i] = e.atomicDone;
+            default:
+              eCompReady[i] = 1'b1;
+          endcase
+        end
+      end
+
+      // CompCMO of a Combined write: after the write has reached memory and
+      // any forwarded CMO has completed, and after the write's own Comp.
+      eCompCmoReady[i] = (e.phase == PH_RUN) && e.compCmoOwed && !e.compOwed
+                         && !e.dbidOwed && !e.wrOwed
+                         && ((e.err != HNF_ERR_NONE)
+                             || (eSnpDone[i] && !eNeedWriteback[i]
+                                 && (!cmoForwarded(e.cmo) || e.dnCmoDone)));
+
+      // Data Pull: the stash target is owed the line once the write (if any)
+      // is in memory and the line is complete.
+      ePullReady[i] = (e.phase == PH_RUN) && e.pullValid
+                      && (e.pullGranSent != 4'hf) && eSnpDone[i]
+                      && eLineComplete[i] && !e.dnBusy
+                      && ((e.kind == HNF_KIND_STASH_ONCE) || e.dnWriteDone);
+
+      eReceiptOwed[i] = e.receiptOwed;
+      eCompOwed[i] = e.compOwed;
+      eAllDone[i] = (e.phase == PH_RUN) && !e.receiptOwed && !e.dbidOwed
+                    && !e.compOwed && !e.compCmoOwed && !e.compAckOwed
+                    && !e.wrOwed && eSnpDone[i] && !e.dnBusy
+                    && !eNeedMemRead[i] && !eNeedWriteback[i]
+                    && !eNeedCmoFwd[i] && !e.pullAckOwed
+                    && !(e.pullValid && (e.pullGranSent != 4'hf))
+                    && !eAtomicReady[i];
+    end
+  end
+
+
+  // ---------------------------------------------------------------------
+  // Atomic execution: one ready atomic entry per cycle goes through the
+  // ALU. The operand packet was kept whole; the initial value is in the
+  // line buffer.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    logic found;
+    entry_t e;
+    int unsigned offset;
+    int unsigned operandBytes;
+    int unsigned swapOffset;
+    int unsigned beatBase;
+    found = 1'b0;
+    atomicEntry = '0;
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      if (!found && eAtomicReady[i]) begin
+        found = 1'b1;
+        atomicEntry = POS_W'(i);
+      end
+    atomicValid = found;
+    e = entry[atomicEntry];
+    // AtomicCompare carries the compare and swap values together, so each
+    // operand is half of Size (IHI 0050H B2.9.6.1).
+    atomicOperandSize = (e.req.opcode == REQ_ATOMIC_COMPARE)
+                        ? (e.req.size - 3'd1) : e.req.size;
+    operandBytes = 32'd1 << atomicOperandSize;
+    offset = 32'(e.req.addr[5:0]);
+    // The compare value is at the addressed location and the swap value at
+    // the address with bit log2(operand size) inverted (IHI 0050H B2.9.6.2).
+    swapOffset = offset ^ operandBytes;
+    beatBase = int'(e.atomicBeatId) * 16;
+    atomicInitialWord = '0;
+    atomicTransactionWord = '0;
+    atomicCompareWord = '0;
+    for (int unsigned b = 0; b < 8; b++) begin
+      if ((offset + b) < 64)
+        atomicInitialWord[b*8 +: 8] = bufData[atomicEntry][(offset + b)*8 +: 8];
+      if (((offset + b) >= beatBase) && ((offset + b) < (beatBase + DAT_BYTES)))
+        atomicTransactionWord[b*8 +: 8] =
+          e.atomicBeat[(offset + b - beatBase)*8 +: 8];
+      if (((swapOffset + b) >= beatBase)
+          && ((swapOffset + b) < (beatBase + DAT_BYTES)))
+        atomicCompareWord[b*8 +: 8] =
+          e.atomicBeat[(swapOffset + b - beatBase)*8 +: 8];
+    end
+    // For AtomicCompare the value at the address is compared and the value
+    // at the swap location replaces it.
+    if (e.req.opcode == REQ_ATOMIC_COMPARE) begin
+      logic [63:0] compareValue;
+      compareValue = atomicTransactionWord;
+      atomicTransactionWord = atomicCompareWord;
+      atomicCompareWord = compareValue;
+    end
+  end
+
+  chi_atomic_alu atomic_alu (
+    .opcode(entry[atomicEntry].req.opcode), .size(atomicOperandSize),
+    .bigEndian(entry[atomicEntry].req.stashNidValidOrEndianOrDeep),
+    .initialData(atomicInitialWord),
+    .transactionData(atomicTransactionWord),
+    .compareData(atomicCompareWord), .isAtomic(atomicOpValid),
+    .returnsData(atomicReturnsData), .updateEnable(atomicUpdateEnable),
+    .updateData(atomicUpdateWord), .originalData(atomicOriginalWord)
+  );
+
+  // ---------------------------------------------------------------------
+  // Snoops.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      ownerToSend[i] = entry[i].snpToSend;
+      ownerPending[i] = entry[i].snpPending;
+    end
+    for (int unsigned v = 0; v < NUM_VB; v++) begin
+      ownerToSend[POS_DEPTH + v] = victim[v].snpToSend;
+      ownerPending[POS_DEPTH + v] = victim[v].snpPending;
+    end
+  end
+
+  chi_snp_gen #(
+    .NUM_OWNERS(NUM_OWNERS), .NUM_RNF(NUM_RNF), .MAX_OUTSTANDING(1)
+  ) snoop_generator (
+    .clk, .resetn, .toSend(ownerToSend), .pending(ownerPending),
+    .issueReady(snpFifoReady), .issueValid(snpIssueValid),
+    .issueOwner(snpIssueOwner), .issueTarget(snpIssueTarget),
+    .outstanding(snpOutstanding)
+  );
+
+  always_comb begin
+    chi_snp_flit_t snoop;
+    logic isPos;
+    logic [POS_W-1:0] posIndex;
+    logic [VB_W-1:0] vbIndex;
+    isPos = int'(snpIssueOwner) < POS_DEPTH;
+    posIndex = POS_W'(snpIssueOwner);
+    vbIndex = VB_W'(int'(snpIssueOwner) - POS_DEPTH);
+    snoop = '0;
+    snoop.qos = isPos ? entry[posIndex].req.qos : '0;
+    snoop.srcId = HN_NODE_ID;
+    snoop.txnId = CHI_TXNID_FLIT_W'(snpIssueOwner);
+    snoop.addr = '0;
+    if (isPos) begin
+      snoop.addr[CFG.addrW-4:0] = {keyLine(posKey[posIndex]), 3'b000};
+      snoop.pas = entry[posIndex].req.pas;
+      if (entry[posIndex].stashValid
+          && (snpIssueTarget == entry[posIndex].stashTarget)) begin
+        snoop.opcode = entry[posIndex].stashOpcode;
+        // For a stash snoop the 12-bit slot carries
+        // {StashLPIDValid, StashLPID} (IHI 0050H Table B13.8).
+        snoop.fwdTxnIdOrStashLpidOrVmidExt =
+          {{(CHI_RTNTXNID_SLOT_W - CHI_MAX_LPID_W - 1){1'b0}},
+           entry[posIndex].stashLpidValid, entry[posIndex].stashLpid};
+      end else begin
+        snoop.opcode = entry[posIndex].snpOpcode;
+        // RetToSrc goes to one Request Node only, the one the directory says
+        // may hold the line Dirty or Unique, and never on a snoop where it is
+        // inapplicable (IHI 0050H B4.9).
+        snoop.retToSrc = entry[posIndex].snpRetToSrc
+                         && entry[posIndex].sfOwnerValid
+                         && (snpIssueTarget == entry[posIndex].sfOwner)
+                         && !(entry[posIndex].snpOpcode inside {
+                                SNP_CLEAN_SHARED, SNP_CLEAN_INVALID,
+                                SNP_MAKE_INVALID});
+      end
+    end else begin
+      snoop.addr[CFG.addrW-4:0] = {keyLine(victim[vbIndex].key), 3'b000};
+      snoop.pas = keyPas(victim[vbIndex].key);
+      snoop.opcode = SNP_CLEAN_INVALID;
+    end
+    snpIssueFlit = '0;
+    snpIssueFlit.channel = CHI_CHANNEL_SNP;
+    snpIssueFlit.qos = snoop.qos;
+    snpIssueFlit.targetNodeId = RNF_NODE_IDS[snpIssueTarget];
+    snpIssueFlit.payload[CHI_MAX_SNP_FLIT_W-1:0] = packSnpFlit(CFG, snoop);
+  end
+
+  // ---------------------------------------------------------------------
+  // Input classification. RSP and DAT are always accepted: a Home must sink
+  // responses and data without depending on anything else.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    rspInReady = 1'b1;
+    datInReady = 1'b1;
+  end
+
+  always_comb begin
+    logic rspFromSn;
+    logic datFromSn;
+    rspFromSn = incomingRsp.srcId == SN_NODE_ID;
+    datFromSn = incomingDat.srcId == SN_NODE_ID;
+
+    snpRspValid = rspInValid && isSnoopResponse(incomingRsp.opcode)
+                  && (int'(incomingRsp.txnId) < NUM_OWNERS);
+    snpRspOwner = OWNER_W'(incomingRsp.txnId);
+    snpRspTarget = rnfIndex(incomingRsp.srcId);
+
+    compAckValid = rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
+                   && (int'(incomingRsp.txnId) < POS_DEPTH);
+    compAckEntry = POS_W'(incomingRsp.txnId);
+
+    snRspValid = rspInValid && rspFromSn && !isSnoopResponse(incomingRsp.opcode)
+                 && (incomingRsp.opcode != RSP_COMP_ACK);
+
+    snpDatValid = datInValid && isSnoopData(incomingDat.opcode)
+                  && (int'(incomingDat.txnId) < NUM_OWNERS);
+    snpDatOwner = OWNER_W'(incomingDat.txnId);
+    snpDatTarget = rnfIndex(incomingDat.srcId);
+    snpDatGranules = packetGranules(incomingDat.dataId, incomingDat.numDat);
+
+    wrDatValid = datInValid && isRequesterData(incomingDat.opcode)
+                 && (int'(incomingDat.txnId) < POS_DEPTH);
+    wrDatEntry = POS_W'(incomingDat.txnId);
+    wrDatGranules = packetGranules(incomingDat.dataId, incomingDat.numDat);
+
+    snDatValid = datInValid && datFromSn
+                 && ((incomingDat.opcode == DAT_COMP_DATA)
+                     || (incomingDat.opcode == DAT_DATA_SEP_RESP));
+    memDatValid = snDatValid && (int'(incomingDat.txnId) < NUM_OWNERS);
+    memDatOwner = OWNER_W'(incomingDat.txnId);
+  end
+
+  always_comb begin
+    snpDatLast = 1'b0;
+    if (int'(snpDatOwner) < POS_DEPTH)
+      snpDatLast = ((entry[POS_W'(snpDatOwner)].snpGranules | snpDatGranules)
+                    == 4'hf);
+    else
+      snpDatLast = ((victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules
+                     | snpDatGranules) == 4'hf);
+  end
+
+  // ---------------------------------------------------------------------
+  // Downstream operations. An owner starts at most one at a time; the order
+  // within an owner is read, then write, then forwarded CMO, which is the
+  // order every transaction kind needs.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      entry_t e;
+      e = entry[i];
+      dnStartValid[i] = 1'b0;
+      dnStartKind[i] = HNF_DN_READ;
+      dnStartGranules[i] = 4'hf;
+      dnStartNoData[i] = 1'b0;
+      dnStartWantReceipt[i] = 1'b0;
+      if ((e.phase == PH_RUN) && !e.dnBusy && !dnBusy[i]) begin
+        if (eNeedMemRead[i]) begin
+          dnStartValid[i] = 1'b1;
+          dnStartKind[i] = HNF_DN_READ;
+          dnStartGranules[i] = (e.kind == HNF_KIND_READ_NOSNP)
+                               ? messageGranules(CFG, e.req.addr, e.req.size)
+                               : 4'hf;
+        end else if (eNeedWriteback[i]) begin
+          dnStartValid[i] = 1'b1;
+          dnStartKind[i] = HNF_DN_WRITE;
+          dnStartGranules[i] = dnExactWrite(e)
+                               ? messageGranules(CFG, e.req.addr, e.req.size)
+                               : 4'hf;
+        end else if (eNeedCmoFwd[i]) begin
+          dnStartValid[i] = 1'b1;
+          dnStartKind[i] = HNF_DN_CMO;
+        end
+      end
+    end
+    for (int unsigned v = 0; v < NUM_VB; v++) begin
+      int unsigned owner;
+      owner = POS_DEPTH + v;
+      dnStartValid[owner] = victim[v].valid && !victim[v].dnBusy
+                            && !dnBusy[owner] && !victim[v].dnWriteDone
+                            && (victim[v].snpToSend == '0)
+                            && (victim[v].snpPending == '0)
+                            && victim[v].snpDirty;
+      dnStartKind[owner] = HNF_DN_WRITE;
+      dnStartGranules[owner] = 4'hf;
+      dnStartNoData[owner] = 1'b0;
+      dnStartWantReceipt[owner] = 1'b0;
+    end
+  end
+
+
+  chi_sn_tracker #(
+    .CFG(CFG), .NUM_OWNERS(NUM_OWNERS)
+  ) sn_tracker (
+    .clk, .resetn,
+    .startValid(dnStartValid), .startKind(dnStartKind),
+    .startGranules(dnStartGranules), .startNoData(dnStartNoData),
+    .startWantReceipt(dnStartWantReceipt),
+    .busy(dnBusy), .done(dnDone),
+    .resend(dnResend), .resendCreditType(dnResendType),
+    .reqIssueReady(reqFifoReady), .reqIssueValid(dnReqValid),
+    .reqIssueOwner(dnReqOwner), .reqIssueCreditReturn(dnReqCreditReturn),
+    .reqIssueCreditType(dnReqCreditType),
+    .datIssueReady(datFifoReady && datTrackerTurn),
+    .datIssueValid(dnDatValid), .datIssueOwner(dnDatOwner),
+    .datIssueDataId(dnDatDataId), .datIssueTxnId(dnDatTxnId),
+    .rspValid(snRspValid), .rsp(incomingRsp),
+    .datValid(snDatValid), .dat(incomingDat)
+  );
+
+  // The request a downstream operation sends (IHI 0050H B2.3.9). SnpAttr is
+  // zero and Order is at most Request accepted towards an SN-F
+  // (IHI 0050H B2.8.6, Table B2.9); ReturnNID and ReturnTxnID name the Home
+  // unless a Persist response belongs to the Requester (B2.4.4, B2.4.10).
+  always_comb begin
+    chi_req_flit_t request;
+    logic isPos;
+    logic [POS_W-1:0] posIndex;
+    logic [VB_W-1:0] vbIndex;
+    entry_t e;
+    isPos = int'(dnReqOwner) < POS_DEPTH;
+    posIndex = POS_W'(dnReqOwner);
+    vbIndex = VB_W'(int'(dnReqOwner) - POS_DEPTH);
+    e = entry[posIndex];
+    request = '0;
+    request.tgtId = SN_NODE_ID;
+    request.srcId = HN_NODE_ID;
+    request.txnId = CHI_TXNID_FLIT_W'(dnReqOwner);
+    request.allowRetry = !dnResend[dnReqOwner];
+    request.pCrdType = dnResend[dnReqOwner] ? dnResendType[dnReqOwner] : '0;
+    request.order = ORDER_NONE;
+    request.size = 3'd6;
+    if (dnReqCreditReturn) begin
+      request.opcode = REQ_PCRD_RETURN;
+      request.txnId = '0;
+      request.allowRetry = 1'b0;
+      request.pCrdType = dnReqCreditType;
+      request.size = 3'd0;
+    end else if (isPos) begin
+      request.qos = e.req.qos;
+      request.pas = e.req.pas;
+      request.memAttr = e.req.memAttr;
+      request.addr = {keyLine(posKey[posIndex]), 6'b0};
+      request.returnNidOrStashNidOrDataTarget = HN_NODE_ID;
+      request.returnTxnIdOrStashLpid = CHI_RTNTXNID_SLOT_W'(dnReqOwner);
+      case (e.dnKind)
+        HNF_DN_READ: begin
+          request.opcode = REQ_READ_NO_SNP;
+          if (e.kind == HNF_KIND_READ_NOSNP) begin
+            request.addr = e.req.addr;
+            request.size = e.req.size;
+          end
+        end
+        HNF_DN_WRITE: begin
+          if (dnExactWrite(e)) begin
+            request.addr = e.req.addr;
+            request.size = e.req.size;
+            request.opcode = isFullLineWrite(e.req.opcode)
+                             ? REQ_WRITE_NO_SNP_FULL : REQ_WRITE_NO_SNP_PTL;
+          end else begin
+            request.opcode = (eWriteBe[posIndex] == ALL_BYTES)
+                             ? REQ_WRITE_NO_SNP_FULL : REQ_WRITE_NO_SNP_PTL;
+          end
+        end
+        default: begin
+          request.opcode = cmoDownstreamOpcode(e.cmo);
+          request.returnTxnIdOrStashLpid = '0;
+          // The Subordinate sends Persist straight to the Requester, under
+          // the Requester's PGroupID (IHI 0050H B2.3.5 alt 3c, B2.4.13).
+          if (e.cmo == HNF_CMO_PERSIST_SEP) begin
+            request.returnNidOrStashNidOrDataTarget = e.req.srcId;
+            request.groupIdOrLpid = e.req.groupIdOrLpid;
+          end else begin
+            request.returnNidOrStashNidOrDataTarget = '0;
+          end
+          request.stashNidValidOrEndianOrDeep = e.req.stashNidValidOrEndianOrDeep;
+        end
+      endcase
+    end else begin
+      request.qos = '0;
+      request.pas = keyPas(victim[vbIndex].key);
+      // A directory eviction writes back a coherent, Normal, Cacheable line.
+      request.memAttr = 4'b0101;
+      request.addr = {keyLine(victim[vbIndex].key), 6'b0};
+      request.returnNidOrStashNidOrDataTarget = HN_NODE_ID;
+      request.returnTxnIdOrStashLpid = CHI_RTNTXNID_SLOT_W'(dnReqOwner);
+      request.opcode = (bufSnpBe[dnReqOwner] == ALL_BYTES)
+                       ? REQ_WRITE_NO_SNP_FULL : REQ_WRITE_NO_SNP_PTL;
+    end
+    dnReqFlit = '0;
+    dnReqFlit.channel = CHI_CHANNEL_REQ;
+    dnReqFlit.qos = request.qos;
+    dnReqFlit.targetNodeId = SN_NODE_ID;
+    dnReqFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] = packReqFlit(CFG, request);
+  end
+
+  // Write data towards the Subordinate.
+  always_comb begin
+    chi_dat_flit_t data;
+    logic [63:0] writeBe;
+    logic isPos;
+    isPos = int'(dnDatOwner) < POS_DEPTH;
+    writeBe = isPos ? eWriteBe[POS_W'(dnDatOwner)] : bufSnpBe[dnDatOwner];
+    data = '0;
+    data.tgtId = SN_NODE_ID;
+    data.srcId = HN_NODE_ID;
+    data.txnId = CHI_TXNID_FLIT_W'(dnDatTxnId);
+    data.opcode = DAT_NON_COPY_BACK_WR_DATA;
+    data.resp = RESP_I;
+    data.respErr = bufDataErr[dnDatOwner] ? RESP_ERR_DERR : RESP_ERR_OK;
+    data.dataId = dnDatDataId;
+    // CCID follows the downstream request's address, which is line aligned
+    // unless a WriteNoSnp is forwarded as received (IHI 0050H B2.9.7).
+    data.ccId = (isPos && dnExactWrite(entry[POS_W'(dnDatOwner)]))
+                ? entry[POS_W'(dnDatOwner)].req.addr[5:4] : '0;
+    data.data[CFG.dataW-1:0] = bufData[dnDatOwner][int'(dnDatDataId)*128 +: CFG.dataW];
+    for (int unsigned b = 0; b < DAT_BYTES; b++)
+      data.be[b] = writeBe[int'(dnDatDataId)*16 + b];
+    data.dataCheck = dataCheckOf(data.data);
+    data.poison[POISON_PER_BEAT-1:0] =
+      bufPoison[dnDatOwner][int'(dnDatDataId)*2 +: POISON_PER_BEAT];
+    dnDatFlit = '0;
+    dnDatFlit.channel = CHI_CHANNEL_DAT;
+    dnDatFlit.targetNodeId = SN_NODE_ID;
+    dnDatFlit.payload = packDatFlit(CFG, data);
+  end
+
+  // ---------------------------------------------------------------------
+  // Responses to Requesters. RetryAck goes first so a refused request
+  // leaves the REQ channel at once, then PCrdGrant, then the entries in
+  // round-robin order. Within an entry: ReadReceipt, DBIDResp, Comp,
+  // CompCMO.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      rspWant[i] = entry[i].receiptOwed
+                   || eDbidReady[i]
+                   || (eCompReady[i] && !eCompIsData[i])
+                   || eCompCmoReady[i];
+  end
+
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    found = 1'b0;
+    rspEntry = '0;
+    candidate = 0;
+    for (int unsigned offset = 0; offset < POS_DEPTH; offset++) begin
+      candidate = int'(rspPointer) + offset;
+      if (candidate >= POS_DEPTH)
+        candidate = candidate - POS_DEPTH;
+      if (!found && rspWant[candidate]) begin
+        found = 1'b1;
+        rspEntry = POS_W'(candidate);
+      end
+    end
+    rspEntryValid = found;
+    rspGrantSend = !retryAckWant && retryGrantValid && rspFifoReady;
+    rspEntrySend = !retryAckWant && !retryGrantValid && rspEntryValid
+                   && rspFifoReady;
+    retryGrantReady = rspGrantSend;
+  end
+
+  // The response flit for the RSP channel this cycle.
+  always_comb begin
+    chi_rsp_flit_t response;
+    entry_t e;
+    e = entry[rspEntry];
+    response = '0;
+    response.srcId = HN_NODE_ID;
+    if (retryAckWant) begin
+      response.qos = incomingReq.qos;
+      response.tgtId = incomingReq.srcId;
+      response.txnId = incomingReq.txnId;
+      response.opcode = RSP_RETRY_ACK;
+      response.pCrdType = retryClass;
+    end else if (retryGrantValid) begin
+      // PCrdGrant names the recorded Requester and carries no TxnID or DBID
+      // (IHI 0050H B2.5.5).
+      response.tgtId = retryGrantTgtId;
+      response.opcode = RSP_PCRD_GRANT;
+      response.pCrdType = retryGrantClass;
+    end else begin
+      response.qos = e.req.qos;
+      response.tgtId = e.req.srcId;
+      response.txnId = e.req.txnId;
+      response.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(rspEntry);
+      response.respErr = (e.err != HNF_ERR_NONE) ? RESP_ERR_NDERR
+                                                  : RESP_ERR_OK;
+      if (e.receiptOwed) begin
+        response.opcode = RSP_READ_RECEIPT;
+        response.respErr = RESP_ERR_OK;
+      end else if (eDbidReady[rspEntry]) begin
+        response.opcode = e.dbidWithComp ? RSP_COMP_DBID_RESP : RSP_DBID_RESP;
+        // WriteNoSnpDef is unsupported at an HN-F: OK/Unsupported
+        // (IHI 0050H Table B4.29).
+        if ((e.kind == HNF_KIND_WRITE_DEF) && (e.err == HNF_ERR_NONE))
+          response.resp = RESP_SC;
+        if (!e.dbidWithComp)
+          response.respErr = RESP_ERR_OK;
+      end else if (eCompReady[rspEntry] && !eCompIsData[rspEntry]) begin
+        response.opcode = RSP_COMP;
+        case (e.kind)
+          HNF_KIND_DATALESS:
+            // A failing Exclusive CleanUnique keeps the Requester Shared
+            // (IHI 0050H B6.3.3.3).
+            response.resp = (e.req.opcode == REQ_EVICT) ? RESP_I
+                            : ((e.exclStore && !e.exclPass) ? RESP_SC
+                                                            : RESP_UC_UD);
+          HNF_KIND_READ:
+            response.resp = RESP_UC_UD;
+          default:
+            response.resp = RESP_I;
+        endcase
+        if ((e.kind == HNF_KIND_STASH_ONCE)
+            && (e.req.opcode inside {REQ_STASH_ONCE_SEP_SHARED,
+                                     REQ_STASH_ONCE_SEP_UNIQUE})) begin
+          // CompStashDone carries the StashGroupID in the DBID slot
+          // (IHI 0050H B7.5.3).
+          response.opcode = RSP_COMP_STASH_DONE;
+          response.dbIdOrGroupId =
+            CHI_RSP_DBID_SLOT_W'(e.req.groupIdOrLpid);
+        end
+        if ((e.err == HNF_ERR_NONE) && e.exclStore && e.exclPass
+            && (e.req.opcode != REQ_MAKE_READ_UNIQUE))
+          response.respErr = RESP_ERR_EXOK;
+      end else begin
+        response.opcode = RSP_COMP_CMO;
+      end
+    end
+    rspPushValid = retryHandshake || rspGrantSend || rspEntrySend;
+    rspPushFlit = '0;
+    rspPushFlit.channel = CHI_CHANNEL_RSP;
+    rspPushFlit.qos = response.qos;
+    rspPushFlit.targetNodeId = response.tgtId;
+    rspPushFlit.payload[CHI_MAX_RSP_FLIT_W-1:0] = packRspFlit(CFG, response);
+  end
+
+  // ---------------------------------------------------------------------
+  // Data to Requesters: CompData to the Requester and the Data Pull
+  // CompData to a stash target. The SN trackers' write data shares the DAT
+  // output; it and the entries alternate.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      datWant[i] = (eCompReady[i] && eCompIsData[i]) || ePullReady[i];
+  end
+
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    entry_t e;
+    logic [3:0] remaining;
+    found = 1'b0;
+    datEntry = '0;
+    candidate = 0;
+    for (int unsigned offset = 0; offset < POS_DEPTH; offset++) begin
+      candidate = int'(datPointer) + offset;
+      if (candidate >= POS_DEPTH)
+        candidate = candidate - POS_DEPTH;
+      if (!found && datWant[candidate]) begin
+        found = 1'b1;
+        datEntry = POS_W'(candidate);
+      end
+    end
+    datEntryValid = found;
+    e = entry[datEntry];
+    datEntryToPull = !(eCompReady[datEntry] && eCompIsData[datEntry]);
+    remaining = datEntryToPull ? (4'hf & ~e.pullGranSent)
+                               : (eCompGranules[datEntry] & ~e.compGranSent);
+    datEntryDataId = '0;
+    for (int unsigned g = 4; g > 0; g--)
+      if (remaining[g-1])
+        datEntryDataId = 2'((g - 1) & ~(STEP - 1));
+    datEntrySend = datEntryValid && datFifoReady && !dnDatValid;
+    datTrackerSend = dnDatValid;
+  end
+
+  always_comb begin
+    chi_dat_flit_t data;
+    entry_t e;
+    e = entry[datEntry];
+    data = '0;
+    data.qos = e.req.qos;
+    data.srcId = HN_NODE_ID;
+    data.homeNidOrPbha = HN_NODE_ID;
+    data.dbId = CHI_DAT_DBID_SLOT_W'(datEntry);
+    data.opcode = DAT_COMP_DATA;
+    data.dataId = datEntryDataId;
+    data.ccId = e.req.addr[5:4];
+    data.data[CFG.dataW-1:0] = bufData[datEntry][int'(datEntryDataId)*128 +: CFG.dataW];
+    data.poison[POISON_PER_BEAT-1:0] =
+      bufPoison[datEntry][int'(datEntryDataId)*2 +: POISON_PER_BEAT];
+    for (int unsigned b = 0; b < DAT_BYTES; b++)
+      data.be[b] = 1'b1;
+    if (datEntryToPull) begin
+      // The Data Pull completes like an Allocating Read under the TxnID the
+      // stash target supplied (IHI 0050H B7.1.1, B2.3.4).
+      data.tgtId = RNF_NODE_IDS[e.stashTarget];
+      data.txnId = CHI_TXNID_FLIT_W'(e.pullTxnId);
+      data.resp = e.pullResp;
+      data.respErr = bufDataErr[datEntry] ? RESP_ERR_DERR : RESP_ERR_OK;
+    end else begin
+      data.tgtId = e.req.srcId;
+      data.txnId = e.req.txnId;
+      if (e.err != HNF_ERR_NONE) begin
+        // NDERR in every packet; the data values are not required to be
+        // valid (IHI 0050H B9.1.3).
+        data.respErr = RESP_ERR_NDERR;
+        data.resp = RESP_I;
+        data.data = '0;
+        data.poison = '0;
+      end else if (e.kind == HNF_KIND_ATOMIC) begin
+        // The original value at the addressed location, which atomic return
+        // data must not be cached from (IHI 0050H B4.2.5).
+        data.resp = RESP_I;
+        data.respErr = RESP_ERR_OK;
+        data.data = '0;
+        for (int unsigned b = 0; b < 8; b++) begin
+          int unsigned lineByte;
+          lineByte = 32'(e.req.addr[5:0]) + b;
+          if ((b < (32'd1 << ((e.req.opcode == REQ_ATOMIC_COMPARE)
+                              ? (e.req.size - 3'd1) : e.req.size)))
+              && (lineByte >= (int'(datEntryDataId) * 16))
+              && (lineByte < (int'(datEntryDataId) * 16 + DAT_BYTES)))
+            data.data[(lineByte - int'(datEntryDataId) * 16)*8 +: 8] =
+              e.atomicOrig[b*8 +: 8];
+        end
+      end else begin
+        data.resp = eGrant[datEntry];
+        data.respErr = bufDataErr[datEntry] ? RESP_ERR_DERR
+                       : (e.exclLoad && (e.req.opcode != REQ_READ_PREFER_UNIQUE)
+                          ? RESP_ERR_EXOK : RESP_ERR_OK);
+      end
+    end
+    data.dataCheck = dataCheckOf(data.data);
+    datPushFlit = '0;
+    datPushFlit.channel = CHI_CHANNEL_DAT;
+    if (datTrackerSend) begin
+      datPushFlit = dnDatFlit;
+    end else begin
+      datPushFlit.qos = data.qos;
+      datPushFlit.targetNodeId = data.tgtId;
+      datPushFlit.payload = packDatFlit(CFG, data);
+    end
+    datPushValid = datTrackerSend || datEntrySend;
+  end
+
+  // ---------------------------------------------------------------------
+  // Directory update at retirement, one entry per cycle, and the victim it
+  // may evict.
+  // ---------------------------------------------------------------------
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    entry_t e;
+    logic [NUM_RNF-1:0] reqBit;
+    logic [NUM_RNF-1:0] targetBit;
+    logic [NUM_RNF-1:0] sharers;
+    logic ownerValid;
+    logic [RNF_W-1:0] owner;
+    found = 1'b0;
+    sfUpdateEntry = '0;
+    candidate = 0;
+    for (int unsigned offset = 0; offset < POS_DEPTH; offset++) begin
+      candidate = int'(sfUpdatePointer) + offset;
+      if (candidate >= POS_DEPTH)
+        candidate = candidate - POS_DEPTH;
+      if (!found && (entry[candidate].phase == PH_RETIRE)
+          && entry[candidate].sfUpdOwed) begin
+        found = 1'b1;
+        sfUpdateEntry = POS_W'(candidate);
+      end
+    end
+    sfUpdateValid = found;
+    e = entry[sfUpdateEntry];
+    sfUpdateKey = posKey[sfUpdateEntry];
+    reqBit = '0;
+    if (e.reqIsRnf)
+      reqBit[e.reqRnf] = 1'b1;
+    targetBit = '0;
+    if (e.stashValid)
+      targetBit[e.stashTarget] = 1'b1;
+
+    // Start from the snapshot: an RN-F that was snooped keeps a place only
+    // if its response said it kept a copy, and the owner is whichever RN-F
+    // still holds an owning state.
+    sharers = (e.sfSharers & ~e.snpTargets) | e.snpKeep;
+    ownerValid = 1'b0;
+    owner = '0;
+    for (int unsigned r = 0; r < NUM_RNF; r++)
+      if (e.snpOwns[r]) begin
+        ownerValid = 1'b1;
+        owner = RNF_W'(r);
+      end
+    if (!ownerValid && e.sfOwnerValid && !e.snpTargets[e.sfOwner]) begin
+      ownerValid = 1'b1;
+      owner = e.sfOwner;
+    end
+
+    case (e.kind)
+      HNF_KIND_READ: begin
+        if (eMruHold[sfUpdateEntry] || (eGrant[sfUpdateEntry] != RESP_I)) begin
+          sharers = sharers | reqBit;
+          if (eMruHold[sfUpdateEntry]
+              || (eGrant[sfUpdateEntry] != RESP_SC)) begin
+            ownerValid = e.reqIsRnf;
+            owner = e.reqRnf;
+          end
+        end
+      end
+      HNF_KIND_DATALESS: begin
+        if (e.req.opcode == REQ_EVICT) begin
+          sharers = sharers & ~reqBit;
+          if (ownerValid && e.reqIsRnf && (owner == e.reqRnf))
+            ownerValid = 1'b0;
+        end else if (!(e.exclStore && !e.exclPass)) begin
+          sharers = reqBit;
+          ownerValid = e.reqIsRnf;
+          owner = e.reqRnf;
+        end
+      end
+      HNF_KIND_CMO: begin
+        if (cmoInvalidates(e.cmo)) begin
+          sharers = sharers & ~reqBit;
+          if (ownerValid && e.reqIsRnf && (owner == e.reqRnf))
+            ownerValid = 1'b0;
+        end
+      end
+      HNF_KIND_WRITE, HNF_KIND_WRITE_ZERO: begin
+        if (e.pullValid && (e.pullGranSent == 4'hf)) begin
+          sharers = targetBit;
+          ownerValid = 1'b1;
+          owner = e.stashTarget;
+        end
+      end
+      HNF_KIND_COPYBACK: begin
+        if (copyBackDeallocates(e.req.opcode)) begin
+          sharers = sharers & ~reqBit;
+          if (ownerValid && e.reqIsRnf && (owner == e.reqRnf))
+            ownerValid = 1'b0;
+        end
+      end
+      HNF_KIND_ATOMIC: begin
+        sharers = sharers & ~reqBit;
+        if (ownerValid && e.reqIsRnf && (owner == e.reqRnf))
+          ownerValid = 1'b0;
+      end
+      HNF_KIND_STASH_ONCE: begin
+        if (e.pullValid && (e.pullGranSent == 4'hf)) begin
+          sharers = sharers | targetBit;
+          if (e.stashUnique) begin
+            ownerValid = 1'b1;
+            owner = e.stashTarget;
+          end
+        end
+      end
+      default: begin
+      end
+    endcase
+    if (ownerValid && !sharers[owner])
+      ownerValid = 1'b0;
+    sfUpdateSharers = sharers;
+    sfUpdateOwnerValid = ownerValid;
+    sfUpdateOwner = owner;
+
+    // Ways whose location a transaction or a victim entry holds are never
+    // evicted.
+    for (int unsigned way = 0; way < SF_WAYS; way++) begin
+      sfUpdateLockedWays[way] = 1'b0;
+      for (int unsigned i = 0; i < POS_DEPTH; i++)
+        if (posActive[i] && (posKey[i] == sfUpdateSetKeys[way]))
+          sfUpdateLockedWays[way] = 1'b1;
+      for (int unsigned v = 0; v < NUM_VB; v++)
+        if (victim[v].valid && (victim[v].key == sfUpdateSetKeys[way]))
+          sfUpdateLockedWays[way] = 1'b1;
+    end
+
+    victimFree = 1'b0;
+    victimFreeIndex = '0;
+    for (int unsigned v = 0; v < NUM_VB; v++)
+      if (!victimFree && !victim[v].valid) begin
+        victimFree = 1'b1;
+        victimFreeIndex = VB_W'(v);
+      end
+  end
+
+  always_comb begin
+    posFreeMask = '0;
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      if (entry[i].phase == PH_RETIRE) begin
+        if (!entry[i].sfUpdOwed)
+          posFreeMask[i] = 1'b1;
+        else if (sfUpdateValid && sfUpdateReady && (sfUpdateEntry == POS_W'(i)))
+          posFreeMask[i] = 1'b1;
+      end
+  end
+
+  // ---------------------------------------------------------------------
+  // Output stages.
+  // ---------------------------------------------------------------------
+  chi_flit_fifo req_fifo (
+    .clk, .resetn, .pushValid(dnReqValid), .pushReady(reqFifoReady),
+    .pushFlit(dnReqFlit), .outValid(reqOutValid), .outReady(reqOutReady),
+    .outFlit(reqOutFlit), .count(reqFifoCount)
+  );
+
+  chi_flit_fifo rsp_fifo (
+    .clk, .resetn, .pushValid(rspPushValid), .pushReady(rspFifoReady),
+    .pushFlit(rspPushFlit), .outValid(rspOutValid), .outReady(rspOutReady),
+    .outFlit(rspOutFlit), .count(rspFifoCount)
+  );
+
+  chi_flit_fifo snp_fifo (
+    .clk, .resetn, .pushValid(snpIssueValid), .pushReady(snpFifoReady),
+    .pushFlit(snpIssueFlit), .outValid(snpOutValid), .outReady(snpOutReady),
+    .outFlit(snpOutFlit), .count(snpFifoCount)
+  );
+
+  chi_flit_fifo dat_fifo (
+    .clk, .resetn, .pushValid(datPushValid), .pushReady(datFifoReady),
+    .pushFlit(datPushFlit), .outValid(datOutValid), .outReady(datOutReady),
+    .outFlit(datOutFlit), .count(datFifoCount)
+  );
+
+  always_comb begin
+    idle = (posActive == '0) && (reqFifoCount == '0) && (rspFifoCount == '0)
+           && (snpFifoCount == '0) && (datFifoCount == '0)
+           && (dnBusy == '0);
+    for (int unsigned v = 0; v < NUM_VB; v++)
+      if (victim[v].valid)
+        idle = 1'b0;
+  end
+
+  // ---------------------------------------------------------------------
+  // Sequential state.
+  // ---------------------------------------------------------------------
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      state <= HNF_IDLE;
-      activeReq <= '0;
-      activePosIndex <= '0;
-      activeCoherent <= 1'b0;
-      activeWrite <= 1'b0;
-      activeNeedsSnoop <= 1'b0;
-      activeExclOkay <= 1'b0;
-      activeNeedPersist <= 1'b0;
-      activeGotComp <= 1'b0;
-      activeGotPersist <= 1'b0;
-      activeAtomic <= 1'b0;
-      activeStash <= 1'b0;
-      activeStashUnique <= 1'b0;
-      activeStashIndependent <= 1'b0;
-      activeStashSeparate <= 1'b0;
-      activeStashTargetMask <= '0;
-      activeStashSnoop <= SNP_STASH_SHARED;
-      activeStashLpidValid <= 1'b0;
-      activeStashLpid <= '0;
-      activeStashPullResp <= RESP_I;
-      activeDmt <= 1'b0;
-      activeDmtSeparate <= 1'b0;
-      activeDwt <= 1'b0;
-      atomicOperandBuffer <= '0;
-      atomicInitialBuffer <= '0;
-      atomicInitialFromSnoop <= 1'b0;
-      atomicDbidSeen <= 1'b0;
-      atomicCompSeen <= 1'b0;
-      atomicDataSent <= 1'b0;
-      posFree <= 1'b0;
-      sfUpdate <= 1'b0;
-      sfUpdateSharers <= '0;
-      sfInvalidate <= 1'b0;
-      stashDirUpdate <= 1'b0;
-      snoopSuppliedData <= 1'b0;
-      snoopDatFill <= '0;
-      snoopDatSend <= '0;
-      writeBackDbid <= '0;
-      writeBackDbidSeen <= 1'b0;
-      writeBackCompSeen <= 1'b0;
+      for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+        entry[i] <= '0;
+        entry[i].phase <= PH_FREE;
+      end
+      for (int unsigned v = 0; v < NUM_VB; v++)
+        victim[v] <= '0;
+      startPointer <= '0;
+      rspPointer <= '0;
+      datPointer <= '0;
+      sfUpdatePointer <= '0;
+      datTrackerTurn <= 1'b0;
     end else begin
-      posFree <= 1'b0;
-      sfUpdate <= 1'b0;
-      stashDirUpdate <= 1'b0;
-      case (state)
-        HNF_IDLE: begin
-          if (sfBackInvValid)
-            state <= HNF_BACKINV_START;
-          else if (requestHandshake && !droppedRequest) begin
-            activeReq <= incomingReq;
-            activePosIndex <= posAllocIndex;
-            snoopSuppliedData <= 1'b0;
-            snoopDatFill <= '0;
-            snoopDatSend <= '0;
-            activeCoherent <= coherentRequest;
-            activeAtomic <= atomicRequest;
-            activeStash <= stashIsStash;
-            activeStashUnique <= stashUnique;
-            activeStashIndependent <= stashIndependent;
-            activeStashSeparate <= stashSeparateDone;
-            activeStashTargetMask <= stashTargetValid ? stashTargetMask : '0;
-            activeStashSnoop <= stashTargetSnoop;
-            activeStashLpidValid <= stashLpidValid;
-            activeStashLpid <= stashLpid;
-            activeStashPullResp <= stashPullResp;
-            activeDmt <= dmtEligible;
-            activeDmtSeparate <= dmtEligible && dmtSeparateResponse;
-            activeDwt <= dwtEligible && dwtDoDwt;
-            atomicInitialFromSnoop <= 1'b0;
-            atomicDbidSeen <= 1'b0;
-            atomicCompSeen <= 1'b0;
-            atomicDataSent <= 1'b0;
-            atomicInitialBuffer <= '0;
-            activeWrite <= isWrite(incomingReq.opcode) || cmoWrite;
-            activeNeedsSnoop <= stashTargetValid
-                                || ((coherentRequest || activeCmo) && sfHit
-                                    && (sfSharers != '0));
-            activeExclOkay <= !incomingReq.exclOrSnoopMeOrCah
-                              || (isWrite(incomingReq.opcode)
-                                  ? exclOkay : exclReserveReady);
-            activeNeedPersist <= cmoPersist;
-            activeGotComp <= 1'b0;
-            activeGotPersist <= !cmoPersist;
-            if (orderedReceiptRequired)
-              state <= HNF_ORDER_RECEIPT;
-            else if (stashTargetValid
-                     || (((isSnoopable(incomingReq.opcode) || activeCmo
-                           || atomicRequest)
-                          && sfHit
-                          && ((sfSharers
-                               & ~requesterBit(incomingReq.srcId)) != '0))))
-              state <= HNF_SNOOP_START;
-            else if (atomicRequest)
-              state <= HNF_ATOMIC_DBID;
-            // A stash request without a target has no data to move, so the
-            // Home completes it immediately (IHI 0050H B7.4.2).
-            else if (stashIndependent)
-              state <= HNF_STASH_COMP;
-            else if (isDatalessRequest(incomingReq.opcode))
-              state <= HNF_DATALESS_COMP;
-            else
-              state <= HNF_REQ_SEND;
-          end
+      // Allocation.
+      if (posAllocValid && posAllocReady)
+        entry[posAllocIndex] <= allocEntry;
+
+      // Start.
+      if (startValid) begin
+        entry[startIndex] <= planEntry;
+        startPointer <= (int'(startIndex) == (POS_DEPTH - 1))
+                        ? '0 : (startIndex + 1'b1);
+      end
+
+      // Snoop issue.
+      if (snpIssueValid) begin
+        if (int'(snpIssueOwner) < POS_DEPTH) begin
+          entry[POS_W'(snpIssueOwner)].snpToSend[snpIssueTarget] <= 1'b0;
+          entry[POS_W'(snpIssueOwner)].snpPending[snpIssueTarget] <= 1'b1;
+        end else begin
+          victim[VB_W'(int'(snpIssueOwner) - POS_DEPTH)].snpToSend[snpIssueTarget] <= 1'b0;
+          victim[VB_W'(int'(snpIssueOwner) - POS_DEPTH)].snpPending[snpIssueTarget] <= 1'b1;
         end
-        HNF_SNOOP_START:
-          if (snpStart && snpStartReady)
-            state <= HNF_SNOOP_WAIT;
-        HNF_SNOOP_WAIT: begin
-          if (activeAtomic && datInValid
-              && ((incomingDat.opcode == DAT_SNP_RESP_DATA)
-                  || (incomingDat.opcode == DAT_SNP_RESP_DATA_PTL))) begin
-            atomicInitialBuffer <= incomingDat.data[CFG.dataW-1:0];
-            atomicInitialFromSnoop <= 1'b1;
+      end
+
+      // Snoop responses without data.
+      if (snpRspValid) begin
+        if (int'(snpRspOwner) < POS_DEPTH) begin
+          if (entry[POS_W'(snpRspOwner)].snpPending[snpRspTarget]) begin
+            entry[POS_W'(snpRspOwner)].snpPending[snpRspTarget] <= 1'b0;
+            if (snoopeeKeeps(incomingRsp.resp))
+              entry[POS_W'(snpRspOwner)].snpKeep[snpRspTarget] <= 1'b1;
+            if (snoopeeOwns(incomingRsp.resp))
+              entry[POS_W'(snpRspOwner)].snpOwns[snpRspTarget] <= 1'b1;
+            if (incomingRsp.respErr != RESP_ERR_OK)
+              entry[POS_W'(snpRspOwner)].snpErr <= 1'b1;
+            // DataPull rides in FwdState[0] and the implied read's TxnID in
+            // DBID (IHI 0050H Table B13.7, B7.5.3).
+            if (entry[POS_W'(snpRspOwner)].stashValid
+                && (snpRspTarget == entry[POS_W'(snpRspOwner)].stashTarget)
+                && incomingRsp.fwdState[0]) begin
+              entry[POS_W'(snpRspOwner)].pullValid <= 1'b1;
+              entry[POS_W'(snpRspOwner)].pullTxnId <=
+                CHI_TXNID_FLIT_W'(incomingRsp.dbIdOrGroupId);
+              entry[POS_W'(snpRspOwner)].pullAckOwed <= 1'b1;
+            end
           end
-          if (snoopDatCapture && datInReady) begin
-            snoopDatBuf[snoopDatFill] <= incomingDat;
-            snoopDatFill <= snoopDatFill + 1'b1;
-            if (snoopDatFill == (LINE_BEATS - 1))
-              snoopSuppliedData <= 1'b1;
-          end
-          if (snpDone) begin
-            if (activeAtomic)
-              state <= HNF_ATOMIC_DBID;
-            else if (activeStashIndependent)
-              state <= HNF_STASH_COMP;
-            // A dataless request is finished by the snoop: the peers have
-            // been moved to the state it asked for and only the Comp is left.
-            // If the snoop took a dirty copy away, that line has to reach
-            // memory first or the write it holds is lost.
-            else if (isDatalessRequest(activeReq.opcode))
-              state <= snoopDataSupplied ? HNF_SNOOP_WB_REQ
-                                         : HNF_DATALESS_COMP;
-            // A snoop returned the line, so there is nothing to read
-            // downstream and the buffered copy becomes the CompData.
-            else if (snoopDataSupplied)
-              state <= HNF_SNOOP_DATA_SEND;
-            else
-              state <= HNF_REQ_SEND;
-          end
+        end else begin
+          victim[VB_W'(int'(snpRspOwner) - POS_DEPTH)].snpPending[snpRspTarget] <= 1'b0;
         end
-        HNF_SNOOP_DATA_SEND:
-          if (datOutValid && datOutReady) begin
-            snoopDatSend <= snoopDatSend + 1'b1;
-            if (snoopDatSend == (snoopDatFill - 1'b1)) begin
-              if (activeReq.expCompAck)
-                state <= HNF_WAIT_COMP_ACK;
-              else begin
-                state <= HNF_IDLE;
-                posFree <= 1'b1;
-              end
-              if (activeCoherent) begin
-                sfUpdate <= 1'b1;
-                sfInvalidate <= 1'b0;
-                if ((activeReq.opcode == REQ_READ_UNIQUE)
-                    || (activeReq.opcode == REQ_MAKE_UNIQUE))
-                  sfUpdateSharers <= requesterBit(activeReq.srcId);
-                else
-                  sfUpdateSharers <= sfSharers | requesterBit(activeReq.srcId);
-              end
+      end
+
+      // Snoop responses with data: the snoop retires on its last packet.
+      if (snpDatValid) begin
+        if (int'(snpDatOwner) < POS_DEPTH) begin
+          entry[POS_W'(snpDatOwner)].snpGranules <=
+            entry[POS_W'(snpDatOwner)].snpGranules | snpDatGranules;
+          if (respPassDirty(incomingDat.resp))
+            entry[POS_W'(snpDatOwner)].snpDirty <= 1'b1;
+          if (incomingDat.opcode == DAT_SNP_RESP_DATA_PTL)
+            entry[POS_W'(snpDatOwner)].snpPtl <= 1'b1;
+          if (incomingDat.respErr != RESP_ERR_OK)
+            entry[POS_W'(snpDatOwner)].snpErr <= 1'b1;
+          if (snpDatLast) begin
+            entry[POS_W'(snpDatOwner)].snpPending[snpDatTarget] <= 1'b0;
+            entry[POS_W'(snpDatOwner)].snpGotData <= 1'b1;
+            if (snoopeeKeeps(incomingDat.resp))
+              entry[POS_W'(snpDatOwner)].snpKeep[snpDatTarget] <= 1'b1;
+            if (snoopeeOwns(incomingDat.resp))
+              entry[POS_W'(snpDatOwner)].snpOwns[snpDatTarget] <= 1'b1;
+            if (entry[POS_W'(snpDatOwner)].stashValid
+                && (snpDatTarget == entry[POS_W'(snpDatOwner)].stashTarget)
+                && incomingDat.dataPull) begin
+              entry[POS_W'(snpDatOwner)].pullValid <= 1'b1;
+              entry[POS_W'(snpDatOwner)].pullTxnId <=
+                CHI_TXNID_FLIT_W'(incomingDat.dbId);
+              entry[POS_W'(snpDatOwner)].pullAckOwed <= 1'b1;
             end
           end
-        HNF_SNOOP_WB_REQ:
-          if (reqOutValid && reqOutReady) begin
-            writeBackDbidSeen <= 1'b0;
-            writeBackCompSeen <= 1'b0;
-            snoopDatSend <= '0;
-            state <= HNF_SNOOP_WB_DATA;
-          end
-        HNF_SNOOP_WB_DATA: begin
-          if (rspInValid && rspInReady) begin
-            if ((incomingRsp.opcode == RSP_DBID_RESP)
-                || (incomingRsp.opcode == RSP_DBID_RESP_ORD)
-                || (incomingRsp.opcode == RSP_COMP_DBID_RESP)) begin
-              writeBackDbid <= incomingRsp.dbIdOrGroupId[CFG.txnIdW-1:0];
-              writeBackDbidSeen <= 1'b1;
-            end
-            if ((incomingRsp.opcode == RSP_COMP)
-                || (incomingRsp.opcode == RSP_COMP_DBID_RESP))
-              writeBackCompSeen <= 1'b1;
-          end
-          if (datOutValid && datOutReady) begin
-            snoopDatSend <= snoopDatSend + 1'b1;
-            if (snoopDatSend == (snoopDatFill - 1'b1))
-              state <= HNF_SNOOP_WB_COMP;
-          end
+        end else begin
+          victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules <=
+            victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules | snpDatGranules;
+          if (respPassDirty(incomingDat.resp))
+            victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpDirty <= 1'b1;
+          if (snpDatLast)
+            victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpPending[snpDatTarget] <= 1'b0;
         end
-        HNF_SNOOP_WB_COMP: begin
-          if (rspInValid && rspInReady
-              && ((incomingRsp.opcode == RSP_COMP)
-                  || (incomingRsp.opcode == RSP_COMP_DBID_RESP)))
-            writeBackCompSeen <= 1'b1;
-          if (writeBackCompSeen)
-            state <= HNF_DATALESS_COMP;
+      end
+
+      // Requester data.
+      if (wrDatValid && entry[wrDatEntry].wrOwed) begin
+        if (((entry[wrDatEntry].wrGranules | wrDatGranules)
+             & messageGranules(CFG, entry[wrDatEntry].req.addr,
+                               entry[wrDatEntry].req.size))
+            == messageGranules(CFG, entry[wrDatEntry].req.addr,
+                               entry[wrDatEntry].req.size))
+          entry[wrDatEntry].wrOwed <= 1'b0;
+        entry[wrDatEntry].wrGranules <=
+          entry[wrDatEntry].wrGranules | wrDatGranules;
+        if (incomingDat.opcode == DAT_WRITE_DATA_CANCEL)
+          entry[wrDatEntry].wrCancel <= 1'b1;
+        if (incomingDat.opcode == DAT_COPY_BACK_WR_DATA) begin
+          entry[wrDatEntry].wrResp <= incomingDat.resp;
+          // CopyBackWriteData_I: the line was snooped away while the CopyBack
+          // waited, and the data is not valid (IHI 0050H B2.9.5).
+          if (incomingDat.resp == RESP_I)
+            entry[wrDatEntry].wrCancel <= 1'b1;
         end
-        HNF_DATALESS_COMP:
-          if (rspOutValid && rspOutReady) begin
-            if (activeReq.expCompAck)
-              state <= HNF_WAIT_COMP_ACK;
-            else begin
-              state <= HNF_IDLE;
-              posFree <= 1'b1;
-            end
-            if (activeCoherent) begin
-              sfUpdate <= 1'b1;
-              // CleanShared leaves the sharers where they are; everything else
-              // dataless either takes the line for the Requester alone or
-              // clears every copy.
-              sfInvalidate <= (activeReq.opcode == REQ_MAKE_INVALID)
-                              || (activeReq.opcode == REQ_CLEAN_INVALID);
-              if ((activeReq.opcode == REQ_CLEAN_UNIQUE)
-                  || (activeReq.opcode == REQ_MAKE_UNIQUE))
-                sfUpdateSharers <= requesterBit(activeReq.srcId);
-              else if ((activeReq.opcode == REQ_MAKE_INVALID)
-                       || (activeReq.opcode == REQ_CLEAN_INVALID))
-                sfUpdateSharers <= '0;
-              else
-                sfUpdateSharers <= sfSharers;
-            end
-          end
-        HNF_STASH_COMP:
-          if (rspOutValid && rspOutReady) begin
-            if (activeStashSeparate && !COMBINED_COMP_STASH_DONE)
-              state <= HNF_STASH_DONE;
-            else if (stashPullPending)
-              state <= HNF_PULL_REQ;
-            else begin
-              state <= HNF_IDLE;
-              posFree <= 1'b1;
-            end
-          end
-        HNF_STASH_DONE:
-          if (rspOutValid && rspOutReady) begin
-            if (stashPullPending)
-              state <= HNF_PULL_REQ;
-            else begin
-              state <= HNF_IDLE;
-              posFree <= 1'b1;
-            end
-          end
-        HNF_PULL_REQ:
-          if (reqOutValid && reqOutReady)
-            state <= HNF_PULL_DATA;
-        HNF_PULL_DATA:
-          if (datOutValid && datOutReady && pullDatLast) begin
-            state <= HNF_IDLE;
-            posFree <= 1'b1;
-            sfUpdate <= 1'b1;
-            sfInvalidate <= 1'b0;
-            stashDirUpdate <= 1'b1;
-            sfUpdateSharers <= activeStashUnique
-                               ? requesterBit(dataPullTarget)
-                               : (sfSharers | requesterBit(dataPullTarget));
-          end
-        HNF_ATOMIC_DBID:
-          if (rspOutValid && rspOutReady)
-            state <= HNF_ATOMIC_OPERAND;
-        HNF_ATOMIC_OPERAND:
-          if (datInValid && datInReady) begin
-            atomicOperandBuffer <= incomingDat.data[CFG.dataW-1:0];
-            state <= atomicInitialFromSnoop ? HNF_ATOMIC_WRITE
-                                            : HNF_ATOMIC_READ;
-          end
-        HNF_ATOMIC_READ:
-          if (reqOutValid && reqOutReady)
-            state <= HNF_ATOMIC_INITIAL;
-        HNF_ATOMIC_INITIAL:
-          if (datInValid && datInReady
-              && (incomingDat.opcode == DAT_COMP_DATA)) begin
-            atomicInitialBuffer <= incomingDat.data[CFG.dataW-1:0];
-            state <= HNF_ATOMIC_WRITE;
-          end
-        HNF_ATOMIC_WRITE: begin
-          if (!atomicUpdateEnable)
-            state <= HNF_ATOMIC_RETURN;
-          else if (reqOutValid && reqOutReady)
-            state <= HNF_ATOMIC_WCOMP;
+        if (incomingDat.opcode == DAT_NCB_WR_DATA_COMP_ACK)
+          entry[wrDatEntry].compAckOwed <= 1'b0;
+        if (entry[wrDatEntry].kind == HNF_KIND_ATOMIC) begin
+          entry[wrDatEntry].atomicBeat <= incomingDat.data[CFG.dataW-1:0];
+          entry[wrDatEntry].atomicBeatId <= incomingDat.dataId;
         end
-        HNF_ATOMIC_WCOMP: begin
-          if (rspInValid && rspInReady) begin
-            if ((incomingRsp.opcode == RSP_DBID_RESP)
-                || (incomingRsp.opcode == RSP_DBID_RESP_ORD)
-                || (incomingRsp.opcode == RSP_COMP_DBID_RESP))
-              atomicDbidSeen <= 1'b1;
-            if ((incomingRsp.opcode == RSP_COMP)
-                || (incomingRsp.opcode == RSP_COMP_DBID_RESP))
-              atomicCompSeen <= 1'b1;
-          end
-          if (!atomicDataSent && atomicDbidSeen)
-            state <= HNF_ATOMIC_WDATA;
-          else if (atomicDataSent && atomicCompSeen)
-            state <= HNF_ATOMIC_RETURN;
+      end
+
+      // CompAck from the Requester or from the stash target.
+      if (compAckValid) begin
+        if (incomingRsp.srcId == entry[compAckEntry].req.srcId)
+          entry[compAckEntry].compAckOwed <= 1'b0;
+        if (entry[compAckEntry].pullAckOwed
+            && (incomingRsp.srcId
+                == RNF_NODE_IDS[entry[compAckEntry].stashTarget]))
+          entry[compAckEntry].pullAckOwed <= 1'b0;
+      end
+
+      // Downstream operations.
+      for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+        if (dnStartValid[i]) begin
+          entry[i].dnBusy <= 1'b1;
+          entry[i].dnKind <= dnStartKind[i];
         end
-        HNF_ATOMIC_WDATA:
-          if (datOutValid && datOutReady) begin
-            atomicDataSent <= 1'b1;
-            state <= HNF_ATOMIC_WCOMP;
-          end
-        HNF_ATOMIC_RETURN: begin
-          if ((atomicReturnsData && datOutValid && datOutReady)
-              || (!atomicReturnsData && rspOutValid && rspOutReady)) begin
-            posFree <= 1'b1;
-            activeAtomic <= 1'b0;
-            state <= activeReq.expCompAck ? HNF_WAIT_COMP_ACK : HNF_IDLE;
-          end
+        if (dnDone[i]) begin
+          entry[i].dnBusy <= 1'b0;
+          case (entry[i].dnKind)
+            HNF_DN_READ:  entry[i].dnReadDone <= 1'b1;
+            HNF_DN_WRITE: entry[i].dnWriteDone <= 1'b1;
+            default:      entry[i].dnCmoDone <= 1'b1;
+          endcase
         end
-        HNF_ORDER_RECEIPT:
-          if (rspOutValid && rspOutReady) begin
-            if (activeAtomic)
-              state <= HNF_ATOMIC_DBID;
-            else if (activeNeedsSnoop)
-              state <= HNF_SNOOP_START;
-            else
-              state <= HNF_REQ_SEND;
-          end
-        HNF_REQ_SEND:
-          if (reqOutValid && reqOutReady) begin
-            // With DMT the read data goes straight from the Subordinate to
-            // the Requester, so the Home leaves the data path entirely.
-            if (activeDmt && activeDmtSeparate)
-              state <= HNF_DMT_RESP;
-            else if (activeDmt) begin
-              if (activeReq.expCompAck)
-                state <= HNF_WAIT_COMP_ACK;
-              else begin
-                state <= HNF_IDLE;
-                posFree <= 1'b1;
-              end
-            end else
-              state <= HNF_WAIT_RESPONSE;
-          end
-        HNF_DMT_RESP:
-          if (rspOutValid && rspOutReady) begin
-            if (activeReq.expCompAck)
-              state <= HNF_WAIT_COMP_ACK;
-            else begin
-              state <= HNF_IDLE;
-              posFree <= 1'b1;
-            end
-          end
-        HNF_WAIT_RESPONSE: begin
-          if (rspInValid && rspInReady) begin
-            if ((incomingRsp.opcode == RSP_COMP)
-                || (incomingRsp.opcode == RSP_COMP_DBID_RESP)
-                || (incomingRsp.opcode == RSP_COMP_CMO)
-                || (incomingRsp.opcode == RSP_COMP_PERSIST))
-              activeGotComp <= 1'b1;
-            if ((incomingRsp.opcode == RSP_PERSIST)
-                || (incomingRsp.opcode == RSP_COMP_PERSIST))
-              activeGotPersist <= 1'b1;
-            if ((activeGotComp || (incomingRsp.opcode == RSP_COMP)
-                 || (incomingRsp.opcode == RSP_COMP_DBID_RESP)
-                 || (incomingRsp.opcode == RSP_COMP_CMO)
-                 || (incomingRsp.opcode == RSP_COMP_PERSIST))
-                && (activeGotPersist || !activeNeedPersist
-                    || (incomingRsp.opcode == RSP_PERSIST)
-                    || (incomingRsp.opcode == RSP_COMP_PERSIST))) begin
-              if (activeReq.expCompAck)
-                state <= HNF_WAIT_COMP_ACK;
-              else begin
-                // A write with stash hint whose target asked for Data Pull
-                // still owes that target the cache line.
-                state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
-                posFree <= !stashPullPending;
-                if (activeCoherent || isSnoopableWrite(activeReq.opcode)) begin
-                  sfUpdate <= 1'b1;
-                  if (activeWrite)
-                    sfUpdateSharers <= '0;
-                  else if ((activeReq.opcode == REQ_READ_UNIQUE)
-                           || (activeReq.opcode == REQ_MAKE_UNIQUE))
-                    sfUpdateSharers <= requesterBit(activeReq.srcId);
-                  else
-                    sfUpdateSharers <= sfSharers
-                                       | requesterBit(activeReq.srcId);
-                  sfInvalidate <= activeWrite;
-                end
-              end
-            end
-          end else if (datInValid && datInReady
-                       && (incomingDat.opcode == DAT_COMP_DATA)
-                       && incomingDatLast) begin
-            if (activeReq.expCompAck) begin
-              state <= HNF_WAIT_COMP_ACK;
-            end else begin
-              state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
-              posFree <= !stashPullPending;
-            end
-            if (activeCoherent || isSnoopableWrite(activeReq.opcode)) begin
-              sfUpdate <= 1'b1;
-              if (activeWrite)
-                sfUpdateSharers <= '0;
-              else if ((activeReq.opcode == REQ_READ_UNIQUE)
-                       || (activeReq.opcode == REQ_MAKE_UNIQUE))
-                sfUpdateSharers <= requesterBit(activeReq.srcId);
-              else
-                sfUpdateSharers <= sfSharers
-                                   | requesterBit(activeReq.srcId);
-              sfInvalidate <= activeWrite;
-            end
-          end
+      end
+
+      // Atomic execution.
+      if (atomicValid) begin
+        entry[atomicEntry].atomicDone <= 1'b1;
+        entry[atomicEntry].atomicUpdate <= atomicUpdateEnable;
+        entry[atomicEntry].atomicOrig <= atomicOriginalWord;
+      end
+
+      // Responses sent.
+      if (rspEntrySend) begin
+        if (entry[rspEntry].receiptOwed)
+          entry[rspEntry].receiptOwed <= 1'b0;
+        else if (eDbidReady[rspEntry])
+          entry[rspEntry].dbidOwed <= 1'b0;
+        else if (eCompReady[rspEntry] && !eCompIsData[rspEntry])
+          entry[rspEntry].compOwed <= 1'b0;
+        else
+          entry[rspEntry].compCmoOwed <= 1'b0;
+        rspPointer <= (int'(rspEntry) == (POS_DEPTH - 1))
+                      ? '0 : (rspEntry + 1'b1);
+      end
+
+      // Data sent.
+      if (datEntrySend) begin
+        if (datEntryToPull) begin
+          for (int unsigned g = 0; g < 4; g++)
+            if ((g >= int'(datEntryDataId)) && (g < (int'(datEntryDataId) + STEP)))
+              entry[datEntry].pullGranSent[g] <= 1'b1;
+        end else begin
+          for (int unsigned g = 0; g < 4; g++)
+            if ((g >= int'(datEntryDataId)) && (g < (int'(datEntryDataId) + STEP)))
+              entry[datEntry].compGranSent[g] <= 1'b1;
+          if (((entry[datEntry].compGranSent | beatGranules(CFG, datEntryDataId))
+               & eCompGranules[datEntry]) == eCompGranules[datEntry])
+            entry[datEntry].compOwed <= 1'b0;
         end
-        HNF_WAIT_COMP_ACK: begin
-          if (rspInValid && (incomingRsp.opcode == RSP_COMP_ACK)
-              && (incomingRsp.srcId == activeReq.srcId)) begin
-            state <= stashPullPending ? HNF_PULL_REQ : HNF_IDLE;
-            posFree <= !stashPullPending;
-          end
+        datPointer <= (int'(datEntry) == (POS_DEPTH - 1))
+                      ? '0 : (datEntry + 1'b1);
+      end
+      datTrackerTurn <= !datTrackerTurn;
+
+      // Retirement and free.
+      for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+        if (eAllDone[i])
+          entry[i].phase <= PH_RETIRE;
+        if (posFreeMask[i])
+          entry[i].phase <= PH_FREE;
+      end
+      if (sfUpdateValid && sfUpdateReady)
+        sfUpdatePointer <= (int'(sfUpdateEntry) == (POS_DEPTH - 1))
+                           ? '0 : (sfUpdateEntry + 1'b1);
+
+      // Victim buffer.
+      for (int unsigned v = 0; v < NUM_VB; v++) begin
+        int unsigned owner;
+        owner = POS_DEPTH + v;
+        if (dnStartValid[owner])
+          victim[v].dnBusy <= 1'b1;
+        if (dnDone[owner]) begin
+          victim[v].dnBusy <= 1'b0;
+          victim[v].dnWriteDone <= 1'b1;
         end
-        HNF_BACKINV_START:
-          if (snpStart && snpStartReady)
-            state <= HNF_BACKINV_WAIT;
-        HNF_BACKINV_WAIT:
-          if (snpDone)
-            state <= HNF_IDLE;
-        default: state <= HNF_IDLE;
-      endcase
+        if (victim[v].valid && (victim[v].snpToSend == '0)
+            && (victim[v].snpPending == '0) && !victim[v].dnBusy
+            && (!victim[v].snpDirty || victim[v].dnWriteDone))
+          victim[v].valid <= 1'b0;
+      end
+      if (sfVictimValid && sfUpdateValid && sfUpdateReady) begin
+        victim[victimFreeIndex] <= '0;
+        victim[victimFreeIndex].valid <= 1'b1;
+        victim[victimFreeIndex].key <= sfVictimKey;
+        victim[victimFreeIndex].snpToSend <= sfVictimSharers;
+      end
+    end
+  end
+
+  // Line buffers. One DAT packet arrives per cycle, so one owner is written
+  // from the input at most; the atomic ALU writes an entry no packet can be
+  // arriving for. A newer source never yields to an older one: Requester data
+  // over snoop data over memory data.
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      for (int unsigned o = 0; o < NUM_OWNERS; o++) begin
+        bufData[o] <= '0;
+        bufWrBe[o] <= '0;
+        bufSnpBe[o] <= '0;
+        bufMemBe[o] <= '0;
+        bufPoison[o] <= '0;
+      end
+      bufDataErr <= '0;
+    end else begin
+      if (posAllocValid && posAllocReady) begin
+        bufWrBe[posAllocIndex] <= '0;
+        bufSnpBe[posAllocIndex] <= '0;
+        bufMemBe[posAllocIndex] <= '0;
+        bufPoison[posAllocIndex] <= '0;
+        bufDataErr[posAllocIndex] <= 1'b0;
+      end
+      if (startValid && (entry[startIndex].kind == HNF_KIND_WRITE_ZERO)) begin
+        bufData[startIndex] <= '0;
+        bufWrBe[startIndex] <= ALL_BYTES;
+      end
+      if (sfVictimValid && sfUpdateValid && sfUpdateReady) begin
+        bufWrBe[POS_DEPTH + victimFreeIndex] <= '0;
+        bufSnpBe[POS_DEPTH + victimFreeIndex] <= '0;
+        bufMemBe[POS_DEPTH + victimFreeIndex] <= '0;
+        bufPoison[POS_DEPTH + victimFreeIndex] <= '0;
+        bufDataErr[POS_DEPTH + victimFreeIndex] <= 1'b0;
+      end
+
+      if (wrDatValid && entry[wrDatEntry].wrOwed
+          && (entry[wrDatEntry].kind != HNF_KIND_ATOMIC)
+          && (incomingDat.opcode != DAT_WRITE_DATA_CANCEL)
+          && !((incomingDat.opcode == DAT_COPY_BACK_WR_DATA)
+               && (incomingDat.resp == RESP_I))) begin
+        for (int unsigned b = 0; b < DAT_BYTES; b++)
+          if (incomingDat.be[b])
+            bufData[wrDatEntry][(int'(incomingDat.dataId)*16 + b)*8 +: 8] <=
+              incomingDat.data[b*8 +: 8];
+        bufWrBe[wrDatEntry] <= bufWrBe[wrDatEntry]
+                               | beatEnables(incomingDat.dataId, incomingDat.be);
+        bufPoison[wrDatEntry][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
+          incomingDat.poison[POISON_PER_BEAT-1:0];
+        if (incomingDat.respErr == RESP_ERR_DERR)
+          bufDataErr[wrDatEntry] <= 1'b1;
+      end
+
+      if (snpDatValid) begin
+        for (int unsigned b = 0; b < DAT_BYTES; b++)
+          if (incomingDat.be[b]
+              && !bufWrBe[snpDatOwner][int'(incomingDat.dataId)*16 + b])
+            bufData[snpDatOwner][(int'(incomingDat.dataId)*16 + b)*8 +: 8] <=
+              incomingDat.data[b*8 +: 8];
+        bufSnpBe[snpDatOwner] <= bufSnpBe[snpDatOwner]
+                                 | beatEnables(incomingDat.dataId, incomingDat.be);
+        bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
+          incomingDat.poison[POISON_PER_BEAT-1:0];
+        if (incomingDat.respErr == RESP_ERR_DERR)
+          bufDataErr[snpDatOwner] <= 1'b1;
+      end
+
+      if (memDatValid) begin
+        for (int unsigned b = 0; b < DAT_BYTES; b++)
+          if (!bufWrBe[memDatOwner][int'(incomingDat.dataId)*16 + b]
+              && !bufSnpBe[memDatOwner][int'(incomingDat.dataId)*16 + b])
+            bufData[memDatOwner][(int'(incomingDat.dataId)*16 + b)*8 +: 8] <=
+              incomingDat.data[b*8 +: 8];
+        bufMemBe[memDatOwner] <= bufMemBe[memDatOwner]
+                                 | beatBytes(incomingDat.dataId);
+        bufPoison[memDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
+          bufPoison[memDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT]
+          | incomingDat.poison[POISON_PER_BEAT-1:0];
+        if (incomingDat.respErr != RESP_ERR_OK)
+          bufDataErr[memDatOwner] <= 1'b1;
+      end
+
+      if (atomicValid && atomicUpdateEnable) begin
+        for (int unsigned b = 0; b < 8; b++)
+          if ((b < (32'd1 << atomicOperandSize))
+              && ((32'(entry[atomicEntry].req.addr[5:0]) + b) < 64))
+            bufData[atomicEntry][(32'(entry[atomicEntry].req.addr[5:0]) + b)*8 +: 8] <=
+              atomicUpdateWord[b*8 +: 8];
+      end
     end
   end
 endmodule

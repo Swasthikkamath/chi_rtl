@@ -101,24 +101,24 @@ packed flit field by itself is carriage, not implementation.
 | Per-hop L-Credits inside the fabric | B13.11 | Not implemented | Internal topology links use ready/valid with registered crosspoint outputs. CHI L-Credits terminate at the node ports. |
 | Requester SAM, HN striping and HN-I SAM | B3.1--B3.3 | Implemented | Ordered region table, security rejection, XOR-fold hash and runtime update ports. The decode result overwrites the incoming `TgtID`, which B3.3.1 permits. All five B3.3.1 cases are distinguished, including the two that bypass the address mapper; see Section 6.1. |
 | `PrefetchTgt` routing | B3.3.1, B4.2.6.2 | Implemented | `chi_prefetch_map` maps the address to an SN-F independently of the HN hash, the request bypasses the Home, and both the HN-F and HN-I accept and discard it without a response and without a RetryAck. |
-| Coherent read family | B4, B5.1 | Partial | `ReadShared`, `ReadClean`, `ReadNotSharedDirty`, `ReadUnique`, `ReadOnce`, `ReadPreferUnique`, `ReadOnceCleanInvalid` and `ReadOnceMakeInvalid` are classified, snooped when required, forwarded, and completed. Response-state selection is simplified and not every legal state combination is produced. |
-| Write family | B5.3 | Partial | Fourteen writes including the stash forms are classified and relayed with `CompDBIDResp` combining. Partial-write byte-enable rules, write cancellation and every combined form are incomplete. |
-| CMO and combined write-CMO | B7 | Partial | Opcode classification plus completion and persist tracking. Architectural completion points and the snoop and data side effects of each CMO are incomplete. |
-| DCT | B2.5.1.3, B4.8 | Partial | Eligibility, forwarding-snoop generation and `SnpRespFwded` collection exist. The fallback path when the forwarding peer cannot supply data is not implemented. |
-| DMT, including `ReadNoSnpSep` | B2.5.1.1--B2.5.1.2 | Implemented | `chi_dmt_ctrl` selects direct memory transfer, the downstream read names the Requester in `ReturnNID` and `ReturnTxnID`, the Subordinate sends `CompData` straight to the Requester, and the Home issues only the response it still owes. |
-| DWT | B2.3.2.1, B13.10.24 | Implemented | `chi_dwt_ctrl` sets `DoDWT` on the downstream write, the Subordinate returns `DBIDResp` directly to the Requester, and the Home forwards only the completion. |
-| Atomics | B2.3.3, B4.2.5, B5.4 | Implemented | `chi_atomic_alu` implements the `AtomicStore`, `AtomicLoad`, `AtomicSwap` and `AtomicCompare` operations. The Home serializes the operand, reads the initial value, applies the operation, writes it back and returns the original value. Little-endian and big-endian operands are both handled. The datapath is 64 bits, so operands wider than 8 bytes are not supported. |
+| Coherent read family | B2.3.1, B4.2.1, B4.4, B4.5.1 | Implemented | Every allocating read, `MakeReadUnique` (Comp without data while the Requester still holds the line), the `ReadOnce` family and `ReadNoSnp`. The Home reads memory with its own `ReadNoSnp` only when no snoop returned the whole line, merges partial Dirty data over memory data, and grants `CompData` per Table B4.27 from what the other caches keep; Dirty data a read cannot take is written back. Data always passes through the Home (see the DCT and DMT rows). |
+| Write family | B2.3.2, B4.2.3, B4.5.1.3 | Implemented | Immediate, Write Zero and CopyBack writes, stash and Combined forms. The Home issues its own `DBIDResp` or `CompDBIDResp` with its entry as DBID, buffers the data, merges a partial write over Dirty snoop data, honours `WriteDataCancel` and `CopyBackWriteData_I`, and writes memory with `WriteNoSnpFull` or `WriteNoSnpPtl`; a `WriteNoSnp` keeps its own address, Size and attributes. `WriteNoSnpDef` is answered OK/Unsupported (B4.5.1.3.1). |
+| CMO and combined write-CMO | B2.3.2.4, B2.3.2.5, B2.3.5, B4.2.2 | Implemented | Every CMO and Combined write including PoPA and the Issue H Storage forms. Dirty copies are snooped out and written back before `Comp`; persist and Storage maintenance is forwarded to the SN-F, `CleanSharedPersistSep` with `ReturnNID` naming the Requester so the Persist goes straight to it; `CompCMO` follows the write. PoP, PoPA and PoPS are taken to be at or behind the SN-F. |
+| DCT | B2.3.1.1 alt 5, B4.8.3 | Not implemented | The per-entry Home does not send forwarding snoops yet; all read data passes through the Home. Capability and policy plumbing exists (Stage 1). |
+| DMT, including `ReadNoSnpSep` | B2.3.1.1 alts 3-4, B2.3.9.1 | Not implemented | The Home reads memory into its own buffer; `ReadNoSnpSep` is never issued and is rejected with NDERR from a Requester (B1.6). |
+| DWT | B2.3.2.1 alt 1, B13.10.24 | Not implemented | Write data passes through the Home. DWT is not legal for CopyBack writes (B2.3.2.3, B13.10.24), so it will only ever apply to Immediate and Combined writes. |
+| Atomics | B2.3.3, B2.9.6, B4.2.5, B5.4 | Implemented | The Home snoops every other copy (and the Requester with `SnoopMe`), takes the initial value from a Dirty snoop or memory, applies `chi_atomic_alu`, writes the line back when it changed or was Dirty, and returns the original value. `AtomicCompare` takes the compare value at the addressed location and the swap value at the address with bit log2(operand size) inverted (B2.9.6.2). The datapath is 64 bits, so operands wider than 8 bytes are not supported. |
 | Far atomics | B4.2.5 | Partial | Operations are executed at the Home. There is no negotiation that pushes the operation to the Subordinate. |
 | DVM and MN | B2.3.7, B8 | Partial | The MN serially unicasts `SnpDVMOp` to configured Requesters and collects responses. The two-part DVM message payload is not decoded, so operation-specific ordering is absent. |
-| Sequential coherent snoops | B4.3--B4.4, B4.8 | Partial | The Home walks a precise sharer vector one RN-F at a time and collects responses including forwarded and dirty-data cases. One snoop is outstanding at a time. |
-| Cache stashing | B4.9, B7 | Implemented | `chi_stash_ctrl` decodes `WriteUniqueFullStash`, `WriteUniquePtlStash`, `StashOnceShared`, `StashOnceUnique`, `StashOnceSepShared` and `StashOnceSepUnique`, resolves `StashNID`, `StashNIDValid`, `StashLPID` and `StashLPIDValid`, issues the matching stash snoop, honours a `DataPull` in the snoop response by issuing the implied read, and returns `Comp`, `StashDone` or the combined `CompStashDone`. |
+| Coherent snoops | B4.4, B4.9 | Partial | Each entry snoops the RN-Fs Table B4.26 requires, with `RetToSrc` only to the one RN-F that may hold the line Dirty or Unique, and collects responses and data per entry. Snoops are issued one at a time across the Home. |
+| Cache stashing | B2.3.4, B7 | Implemented | Writes with stash hint and `StashOnce*`. A `StashOnce*` stashes only when memory holds the latest copy (and, for a Unique stash, no other copy exists); otherwise it completes without stashing, which B7 permits. A Data Pull is served from the Home's buffer or memory as an Allocating Read and waits for the stash target's `CompAck`. `StashOnceSep*` completes with `CompStashDone`. |
 | RN cache states and transitions | B4.1, B4.6--B4.8 | Not implemented | Out of project scope. State encodings exist in `chi_pkg` and the required model is documented in Section 10, but there is no RN cache controller here. |
-| POS and same-line hazards | B1.5, B2.7, B4.11 | Partial | POS storage, allocation and same-line plus ordered hazard logic exist, but the Home FSM admits one transaction at a time, so configured POS depth does not create concurrency. |
-| Inclusive precise snoop filter | B4.4, B4.11 | Partial | Set-associative sharer and owner storage with rotating replacement and sequential back-invalidation. State updates are simplified and are not a complete Issue H directory model. |
+| Home concurrency, POS and same-location hazards | B2.7.5, B4.11.2 | Implemented | Every POS entry runs its own transaction. Transactions to different `{line, PAS}` locations proceed together; one location runs one transaction at a time in arrival order (age matrix in `chi_pos`, start permission in `chi_hazard`). |
+| Inclusive precise snoop filter | B4.4, B4.6 | Partial | Sharer vector and owner per `{line, PAS}`; one lookup and one update per cycle; eviction never takes a way a transaction holds, and the evicted location is snooped out with `SnpCleanInvalid` and written back by the victim buffer. Silent evictions leave stale sharer bits, which cost a snoop. Section 9.2. |
 | Request Retry, `RetryAck` and `PCrdGrant` | B2.5.5, B2.10 | Implemented | `chi_retry` records the `SrcID`, QoS and credit class behind every `RetryAck`, allocates one of four P-Credit types, and issues `PCrdGrant` naming the recorded Requester with no `TxnID` and no `DBID`. QoS selects which record is granted and age breaks ties. |
 | P-Credit return | B2.5.6, B2.10.1 | Implemented | A granted credit leaves the accounting either when a request arrives with `AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`, which the Home accepts and discards. |
-| Exclusives | B6 | Partial | Line and requester reservation monitors produce `EXOK`. Request classification and the full set of invalidation and failure rules are simplified. |
-| Ordering and `ReadReceipt` | B2.7 | Partial | Ordered requests are globally serialized and a `ReadReceipt` is returned for a request that asks for one. Endpoint order and request order are not distinguished. |
+| Exclusives | B6 | Partial | Checked when the entry starts, after same-location ordering. Exclusive loads register, `CleanUnique` and `WriteNoSnp` with `Excl` are checked; a failing `CleanUnique` sends no snoop and completes Shared, a failing `WriteNoSnp` writes nothing. The monitor is still keyed by SrcID and line without LPID or PAS and does not re-register on failure (Stage 7). |
+| Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
 | `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
@@ -395,33 +395,34 @@ becomes state. There are three endpoint types:
 
 ## 2.5 Home Node internal architecture
 
-![Fig 2.2 `chi_hnf_top` internal structure. One request is in flight at a time.](figures/chi_hnf.png){width=100%}
+![Fig 2.2 `chi_hnf_top` internal structure. Every POS entry runs its own transaction.](figures/chi_hnf.png){width=100%}
 
-The coherent Home is where nearly all protocol state lives, so it is shown
-separately. A request is either admitted into `chi_pos` or handed to
-`chi_retry`, which is the only path that can answer with `RetryAck` and later
-`PCrdGrant`. An admitted request is checked by `chi_hazard` against every
-other active POS entry for a same-line or ordering conflict before the FSM
-acts on it. One globally serial FSM of 22 states then drives whichever engine
-the opcode selects: the directory and snoop generator for coherence, the DMT,
-DWT and stash controllers when the transaction can be offloaded so that data
-bypasses the Home, and the atomic, cache-maintenance and exclusive-monitor
-blocks for operations the Home performs itself.
+The coherent Home is where nearly all protocol state lives. A request is
+either allocated a POS entry or handed to `chi_retry`, the only path that
+answers with `RetryAck` and later `PCrdGrant`. A request whose location is
+busy is not refused: it is allocated and waits, so requests to other locations
+behind it keep flowing.
 
-The three offload engines are worth separating from the rest, because they
-exist to keep data out of the Home rather than to add behaviour to it.
-`chi_dmt_ctrl` names the Requester in `ReturnNID` and `ReturnTxnID` on the
-downstream read so the Subordinate sends `CompData` straight back to the
-Requester. `chi_dwt_ctrl` sets `DoDWT` on the downstream write so the
-Subordinate returns `DBIDResp` directly to the Requester. `chi_dct_ctrl`
-turns a snoop into a forwarding snoop so a peer cache supplies the data. In
-all three cases the Home still issues the response it alone owes, and the
-data never crosses it. Sections 8.1 to 8.3 trace one example of each.
+Every POS entry is a transaction in its own right. `chi_hazard` lets an entry
+start only when it is the oldest active entry for its `{line, PAS}` location
+and, if it is Endpoint ordered, the oldest ordered request from its source.
+On starting, the entry reads the directory and receives a plan: which RN-Fs to
+snoop and with which snoop, and which responses it owes. From then on it is a
+set of obligations it discharges as messages come and go: snoops to send and
+collect, data the Requester owes, memory reads and writes through
+`chi_sn_tracker`, `DBIDResp`, `Comp` or `CompData`, `CompCMO`, a Data Pull,
+`CompAck`, and finally the directory update. Shared engines — the snoop issue
+in `chi_snp_gen`, the downstream trackers, the directory ports, the atomic ALU
+and the four output stages — serve one entry per cycle each, so independent
+transactions overlap freely.
 
-The single-FSM structure is the dominant simplification in this design. The
-POS holds `posEntries` entries and detects hazards across all of them, but
-only one transaction advances at a time, so POS depth currently buys hazard
-visibility rather than throughput. Section 9.1 covers the consequences.
+Each owner, POS entry or victim entry, has a 64-byte line buffer with separate
+byte masks for Requester data, snoop data and memory data, so a partial write
+merges over Dirty snoop data, which merges over memory data, whatever order
+they arrive in.
+
+The Home does not use direct transfers yet: data always passes through it.
+Section 9 describes the transaction model in detail.
 
 ## 2.6 Configuration and status plane
 
@@ -461,18 +462,16 @@ chi_interconnect_top
 │   └── chi_prefetch_map
 ├── apb_cfg : chi_cfg_slave                          [CFG_APB]
 ├── hnf_nodes[*] : chi_hnf_top
-│   ├── chi_pos
-│   ├── chi_hazard
-│   ├── chi_snoop_filter
-│   ├── chi_snp_gen
-│   ├── chi_retry
-│   ├── chi_dct_ctrl
-│   ├── chi_dmt_ctrl
-│   ├── chi_dwt_ctrl
+│   ├── chi_pos               (allocation, keys, age matrix)
+│   ├── chi_hazard            (start permission per entry)
+│   ├── chi_snoop_filter      (lookup and update ports, eviction)
+│   ├── chi_excl_mon
 │   ├── chi_stash_ctrl
+│   ├── chi_retry
 │   ├── chi_atomic_alu
-│   ├── chi_cmo
-│   └── chi_excl_mon
+│   ├── chi_snp_gen           (one snoop issue port)
+│   ├── chi_sn_tracker        (one downstream tracker per owner)
+│   └── chi_flit_fifo  x4     (REQ, RSP, SNP, DAT out)
 ├── hni_nodes[*] : chi_hni_top
 │   └── chi_sam
 ├── mn_nodes[*] : chi_mn_dvm
@@ -542,7 +541,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `numDevPortsPerXp` | 2 | positive; `crosspoints * numDevPortsPerXp >= NUM_NODES` | Device ports per crosspoint for every topology, and the devicePort NodeID field. |
 | `snpFilterEntries` | 1024 | positive, divisible by ways | Total Home directory entries. |
 | `snpFilterWays` | 4 | 1 through entries, exact divisor | Directory associativity. |
-| `posEntries` | 32 | positive | POS array depth. The Home is still globally serial. |
+| `posEntries` | 32 | positive | POS entries, each a concurrent transaction. |
 | `retryRecords` | 16 | positive | Retry record table depth, that is, the number of outstanding `RetryAck` records the Home can hold. |
 | `lcrdDepth` | 8 | 2 or greater | L-Credits advertised per channel and receive-buffer depth. |
 | `exclMonitors` | 32 | positive | Exclusive monitor entries. |
@@ -691,7 +690,7 @@ open, not because interoperability demands it.
 | `topology` | CHI specifies no transport. Any network that delivers flits is legal. | See Section 5: crossbar for latency, ring for area, mesh for scale. |
 | `meshX`, `meshY`, `numXp`, `numDevPortsPerXp` | Fabric shape is microarchitecture. | Hop count against crosspoint count; also consumes NodeID bits. |
 | `snpFilterEntries`, `snpFilterWays` | CHI requires a Home to track sharers but not how. | Directory area against back-invalidation traffic. See Section 3.2.3. |
-| `posEntries` | Transaction tracking depth is unspecified. | Hazard visibility. It does not currently buy throughput. |
+| `posEntries` | Transaction tracking depth is unspecified. | Concurrent transactions per Home against entry state and line-buffer area. |
 | `retryRecords` | The Home decides how many retried Requesters it will remember. | Retry table area against how often the Home must back-pressure instead of retrying. |
 | `lcrdDepth` | CHI fixes the credit protocol, not the pool size. | Receive-buffer area against sustainable throughput. See Section 3.2.3. |
 | `exclMonitors` | Monitor count is unspecified; the architecture permits spurious failure. | Monitor area against the spurious exclusive-failure rate. |
@@ -729,12 +728,12 @@ Requesters with even a 512-line cache each need 2048 entries before capacity
 back-invalidations stop. Size this from the actual cache sizes, not from the
 default.
 
-**`posEntries` does not currently buy throughput.** The Home has one globally
-serial FSM, so although the POS holds `posEntries` entries and `chi_hazard`
-checks a new request against all of them, only one transaction advances at a
-time. Increasing it improves hazard visibility and nothing else. It becomes a
-throughput parameter only once the FSM is pipelined, which Section 9.1 lists
-as a known limitation.
+**`posEntries` sets Home concurrency.** Every entry runs its own
+transaction, so the Home can have `posEntries` transactions in flight, all to
+different locations or queued behind each other on one. Each entry costs its
+transaction state and a 64-byte line buffer, so the depth trades throughput for
+area; a depth below the sum of the outstanding requests the Requesters can
+issue simply means the excess is retried or back-pressured.
 
 **`retryRecords` bounds how many Requesters can be waiting for a P-Credit.**
 When the table is full this design back-pressures the request rather than
@@ -1244,9 +1243,8 @@ table states what the RTL does.
 
 : Table 8.1 ReadShared served by direct cache transfer
 
-RTL status: Partial. Eligibility, the forwarding snoop and `SnpRespFwded`
-collection exist. The fallback when the forwarding peer cannot supply data is
-not implemented.
+RTL status: Not implemented. The Home snoops the owner with `SnpShared` and
+`RetToSrc` set and returns the line as its own `CompData` (Section 9.1).
 
 ## 8.2 ReadUnique with DMT
 
@@ -1260,27 +1258,31 @@ not implemented.
 
 : Table 8.2 ReadUnique served by direct memory transfer
 
-RTL status: Implemented. `chi_dmt_ctrl` decides eligibility, the downstream
-request carries the Requester's identity and a Home-unique TxnID, and the
-Home issues only its own remaining response. `ReadNoSnpSep` is handled on the
-same path.
+RTL status: Not implemented. The Home reads memory into its line buffer with
+its own `ReadNoSnp`, under its own TxnID, and returns `CompData` itself.
 
-## 8.3 WriteBackFull with DWT
+## 8.3 WriteBackFull
+
+A CopyBack always completes through the Home: the Home returns
+`CompDBIDResp` and the data comes to it (B2.3.2.3). `DoDWT` is applicable only
+in `WriteNoSnp*` and Combined writes from a Home to a Subordinate (B13.10.24),
+so a CopyBack never uses DWT. Earlier versions of this document showed a DWT
+flow for `WriteBackFull`; that flow is not permitted.
 
 | Step | From | To | Message |
 |------|------------|------------|----------------------------------------------------------------------|
 | 1 | RN-F | HN-F | `WriteBackFull` |
-| 2 | HN-F | SN-F | forwarded write with `DoDWT` set |
-| 3 | SN-F | RN-F | `DBIDResp` direct to the Requester |
-| 4 | RN-F | SN-F | `CopyBackWrData` via the Home |
-| 5 | SN-F | HN-F | `Comp` |
-| 6 | HN-F | RN-F | forwarded completion |
+| 2 | HN-F | RN-F | `CompDBIDResp`, DBID = POS entry |
+| 3 | RN-F | HN-F | `CopyBackWriteData` with the line state |
+| 4 | HN-F | SN-F | `WriteNoSnpFull`, only when the data carried PassDirty |
+| 5 | SN-F | HN-F | `DBIDResp` and `Comp`, or `CompDBIDResp` |
+| 6 | HN-F | SN-F | `NonCopyBackWriteData` |
 
-: Table 8.3 WriteBackFull served by direct write transfer
+: Table 8.3 WriteBackFull completed by the Home
 
-RTL status: Implemented for the direct-write path. Without DWT the Home
-combines `Comp` into `CompDBIDResp` itself. Partial-write byte-enable rules
-and write cancellation remain incomplete.
+RTL status: Implemented. Clean data (`UC`, `SC`) is not written; a
+`CopyBackWriteData_I` (the line was snooped away while the CopyBack waited)
+writes nothing. The directory drops the Requester once the data has arrived.
 
 ## 8.4 CleanUnique with snoops
 
@@ -1296,8 +1298,10 @@ and write cancellation remain incomplete.
 
 : Table 8.4 CleanUnique with sequential snoops
 
-RTL status: Partial and sequential. The opcode is recognized, but snoop
-selection and directory transitions are simplified.
+RTL status: Implemented, with the snoops issued one at a time. The other
+sharers receive `SnpCleanInvalid`; Dirty data that comes back is written to
+memory; the Requester receives `Comp_UC` and becomes the directory owner after
+its `CompAck`.
 
 ## 8.5 AtomicLoad
 
@@ -1318,9 +1322,10 @@ RTL status: Implemented. `chi_atomic_alu` computes `AtomicStore`,
 `AtomicLoad`, `AtomicSwap` and `AtomicCompare` with both operand
 endiannesses. Big-endian operands are byte-reversed within the operand size
 before the arithmetic and reversed again on the way out, because atomic data
-is byte invariant. A snoop that invalidates a dirty peer copy supplies the
-initial value and removes the downstream read. The datapath is 64 bits wide,
-so operands wider than 8 bytes are unsupported. The operation is always
+is byte invariant. A Dirty snoop response supplies the initial value and
+removes the downstream read. The line is written back when the operation
+changed it or the snoop data was Dirty. The datapath is 64 bits wide, so
+operands wider than 8 bytes are unsupported. The operation is always
 performed at the Home; there is no far-atomic negotiation.
 
 ## 8.6 Request Retry
@@ -1342,7 +1347,8 @@ back-pressured response channel cannot book the same Requester twice. QoS
 selects which record is granted next and age breaks ties. `PCrdGrant` names
 the recorded Requester and carries no `TxnID` and no `DBID`. When the record
 table is full, the request is back-pressured instead of retried, which keeps
-the credit accounting exact.
+the credit accounting exact. A RetryAck is given only when no POS entry is
+free; a busy location is never a reason to retry.
 
 ## 8.7 WriteUniqueFullStash with Data Pull
 
@@ -1363,10 +1369,11 @@ the credit accounting exact.
 RTL status: Implemented. `chi_stash_ctrl` chooses the snoop from the stash
 opcode and whether the line is fully written, resolves the target from
 `StashNID` and `StashNIDValid`, and passes `StashLPID` and `StashLPIDValid`
-through the snoop's 12-bit slot. An accepted Data Pull is turned into
-`ReadUnique` or `ReadNotSharedDirty` and the directory records the stash
-target as the new owner. The independent `StashOnce` forms return `StashDone`,
-and `StashOnceSep` forms return the combined `CompStashDone`.
+through the snoop's 12-bit slot. A Data Pull is completed as an Allocating
+Read: once the write is in memory the Home sends `CompData` from its buffer,
+or reads memory first when the write was partial, under the TxnID the target
+supplied, and waits for the target's `CompAck` before the directory records it
+as the owner. `StashOnceSep` forms return `CompStashDone`.
 
 ## 8.8 DVM Sync
 
@@ -1387,56 +1394,107 @@ applied.
 
 # 9 Home Node internals
 
-## 9.1 Serialization
+## 9.1 Per-entry transactions
 
-`chi_pos` holds `posEntries` records with the line address, requester, TxnID,
-opcode and completion flags. `chi_hazard` blocks same-line overlap, blocks an
-ordered request while any POS entry is active, and blocks all new requests
-while an ordered entry is active. That is more conservative than a line-only
-POS.
+`chi_pos` allocates entries and holds what identifies and orders them: the
+location key `{PAS, line}`, Requester, TxnID, opcode, Order field, whether the
+entry has started, and an age matrix. `older[i][j]` is set when entry `j` was
+active when `i` was allocated; an entry's column is cleared when it is
+allocated again, so a reused index never looks older than it is.
 
-The controlling FSM in `chi_hnf_top` is the stronger limitation. It accepts a
-normal request only in `HNF_IDLE`, stores one `activeReq`, and does not
-return to idle until completion or `CompAck`. Therefore all normal Home
-transactions are globally serialized regardless of `posEntries`, and the
-multi-entry POS does not create concurrency. The FSM has 22 states: the
-baseline request, snoop, response and back-invalidation states; eight atomic
-states; an ordered-receipt state; a DMT response state; two stash completion
-states; and two Data Pull states.
+The transaction state of entry `i` lives in `chi_hnf_top` and passes through
+four phases:
 
-Two requests bypass the FSM entirely. `PCrdReturn` carries no transaction and
-`PrefetchTgt` has no response and must never be retried, so both are accepted
-and discarded without allocating a POS entry.
+| Phase | Meaning |
+|-------|---------|
+| `PH_WAIT` | Allocated, not started: an older entry for the location, an older ordered request from the same source, or a victim entry for the location is active, or another entry used the lookup port this cycle. |
+| `PH_RUN` | Started. The directory snapshot and the plan are written; obligations are discharged as messages move. |
+| `PH_RETIRE` | Every obligation met; waiting for the directory update port. |
+| `PH_FREE` | Unused. |
+
+: Table 9.1 POS entry phases
+
+The fields of an entry, and who writes them:
+
+| Group | Fields | Written |
+|-------|--------|---------|
+| Request | `req` (the whole flit), `kind`, `cmo`, `err`, `reqIsRnf`, `reqRnf` | at allocation |
+| Directory snapshot | `sfHit`, `sfSharers`, `sfOwnerValid`, `sfOwner` | at start |
+| Exclusive | `exclLoad`, `exclStore`, `exclPass` | at start |
+| Snoops | `snpTargets`, `snpToSend`, `snpPending`, `snpKeep`, `snpOwns`, `snpOpcode`, `snpRetToSrc`, `snpGranules`, `snpGotData`, `snpDirty`, `snpPtl`, `snpErr` | plan at start, then per response |
+| Stash | `stashValid`, `stashTarget`, `stashOpcode`, `stashLpid*`, `stashUnique`, `pullResp`, `pullValid`, `pullTxnId`, `pullGranSent`, `pullAckOwed` | plan at start, then per response |
+| Requester data | `wrOwed`, `wrGranules`, `wrCancel`, `wrResp`, `atomicBeat`, `atomicBeatId` | per DAT packet |
+| Atomic | `atomicDone`, `atomicUpdate`, `atomicOrig` | when the ALU runs |
+| Downstream | `dnBusy`, `dnKind`, `dnReadDone`, `dnWriteDone`, `dnCmoDone` | per tracker start and completion |
+| Responses | `receiptOwed`, `dbidOwed`, `dbidWithComp`, `compOwed`, `compGranSent`, `compCmoOwed`, `compAckOwed`, `sfUpdOwed` | plan, then per message sent or received |
+
+: Table 9.2 POS entry fields
+
+Memory reads and writes are not planned: they follow from what the snoops
+return. An entry reads memory when no snoop brought the whole line; writes
+memory when it holds Dirty data the Requester does not take, a write's data,
+or an atomic result; and forwards persist or Storage maintenance once any such
+write has completed. Each owner has at most one downstream operation in flight,
+in the order read, write, CMO, which is the order every transaction kind
+needs.
+
+Later stages extend the entry rather than replace it: PAS is already part of
+the key, and the SLC, granule protection, exclusive and direct-transfer stages
+add fields and obligations of their own.
 
 ## 9.2 Directory
 
-The snoop filter is set-associative, tracks precise RN-F sharers and one
-owner, uses rotating replacement ways, and requests sequential
-back-invalidation before replacing a valid full set. Updates are simplified:
-a write invalidates, a unique read makes the requester the sole sharer and
-owner, and another recognized coherent read ORs the requester into the sharer
-vector. After an accepted Data Pull the stash target becomes the owner. This
-is not the complete Issue H state machine.
+The snoop filter is set-associative and records, per `{line, PAS}`, the RN-Fs
+that may hold the line and whether one of them may hold it Unique or Dirty.
+An RN-F may evict a clean line silently (B4.6), so a sharer bit can be stale;
+that costs a snoop answered `SnpResp_I`. The entry that starts reads it
+through the single lookup port; the entry that retires writes it through the
+single update port. Because one location runs one transaction at a time, what
+an entry read stays valid until it writes it back.
+
+An update that needs a way in a full set evicts the first way, from a rotating
+pointer, whose location no POS or victim entry holds. The evicted location
+moves to a victim entry, which is hazarded like a transaction, snoops every
+recorded sharer with `SnpCleanInvalid` (B4.4 allows `SnpUnique` or
+`SnpCleanInvalid` for a backward invalidation) and writes back any Dirty data
+before it frees. With no free victim entry the update waits; victim entries
+depend only on snoop responses and the Subordinate, so they always drain.
+
+The new state comes from the snapshot and the snoop responses: a snooped RN-F
+keeps its place only if its response kept a copy, the owner is whichever RN-F
+still holds an owning state, and the Requester is added or removed according
+to the grant (Table B4.27) or the transaction kind.
 
 ## 9.3 Retry credits
 
-`chi_retry` is the complete credit loop. On a `RetryAck` it records the
-`SrcID`, the QoS and the credit class derived from the request category, and
-it reports the per-class pending count and the per-class outstanding-credit
-count. `CHI_CREDIT_TYPES` is 4 of the 16 `PCrdType` values Issue H allows; the
-Home partitions its resources by request category. A grant is issued only
-when the Home is idle, the POS can allocate, no back-invalidation is running,
-and no previously granted credit is still outstanding, which prevents the Home
-from promising the same resource twice. A credit leaves the accounting when a
-request arrives with `AllowRetry` deasserted or when the Requester returns it
-with `PCrdReturn`.
+`chi_retry` records the `SrcID`, the QoS and the credit class behind every
+`RetryAck` and reports the pending and outstanding counts per class.
+`CHI_CREDIT_TYPES` is 4 of the 16 `PCrdType` values Issue H allows. A request
+is retried only when no POS entry is free; a busy location is never a reason.
+A grant is issued only while an entry is free and no earlier grant is
+outstanding. A credit leaves the accounting when a request arrives with
+`AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`.
 
 ## 9.4 Ordering
 
-A request that asks for a read receipt is answered with `ReadReceipt` from the
-`HNF_ORDER_RECEIPT` state before the data path continues. Ordered requests are
-globally serialized by the hazard logic. Endpoint order and request order are
-not distinguished, so the implementation is stricter than Issue H requires.
+Request Order applies to one address, so the same-location rule keeps it. An
+Endpoint-ordered request waits for every older ordered request from its
+source, because every location this Home serves is behind one Subordinate.
+Unordered requests and requests to different locations never wait for each
+other. `ReadReceipt` for an ordered `ReadNoSnp` or `ReadOnce*` goes out as soon
+as the request is allocated, and always before its `CompData`.
+
+## 9.5 Downstream requests
+
+`chi_sn_tracker` has one tracker per owner, and the owner index is the TxnID
+the Home uses towards the SN-F, so no Requester TxnID ever reaches the
+Subordinate. The Home sends only `ReadNoSnp`, `WriteNoSnpFull`,
+`WriteNoSnpPtl`, `CleanSharedPersist`, `CleanSharedPersistSep`,
+`CleanInvalidStorage` and `PCrdReturn`, with `SnpAttr` and `ExpCompAck` zero
+and `Order` zero. A RetryAck from the SN-F parks the tracker until a
+`PCrdGrant` of the recorded type arrives; the request is then re-sent with
+`AllowRetry` deasserted. A credit nothing waits for is returned with
+`PCrdReturn` once no request in flight could still be retried.
 
 # 10 RN-F boundary cache-state model
 
@@ -1507,8 +1565,9 @@ Reference throughput limits:
 - Link: one receive-buffer cycle per direction, and a channel stalls whenever
   its credit count reaches zero, so `lcrdDepth` bounds the round-trip
   bandwidth of each channel.
-- The Home, the HN-I and the MN each process one architectural transaction at
-  a time, and sequential snoops and DVMs add one full response round trip per
+- An HN-F runs up to `posEntries` transactions at once, one per location;
+  its snoops are still issued one at a time. The HN-I and the MN process one
+  transaction at a time, and DVMs add one full response round trip per
   target.
 
 No timing constraints, synthesis reports, PPA results, latency measurements
@@ -1522,10 +1581,10 @@ or performance guarantees are supplied.
 |------------------------------------------------------------|--------------------|--------------------|
 | `chi_link_sva.sv` | `NO_SEND_WITHOUT_RUN_OR_CREDIT`, `NO_CREDIT_OVERFLOW`, `NO_CREDIT_UNDERFLOW`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_CREDITS_DRAINED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_OUTSIDE_ACTIVE`, `LCRD_RETURN_NOT_DELIVERED`, `PEER_CREDITS_IN_RANGE`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
-| `chi_proto_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `DAT_INPUT_STABLE_UNDER_BACKPRESSURE`, `REQ_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `DAT_STABLE_UNDER_BACKPRESSURE`, `ACTIVE_RESPONSE_ID_CONSISTENT`, `RETRY_RESPONSE_ID_CONSISTENT`, `ONE_COMPLETION_PATH`, `PCRD_GRANT_FIELDS_UNUSED`, `RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE` | `RETRY_ACK_THEN_PCRD_GRANT_CLASS`, `PCRD_GRANT_SENT`, `DCT_SNOOP_FORWARD_PATH`, `DIRECTORY_BACK_INVALIDATION`, `EXCLUSIVE_SUCCESS`, `BASIC_READ_FLOW`, `BASIC_WRITE_FLOW` |
+| `chi_proto_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `REQ_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `DAT_STABLE_UNDER_BACKPRESSURE`, `DOWNSTREAM_OPCODE_LEGAL`, `DOWNSTREAM_FIELDS_LEGAL`, `COMPDATA_RESP_LEGAL`, `WRITE_COMPLETION_RESP_ZERO`, `PCRD_GRANT_FIELDS_UNUSED`, `RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE`, `NO_COMPLETION_WHILE_SNOOPING`, `RECEIPT_BEFORE_DATA` | `CONCURRENT_TRANSACTIONS`, `SAME_LOCATION_WAITER`, `RETRY_ACK_SENT`, `PCRD_GRANT_SENT`, `DIRECTORY_EVICTION`, `ATOMIC_EXECUTED`, `SNOOP_ISSUED`, `EXCLUSIVE_OKAY` |
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
-| `chi_ordering_sva.sv` | pairwise `NO_DUPLICATE_ACTIVE_LINE`, per-entry `ALLOCATION_LINE_NOT_ACTIVE` | none |
-| `chi_hnf_ordering_sva.sv` | `ORDERED_REQUEST_STARTS_QUIESCENT`, `ACTIVE_ORDERED_REQUEST_SERIALIZES` | none |
+| `chi_ordering_sva.sv` | pairwise `ONE_RUNNING_ENTRY_PER_LOCATION`, per-entry `START_ONLY_AFTER_OLDER_SAME_LOCATION`, `STARTED_IMPLIES_ACTIVE` | none |
+| `chi_hnf_ordering_sva.sv` | `ENDPOINT_ORDER_RESPECTED`, `ORDERED_REQUEST_STARTS_IN_ARRIVAL_ORDER` | none |
 | `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
 
 : Table 12.1 Bound SVA files with assertion and cover counts
@@ -1535,9 +1594,10 @@ credit conservation across the whole port, cache-state correctness, every
 response dependency, or end-to-end forward progress.
 
 Binding an assertion module that takes an unpacked array port is not portable
-across simulators, so `chi_pos` exports its line-address array packed. This
-is the reason `chi_pos.lineAddr`, `chi_hazard.activeLineAddr` and
-`chi_ordering_sva.lineAddr` are packed two-dimensional rather than unpacked.
+across simulators, so every array a bound module reads is packed: `chi_pos`
+exports its keys, requesters, orders and age matrix packed, `chi_hnf_top`
+exports packed per-entry summaries (`eSnpDone`, `eCompReady` and others), and
+`chi_router` exports a packed copy of its outputs.
 
 ## 12.2 Functional coverage outline
 
@@ -1593,6 +1653,7 @@ eventual legal response.
 ```
 rtl/pkg/chi_cfg_pkg.sv
 rtl/pkg/chi_pkg.sv
+rtl/hnf/chi_hnf_pkg.sv
 rtl/if/chi_if.sv
 rtl/link/chi_lcrd_mgr.sv
 rtl/link/chi_link_fsm.sv
@@ -1607,6 +1668,7 @@ rtl/noc/chi_mesh.sv
 rtl/noc/chi_ring.sv
 rtl/noc/chi_xbar.sv
 rtl/noc/chi_noc_top.sv
+rtl/noc/chi_flit_fifo.sv
 rtl/sam/chi_hn_hash.sv
 rtl/sam/chi_sam.sv
 rtl/sam/chi_prefetch_map.sv
@@ -1619,12 +1681,12 @@ rtl/hnf/chi_hazard.sv
 rtl/hnf/chi_snoop_filter.sv
 rtl/hnf/chi_snp_gen.sv
 rtl/hnf/chi_retry.sv
+rtl/hnf/chi_sn_tracker.sv
 rtl/hnf/chi_dct_ctrl.sv
 rtl/hnf/chi_atomic_alu.sv
 rtl/hnf/chi_dmt_ctrl.sv
 rtl/hnf/chi_dwt_ctrl.sv
 rtl/hnf/chi_stash_ctrl.sv
-rtl/hnf/chi_cmo.sv
 rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_hnf_top.sv
 rtl/top/chi_interconnect_top.sv
@@ -1819,14 +1881,15 @@ the cross-references in the prose stay correct in every output format.
    L-Credits terminate at the node ports.
 3. Only flit parity is live. The scalar `*CHK` control and credit checks are
    declared and driven to zero.
-4. The Home, the HN-I and the MN globally serialize transactions, so the
-   configured POS depth does not provide Home parallelism.
+4. The HN-F issues its snoops one at a time, and the HN-I and the MN
+   serialize their transactions.
 5. No RN cache controller is provided; Section 10 is the contract, not RTL.
 6. MultiReq and `CacheLineID`, PBHA, MTE tag semantics and MEC access control
    are carriage only. MPAM is carried but not enforced.
 7. Atomics are always executed at the Home rather than negotiated to the
    Subordinate, the atomic datapath is 64 bits so wider operands are
-   unsupported, and DCT has no fallback path.
+   unsupported, and DCT, DMT and DWT are not used: all data passes through
+   the Home.
 8. DVM decodes no payload, so no operation-specific ordering is applied.
 9. Runtime SAM writes lack complete validation, CHI-MMIO lacks security and
    quiescent commit, and APB quiescence does not inspect every internal
@@ -1840,14 +1903,10 @@ the cross-references in the prose stay correct in every output format.
     the `LCrdReturn` exchange in both directions, the deactivation path has
     never been walked.
 12. A granted P-Credit reserves nothing. `chi_retry` grants a credit only
-    while a Home resource exists, but the resource is not held for the
-    credited request, so by the time that request arrives the Home can be busy
-    with another one. It is then back-pressured rather than retried a second
-    time, which satisfies B2.10, but it satisfies it only because the Home is
-    serial and the REQ channel is in order: the credited request blocks
-    everything behind it until the Home is free. Pipelining the Home without
-    adding a real reservation would break the guarantee that the second
-    attempt is accepted.
+    while a POS entry is free, but the entry is not held for the credited
+    request, so another request can take it first. The credited request is
+    then back-pressured until an entry frees rather than retried a second
+    time, which satisfies B2.10 but holds the REQ channel.
 13. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
     performance characterization. The smoke run in Section 12.7 drives no
@@ -1876,7 +1935,9 @@ the cross-references in the prose stay correct in every output format.
 | Ring route and deadlock | Shorter direction, clockwise on a tie, bubble flow control | No virtual channels; injection may wait behind sustained transit. |
 | Crosspoint output | Two-entry FIFO | Fully registered crosspoint at one flit per cycle per output. |
 | Unroutable flit | Dropped and flagged at the first crosspoint | The channel never wedges; the transaction is lost. |
-| Snoop and DVM fanout | Sequential unicast | Minimal replication state, additive target latency. |
+| Home concurrency | One transaction per POS entry, one per location at a time | Throughput scales with `posEntries`; same-location requests queue in arrival order. |
+| Directory eviction | Victim buffer snoops with `SnpCleanInvalid` and writes back | Dirty data is never lost to a capacity eviction. |
+| Snoop and DVM fanout | One snoop at a time across the Home; DVM sequential unicast | Minimal replication state, additive target latency. |
 | Home to subordinate mapping | Index modulo the subordinate count | Static striping rather than address-based balancing. |
 | Atomic execution point | Always the Home | No far-atomic negotiation, but one serialization point. |
 | APB security | Writes require `PPROT[1]==0` | Reads remain unrestricted. |

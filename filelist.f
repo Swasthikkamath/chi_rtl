@@ -1,6 +1,7 @@
 # Package, node-interface, link, fabric, endpoint, top and assertion compile order.
 rtl/pkg/chi_cfg_pkg.sv
 rtl/pkg/chi_pkg.sv
+rtl/hnf/chi_hnf_pkg.sv
 rtl/if/chi_if.sv
 rtl/link/chi_lcrd_mgr.sv
 rtl/link/chi_link_fsm.sv
@@ -15,6 +16,7 @@ rtl/noc/chi_mesh.sv
 rtl/noc/chi_ring.sv
 rtl/noc/chi_xbar.sv
 rtl/noc/chi_noc_top.sv
+rtl/noc/chi_flit_fifo.sv
 rtl/sam/chi_hn_hash.sv
 rtl/sam/chi_sam.sv
 rtl/sam/chi_prefetch_map.sv
@@ -27,12 +29,12 @@ rtl/hnf/chi_hazard.sv
 rtl/hnf/chi_snoop_filter.sv
 rtl/hnf/chi_snp_gen.sv
 rtl/hnf/chi_retry.sv
+rtl/hnf/chi_sn_tracker.sv
 rtl/hnf/chi_dct_ctrl.sv
 rtl/hnf/chi_atomic_alu.sv
 rtl/hnf/chi_dmt_ctrl.sv
 rtl/hnf/chi_dwt_ctrl.sv
 rtl/hnf/chi_stash_ctrl.sv
-rtl/hnf/chi_cmo.sv
 rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_hnf_top.sv
 rtl/top/chi_interconnect_top.sv
