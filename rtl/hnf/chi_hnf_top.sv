@@ -19,7 +19,17 @@
 // write data and CompAck index the entry directly (IHI 0050H B2.4.3). Towards
 // an RN-F a snoop carries the owner index as TxnID, and towards the
 // Subordinate a request carries the owner index as TxnID; neither ever carries
-// a Requester's TxnID.
+// a Requester's TxnID. An owner snoops each RN-F at most once, so no Snoopee
+// ever holds two snoops from this Home with one TxnID (IHI 0050H B2.4.2).
+//
+// Snoops. An owner's snoops leave back to back and are collected in any
+// order, up to maxOutstandingSnoops in flight across the Home. Each Snoopee's
+// data packets are counted on their own, so several Snoopees can return data
+// for one transaction at once; valid copies of a line hold the same data, so
+// they merge into one buffer. A forwarded response (SnpRespFwded,
+// SnpRespDataFwded) means the Snoopee sent CompData to the Requester itself
+// in the state FwdState names, and the entry then owes no data of its own
+// (IHI 0050H B4.5.3).
 //
 // Data. Each owner has a 64-byte line buffer with three byte-valid masks:
 // bytes written by the Requester, bytes from a snoop, bytes from memory. A
@@ -81,6 +91,7 @@ module chi_hnf_top #(
   localparam int unsigned POS_W = clog2Min1(POS_DEPTH);
   localparam int unsigned VB_W = clog2Min1(NUM_VB);
   localparam int unsigned RNF_W = clog2Min1(NUM_RNF);
+  localparam int unsigned SNP_COUNT_W = clog2Min1(CFG.maxOutstandingSnoops + 1);
   // A location is a 64-byte line in one Physical Address Space: PAS is part
   // of the address for every snoopable access (IHI 0050H B2.8.2), so it is
   // part of every key the Home compares, stores or snoops with.
@@ -142,11 +153,12 @@ module chi_hnf_top #(
     logic [NUM_RNF-1:0] snpOwns;     // Snoopee kept UC, UD or SD
     chi_snp_opcode_e    snpOpcode;   // snoop for every target but the stash target
     logic               snpRetToSrc;
-    logic [3:0]         snpGranules; // snoop data granules received
-    logic               snpGotData;  // a whole line came back with a snoop
-    logic               snpDirty;    // that line carried PassDirty
+    logic [NUM_RNF-1:0][3:0] snpGranules; // data granules, per Snoopee
+    logic               snpDirty;    // snoop data carried PassDirty
     logic               snpPtl;      // the Dirty data was partial
     logic               snpErr;      // a snoop response reported an error
+    logic               snpFwded;    // a Snoopee sent CompData to the Requester
+    chi_resp_e          snpFwdState; // the state it sent (FwdState)
     // Stashing.
     logic               stashValid;  // a stash snoop goes to stashTarget
     logic [RNF_W-1:0]   stashTarget;
@@ -193,7 +205,7 @@ module chi_hnf_top #(
     logic [KEY_W-1:0]   key;
     logic [NUM_RNF-1:0] snpToSend;
     logic [NUM_RNF-1:0] snpPending;
-    logic [3:0]         snpGranules;
+    logic [NUM_RNF-1:0][3:0] snpGranules;
     logic               snpDirty;
     logic               dnBusy;
     logic               dnWriteDone;
@@ -432,10 +444,16 @@ module chi_hnf_top #(
   logic [NUM_OWNERS-1:0][NUM_RNF-1:0] ownerToSend;
   logic [NUM_OWNERS-1:0][NUM_RNF-1:0] ownerPending;
   logic snpIssueValid;
+  logic snpIssueFire;
   logic [OWNER_W-1:0] snpIssueOwner;
   logic [RNF_W-1:0] snpIssueTarget;
-  logic [31:0] snpOutstanding;
+  logic [SNP_COUNT_W-1:0] snpOutstanding;
   chi_noc_flit_t snpIssueFlit;
+  // Per owner, for the snoop assertions: its location, whether it is live,
+  // and which Snoopees have returned data to it.
+  logic [NUM_OWNERS-1:0][KEY_W-1:0] ownerKey;
+  logic [NUM_OWNERS-1:0] ownerLive;
+  logic [NUM_OWNERS-1:0][NUM_RNF-1:0] ownerDataFrom;
 
   // Snoop responses.
   logic snpRspValid;
@@ -446,6 +464,9 @@ module chi_hnf_top #(
   logic [RNF_W-1:0] snpDatTarget;
   logic [3:0] snpDatGranules;
   logic snpDatLast;
+  logic snpDatExpected;
+  logic snpRspComplete;
+  logic snpDatComplete;
 
   // Requester data and CompAck.
   logic wrDatValid;
@@ -505,6 +526,7 @@ module chi_hnf_top #(
   logic [POS_W-1:0] datEntry;
   logic [POS_W-1:0] datPointer;
   logic datTrackerTurn;
+  logic datTrackerWins;
   logic datEntrySend;
   logic datTrackerSend;
   logic datEntryToPull;
@@ -998,13 +1020,18 @@ module chi_hnf_top #(
                        || (e.snpKeep != '0);
       eMruHold[i] = (e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
                     && e.sfHit && e.sfSharers[e.reqRnf];
-      eDataPath[i] = (e.err == HNF_ERR_NONE)
+      // The Home supplies read data unless a Snoopee forwarded it.
+      eDataPath[i] = (e.err == HNF_ERR_NONE) && !e.snpFwded
                      && (((e.kind == HNF_KIND_READ) && !eMruHold[i])
                          || (e.kind == HNF_KIND_READ_ONCE)
                          || (e.kind == HNF_KIND_READ_NOSNP));
-      takesDirty = readTakesDirty(e.req.opcode, eOthersKeep[i]);
-      eGrant[i] = readCompResp(e.req.opcode, eOthersKeep[i],
-                               e.snpDirty && takesDirty);
+      // A forwarding Snoopee chose the Requester's state and settled the
+      // Dirty responsibility with it (FwdState[2]); Dirty data it returned
+      // to the Home is the Home's to write back.
+      takesDirty = !e.snpFwded && readTakesDirty(e.req.opcode, eOthersKeep[i]);
+      eGrant[i] = e.snpFwded ? e.snpFwdState
+                             : readCompResp(e.req.opcode, eOthersKeep[i],
+                                            e.snpDirty && takesDirty);
 
       // Memory is read when the snoops did not bring a whole line: for a
       // read, for the initial value of an atomic, and for the line a Data
@@ -1226,21 +1253,35 @@ module chi_hnf_top #(
     for (int unsigned i = 0; i < POS_DEPTH; i++) begin
       ownerToSend[i] = entry[i].snpToSend;
       ownerPending[i] = entry[i].snpPending;
+      ownerKey[i] = posKey[i];
+      ownerLive[i] = posActive[i];
+      for (int unsigned r = 0; r < NUM_RNF; r++)
+        ownerDataFrom[i][r] = entry[i].snpGranules[r] != '0;
     end
     for (int unsigned v = 0; v < NUM_VB; v++) begin
       ownerToSend[POS_DEPTH + v] = victim[v].snpToSend;
       ownerPending[POS_DEPTH + v] = victim[v].snpPending;
+      ownerKey[POS_DEPTH + v] = victim[v].key;
+      ownerLive[POS_DEPTH + v] = victim[v].valid;
+      for (int unsigned r = 0; r < NUM_RNF; r++)
+        ownerDataFrom[POS_DEPTH + v][r] = victim[v].snpGranules[r] != '0;
     end
   end
 
   chi_snp_gen #(
-    .NUM_OWNERS(NUM_OWNERS), .NUM_RNF(NUM_RNF), .MAX_OUTSTANDING(1)
+    .NUM_OWNERS(NUM_OWNERS), .NUM_RNF(NUM_RNF),
+    .MAX_OUTSTANDING(CFG.maxOutstandingSnoops), .COUNT_W(SNP_COUNT_W)
   ) snoop_generator (
-    .clk, .resetn, .toSend(ownerToSend), .pending(ownerPending),
+    .clk, .resetn, .toSend(ownerToSend),
+    .rspComplete(snpRspComplete), .datComplete(snpDatComplete),
     .issueReady(snpFifoReady), .issueValid(snpIssueValid),
     .issueOwner(snpIssueOwner), .issueTarget(snpIssueTarget),
     .outstanding(snpOutstanding)
   );
+
+  always_comb begin
+    snpIssueFire = snpIssueValid && snpFifoReady;
+  end
 
   always_comb begin
     chi_snp_flit_t snoop;
@@ -1306,6 +1347,7 @@ module chi_hnf_top #(
     datFromSn = incomingDat.srcId == SN_NODE_ID;
 
     snpRspValid = rspInValid && isSnoopResponse(incomingRsp.opcode)
+                  && isRnf(incomingRsp.srcId)
                   && (int'(incomingRsp.txnId) < NUM_OWNERS);
     snpRspOwner = OWNER_W'(incomingRsp.txnId);
     snpRspTarget = rnfIndex(incomingRsp.srcId);
@@ -1318,6 +1360,7 @@ module chi_hnf_top #(
                  && (incomingRsp.opcode != RSP_COMP_ACK);
 
     snpDatValid = datInValid && isSnoopData(incomingDat.opcode)
+                  && isRnf(incomingDat.srcId)
                   && (int'(incomingDat.txnId) < NUM_OWNERS);
     snpDatOwner = OWNER_W'(incomingDat.txnId);
     snpDatTarget = rnfIndex(incomingDat.srcId);
@@ -1335,14 +1378,20 @@ module chi_hnf_top #(
     memDatOwner = OWNER_W'(incomingDat.txnId);
   end
 
+  // A snoop with data retires on the packet that completes its Snoopee's
+  // line. Each Snoopee's packets are counted on their own, because several
+  // Snoopees can be returning data to one owner at once, and only a response
+  // the owner is waiting for counts.
   always_comb begin
-    snpDatLast = 1'b0;
+    logic [3:0] received;
     if (int'(snpDatOwner) < POS_DEPTH)
-      snpDatLast = ((entry[POS_W'(snpDatOwner)].snpGranules | snpDatGranules)
-                    == 4'hf);
+      received = entry[POS_W'(snpDatOwner)].snpGranules[snpDatTarget];
     else
-      snpDatLast = ((victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules
-                     | snpDatGranules) == 4'hf);
+      received = victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules[snpDatTarget];
+    snpDatLast = (received | snpDatGranules) == 4'hf;
+    snpDatExpected = snpDatValid && ownerPending[snpDatOwner][snpDatTarget];
+    snpDatComplete = snpDatExpected && snpDatLast;
+    snpRspComplete = snpRspValid && ownerPending[snpRspOwner][snpRspTarget];
   end
 
   // ---------------------------------------------------------------------
@@ -1406,7 +1455,7 @@ module chi_hnf_top #(
     .reqIssueReady(reqFifoReady), .reqIssueValid(dnReqValid),
     .reqIssueOwner(dnReqOwner), .reqIssueCreditReturn(dnReqCreditReturn),
     .reqIssueCreditType(dnReqCreditType),
-    .datIssueReady(datFifoReady && datTrackerTurn),
+    .datIssueReady(datTrackerWins && datFifoReady),
     .datIssueValid(dnDatValid), .datIssueOwner(dnDatOwner),
     .datIssueDataId(dnDatDataId), .datIssueTxnId(dnDatTxnId),
     .rspValid(snRspValid), .rsp(incomingRsp),
@@ -1633,7 +1682,9 @@ module chi_hnf_top #(
         response.opcode = RSP_COMP_CMO;
       end
     end
-    rspPushValid = retryHandshake || rspGrantSend || rspEntrySend;
+    // The push valid never looks at the output stage's ready
+    // (design specification, Section 2.8).
+    rspPushValid = retryAckWant || retryGrantValid || rspEntryValid;
     rspPushFlit = '0;
     rspPushFlit.channel = CHI_CHANNEL_RSP;
     rspPushFlit.qos = response.qos;
@@ -1677,8 +1728,11 @@ module chi_hnf_top #(
     for (int unsigned g = 4; g > 0; g--)
       if (remaining[g-1])
         datEntryDataId = 2'((g - 1) & ~(STEP - 1));
-    datEntrySend = datEntryValid && datFifoReady && !dnDatValid;
-    datTrackerSend = dnDatValid;
+    // Downstream write data and the entries' data share the DAT output;
+    // whichever did not go last has priority when both are waiting.
+    datTrackerWins = dnDatValid && (datTrackerTurn || !datEntryValid);
+    datTrackerSend = datTrackerWins && datFifoReady;
+    datEntrySend = datEntryValid && !datTrackerWins && datFifoReady;
   end
 
   always_comb begin
@@ -1741,14 +1795,14 @@ module chi_hnf_top #(
     data.dataCheck = dataCheckOf(data.data);
     datPushFlit = '0;
     datPushFlit.channel = CHI_CHANNEL_DAT;
-    if (datTrackerSend) begin
+    if (datTrackerWins) begin
       datPushFlit = dnDatFlit;
     end else begin
       datPushFlit.qos = data.qos;
       datPushFlit.targetNodeId = data.tgtId;
       datPushFlit.payload = packDatFlit(CFG, data);
     end
-    datPushValid = datTrackerSend || datEntrySend;
+    datPushValid = dnDatValid || datEntryValid;
   end
 
   // ---------------------------------------------------------------------
@@ -1966,7 +2020,7 @@ module chi_hnf_top #(
       end
 
       // Snoop issue.
-      if (snpIssueValid) begin
+      if (snpIssueFire) begin
         if (int'(snpIssueOwner) < POS_DEPTH) begin
           entry[POS_W'(snpIssueOwner)].snpToSend[snpIssueTarget] <= 1'b0;
           entry[POS_W'(snpIssueOwner)].snpPending[snpIssueTarget] <= 1'b1;
@@ -1977,37 +2031,44 @@ module chi_hnf_top #(
       end
 
       // Snoop responses without data.
-      if (snpRspValid) begin
+      if (snpRspComplete) begin
         if (int'(snpRspOwner) < POS_DEPTH) begin
-          if (entry[POS_W'(snpRspOwner)].snpPending[snpRspTarget]) begin
-            entry[POS_W'(snpRspOwner)].snpPending[snpRspTarget] <= 1'b0;
-            if (snoopeeKeeps(incomingRsp.resp))
-              entry[POS_W'(snpRspOwner)].snpKeep[snpRspTarget] <= 1'b1;
-            if (snoopeeOwns(incomingRsp.resp))
-              entry[POS_W'(snpRspOwner)].snpOwns[snpRspTarget] <= 1'b1;
-            if (incomingRsp.respErr != RESP_ERR_OK)
-              entry[POS_W'(snpRspOwner)].snpErr <= 1'b1;
-            // DataPull rides in FwdState[0] and the implied read's TxnID in
-            // DBID (IHI 0050H Table B13.7, B7.5.3).
-            if (entry[POS_W'(snpRspOwner)].stashValid
-                && (snpRspTarget == entry[POS_W'(snpRspOwner)].stashTarget)
-                && incomingRsp.fwdState[0]) begin
-              entry[POS_W'(snpRspOwner)].pullValid <= 1'b1;
-              entry[POS_W'(snpRspOwner)].pullTxnId <=
-                CHI_TXNID_FLIT_W'(incomingRsp.dbIdOrGroupId);
-              entry[POS_W'(snpRspOwner)].pullAckOwed <= 1'b1;
-            end
+          entry[POS_W'(snpRspOwner)].snpPending[snpRspTarget] <= 1'b0;
+          if (snoopeeKeeps(incomingRsp.resp))
+            entry[POS_W'(snpRspOwner)].snpKeep[snpRspTarget] <= 1'b1;
+          if (snoopeeOwns(incomingRsp.resp))
+            entry[POS_W'(snpRspOwner)].snpOwns[snpRspTarget] <= 1'b1;
+          if (incomingRsp.respErr != RESP_ERR_OK)
+            entry[POS_W'(snpRspOwner)].snpErr <= 1'b1;
+          // SnpRespFwded: the Snoopee sent CompData to the Requester in the
+          // state FwdState names, so the Home owes it no data
+          // (IHI 0050H B4.5.3, B13.10.47).
+          if (incomingRsp.opcode == RSP_SNP_RESP_FWDED) begin
+            entry[POS_W'(snpRspOwner)].snpFwded <= 1'b1;
+            entry[POS_W'(snpRspOwner)].snpFwdState <= chi_resp_e'(incomingRsp.fwdState);
+            entry[POS_W'(snpRspOwner)].compOwed <= 1'b0;
+          end
+          // DataPull rides in FwdState[0] and the implied read's TxnID in
+          // DBID (IHI 0050H Table B13.7, B7.5.3).
+          if (entry[POS_W'(snpRspOwner)].stashValid
+              && (snpRspTarget == entry[POS_W'(snpRspOwner)].stashTarget)
+              && incomingRsp.fwdState[0]) begin
+            entry[POS_W'(snpRspOwner)].pullValid <= 1'b1;
+            entry[POS_W'(snpRspOwner)].pullTxnId <=
+              CHI_TXNID_FLIT_W'(incomingRsp.dbIdOrGroupId);
+            entry[POS_W'(snpRspOwner)].pullAckOwed <= 1'b1;
           end
         end else begin
           victim[VB_W'(int'(snpRspOwner) - POS_DEPTH)].snpPending[snpRspTarget] <= 1'b0;
         end
       end
 
-      // Snoop responses with data: the snoop retires on its last packet.
-      if (snpDatValid) begin
+      // Snoop responses with data. Each Snoopee's packets are counted on
+      // their own, and its snoop retires on the packet completing its line.
+      if (snpDatExpected) begin
         if (int'(snpDatOwner) < POS_DEPTH) begin
-          entry[POS_W'(snpDatOwner)].snpGranules <=
-            entry[POS_W'(snpDatOwner)].snpGranules | snpDatGranules;
+          entry[POS_W'(snpDatOwner)].snpGranules[snpDatTarget] <=
+            entry[POS_W'(snpDatOwner)].snpGranules[snpDatTarget] | snpDatGranules;
           if (respPassDirty(incomingDat.resp))
             entry[POS_W'(snpDatOwner)].snpDirty <= 1'b1;
           if (incomingDat.opcode == DAT_SNP_RESP_DATA_PTL)
@@ -2016,11 +2077,18 @@ module chi_hnf_top #(
             entry[POS_W'(snpDatOwner)].snpErr <= 1'b1;
           if (snpDatLast) begin
             entry[POS_W'(snpDatOwner)].snpPending[snpDatTarget] <= 1'b0;
-            entry[POS_W'(snpDatOwner)].snpGotData <= 1'b1;
             if (snoopeeKeeps(incomingDat.resp))
               entry[POS_W'(snpDatOwner)].snpKeep[snpDatTarget] <= 1'b1;
             if (snoopeeOwns(incomingDat.resp))
               entry[POS_W'(snpDatOwner)].snpOwns[snpDatTarget] <= 1'b1;
+            // SnpRespDataFwded: CompData went to the Requester as well, and
+            // FwdState rides in DataSource[2:0] (IHI 0050H B4.5.3, B13.9.4).
+            if (incomingDat.opcode == DAT_SNP_RESP_DATA_FWDED) begin
+              entry[POS_W'(snpDatOwner)].snpFwded <= 1'b1;
+              entry[POS_W'(snpDatOwner)].snpFwdState <=
+                chi_resp_e'(incomingDat.dataSourceOrFwdState[2:0]);
+              entry[POS_W'(snpDatOwner)].compOwed <= 1'b0;
+            end
             if (entry[POS_W'(snpDatOwner)].stashValid
                 && (snpDatTarget == entry[POS_W'(snpDatOwner)].stashTarget)
                 && incomingDat.dataPull) begin
@@ -2031,8 +2099,9 @@ module chi_hnf_top #(
             end
           end
         end else begin
-          victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules <=
-            victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules | snpDatGranules;
+          victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules[snpDatTarget] <=
+            victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpGranules[snpDatTarget]
+            | snpDatGranules;
           if (respPassDirty(incomingDat.resp))
             victim[VB_W'(int'(snpDatOwner) - POS_DEPTH)].snpDirty <= 1'b1;
           if (snpDatLast)
@@ -2131,7 +2200,10 @@ module chi_hnf_top #(
         datPointer <= (int'(datEntry) == (POS_DEPTH - 1))
                       ? '0 : (datEntry + 1'b1);
       end
-      datTrackerTurn <= !datTrackerTurn;
+      if (datTrackerSend)
+        datTrackerTurn <= 1'b0;
+      else if (datEntrySend)
+        datTrackerTurn <= 1'b1;
 
       // Retirement and free.
       for (int unsigned i = 0; i < POS_DEPTH; i++) begin
@@ -2219,7 +2291,9 @@ module chi_hnf_top #(
           bufDataErr[wrDatEntry] <= 1'b1;
       end
 
-      if (snpDatValid) begin
+      // Valid copies of a line agree, so the data of several Snoopees
+      // merges into one buffer; a poisoned copy keeps the line poisoned.
+      if (snpDatExpected) begin
         for (int unsigned b = 0; b < DAT_BYTES; b++)
           if (incomingDat.be[b]
               && !bufWrBe[snpDatOwner][int'(incomingDat.dataId)*16 + b])
@@ -2228,7 +2302,8 @@ module chi_hnf_top #(
         bufSnpBe[snpDatOwner] <= bufSnpBe[snpDatOwner]
                                  | beatEnables(incomingDat.dataId, incomingDat.be);
         bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
-          incomingDat.poison[POISON_PER_BEAT-1:0];
+          bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT]
+          | incomingDat.poison[POISON_PER_BEAT-1:0];
         if (incomingDat.respErr == RESP_ERR_DERR)
           bufDataErr[snpDatOwner] <= 1'b1;
       end

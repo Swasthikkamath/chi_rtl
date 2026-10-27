@@ -404,6 +404,8 @@ module chi_interconnect_top #(
             || (CFG.snpFilterWays > CFG.snpFilterEntries)
             || ((CFG.snpFilterEntries % CFG.snpFilterWays) != 0))
           $fatal(1, "Invalid snoop-filter geometry");
+        if ((CFG.numHnf > 0) && (CFG.maxOutstandingSnoops == 0))
+          $fatal(1, "maxOutstandingSnoops must be at least 1: an HN-F with no snoop slot can never snoop a sharer");
         // The set index is taken straight from the low line-address bits.
         if (((CFG.snpFilterEntries / CFG.snpFilterWays) < 2)
             || (((CFG.snpFilterEntries / CFG.snpFilterWays)

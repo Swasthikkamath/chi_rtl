@@ -56,7 +56,7 @@ module chi_proto_sva #(
   input logic [POS_DEPTH-1:0] posStarted,
   input logic sfVictimValid,
   input logic atomicValid,
-  input logic snpIssueValid
+  input logic snpIssueFire
 );
   import chi_pkg::*;
 
@@ -164,7 +164,7 @@ module chi_proto_sva #(
 
   SNOOP_ISSUED: cover property (
     @(posedge clk) disable iff (!resetn)
-    snpIssueValid);
+    snpIssueFire);
 
   EXCLUSIVE_OKAY: cover property (
     @(posedge clk) disable iff (!resetn)
@@ -209,5 +209,5 @@ bind chi_hnf_top chi_proto_sva #(
   .posStarted(posStarted),
   .sfVictimValid(sfVictimValid),
   .atomicValid(atomicValid),
-  .snpIssueValid(snpIssueValid)
+  .snpIssueFire(snpIssueFire)
 );

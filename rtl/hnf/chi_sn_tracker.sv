@@ -18,6 +18,10 @@
 // available, the request is then re-sent with AllowRetry deasserted, and a
 // credit that no parked operation can use is handed back with PCrdReturn once
 // nothing in flight could still be retried.
+//
+// The issue valids never look at their readies (design specification,
+// Section 2.8); a request or data packet is issued in a cycle where both are
+// high.
 module chi_sn_tracker #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned NUM_OWNERS = 1,
@@ -87,6 +91,8 @@ module chi_sn_tracker #(
   logic [OWNER_W-1:0] datPointer;
   logic reqOwnerFound;
   logic datOwnerFound;
+  logic reqIssueFire;
+  logic datIssueFire;
   logic [NUM_OWNERS-1:0] complete;
   logic [NUM_OWNERS-1:0] takeCredit;
   logic [15:0] creditWanted;
@@ -181,7 +187,7 @@ module chi_sn_tracker #(
       end
     end
     reqIssueCreditReturn = !reqOwnerFound && returnFound;
-    reqIssueValid = reqIssueReady && (reqOwnerFound || returnFound);
+    reqIssueValid = reqOwnerFound || returnFound;
 
     datOwnerFound = 1'b0;
     datIssueOwner = '0;
@@ -203,7 +209,12 @@ module chi_sn_tracker #(
           && !granulesDone[datIssueOwner][granule-1])
         datIssueDataId = 2'((granule - 1) & ~(STEP - 1));
     datIssueTxnId = dbid[datIssueOwner];
-    datIssueValid = datIssueReady && datOwnerFound;
+    datIssueValid = datOwnerFound;
+  end
+
+  always_comb begin
+    reqIssueFire = reqIssueValid && reqIssueReady;
+    datIssueFire = datIssueValid && datIssueReady;
   end
 
   always_ff @(posedge clk) begin
@@ -230,13 +241,13 @@ module chi_sn_tracker #(
     end else begin
       done <= '0;
       credits <= creditsNext;
-      if (reqIssueValid && reqIssueCreditReturn)
+      if (reqIssueFire && reqIssueCreditReturn)
         credits[reqIssueCreditType] <= creditsNext[reqIssueCreditType] - 8'd1;
 
-      if (reqIssueValid && !reqIssueCreditReturn)
+      if (reqIssueFire && !reqIssueCreditReturn)
         reqPointer <= (int'(reqIssueOwner) == (NUM_OWNERS - 1))
                       ? '0 : (reqIssueOwner + 1'b1);
-      if (datIssueValid)
+      if (datIssueFire)
         datPointer <= (int'(datIssueOwner) == (NUM_OWNERS - 1))
                       ? '0 : (datIssueOwner + 1'b1);
 
@@ -258,7 +269,7 @@ module chi_sn_tracker #(
             end
           end
           DN_REQ: begin
-            if (reqIssueValid && !reqIssueCreditReturn
+            if (reqIssueFire && !reqIssueCreditReturn
                 && (reqIssueOwner == OWNER_W'(owner)))
               state[owner] <= DN_ACTIVE;
           end
@@ -299,7 +310,7 @@ module chi_sn_tracker #(
                 if ((g >= int'(dat.dataId)) && (g < (int'(dat.dataId) + STEP)))
                   granulesDone[owner][g] <= 1'b1;
             end
-            if (datIssueValid && (datIssueOwner == OWNER_W'(owner))) begin
+            if (datIssueFire && (datIssueOwner == OWNER_W'(owner))) begin
               for (int unsigned g = 0; g < 4; g++)
                 if ((g >= int'(datIssueDataId)) && (g < (int'(datIssueDataId) + STEP)))
                   granulesDone[owner][g] <= 1'b1;

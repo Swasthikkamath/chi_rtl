@@ -11,7 +11,7 @@ coherent and noncoherent Home Node transaction paths. Implemented protocol
 behaviour includes L-Credits and link activation, flit parity, the Request
 Retry credit loop with `RetryAck`, `PCrdGrant` and `PCrdReturn`, a coherent
 Home that runs one transaction per POS entry concurrently with same-location
-ordering, a directory with dirty-safe eviction, atomic transactions, cache
+ordering and parallel snoops, a directory with dirty-safe eviction, atomic transactions, cache
 stashing with Data Pull, and `PrefetchTgt` routing.
 
 Behaviour that is deliberately partial or absent includes multiple interfaces
