@@ -2842,8 +2842,7 @@ sources at 150 dpi. On this branch the figures were rendered with Graphviz
 16.1.0 compiled to WebAssembly and rasterized by resvg, because the authoring
 environment had no native Graphviz. A native `dot` lays out the same graphs
 but may route edges and set text slightly differently. The `.docx` in
-`docs/` has not been rebuilt on this branch and still shows `main`: run
-`make doc`.
+`docs/` was rebuilt with pandoc 3.12.1.
 
 Section numbers are written into the headings rather than generated, so that
 the cross-references in the prose stay correct in every output format.
