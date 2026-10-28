@@ -284,10 +284,11 @@ package chi_hnf_pkg;
     input logic othersKeep
   );
     case (op)
-      REQ_READ_UNIQUE, REQ_MAKE_READ_UNIQUE, REQ_READ_SHARED,
-      REQ_READ_PREFER_UNIQUE:
+      REQ_READ_UNIQUE, REQ_MAKE_READ_UNIQUE, REQ_READ_SHARED:
         return 1'b1;
-      REQ_READ_NOT_SHARED_DIRTY:
+      // ReadPreferUnique, like ReadNotSharedDirty, has no SD_PD response
+      // (IHI 0050H Table B4.38).
+      REQ_READ_NOT_SHARED_DIRTY, REQ_READ_PREFER_UNIQUE:
         return !othersKeep;
       default:
         return 1'b0;
@@ -306,10 +307,10 @@ package chi_hnf_pkg;
     case (op)
       REQ_READ_UNIQUE, REQ_MAKE_READ_UNIQUE:
         return dirty ? RESP_UD_PD : RESP_UC_UD;
-      REQ_READ_SHARED, REQ_READ_PREFER_UNIQUE:
+      REQ_READ_SHARED:
         if (othersKeep) return dirty ? RESP_SD_PD : RESP_SC;
         else            return dirty ? RESP_UD_PD : RESP_UC_UD;
-      REQ_READ_NOT_SHARED_DIRTY:
+      REQ_READ_NOT_SHARED_DIRTY, REQ_READ_PREFER_UNIQUE:
         if (othersKeep) return RESP_SC;
         else            return dirty ? RESP_UD_PD : RESP_UC_UD;
       REQ_READ_CLEAN:
@@ -412,5 +413,39 @@ package chi_hnf_pkg;
     for (int unsigned b = 0; b < 64; b++)
       check[b] = ~(^data[b*8 +: 8]);
     return check;
+  endfunction
+
+  // The 64-bit words of a DAT packet in which a byte that counts fails its
+  // DataCheck bit (IHI 0050H B9.2.2); bit w is word w of the packet, the
+  // granularity of Poison (B9.2.1).
+  function automatic logic [7:0] dataCheckWords(
+    input logic [511:0] data,
+    input logic [63:0] check,
+    input logic [63:0] counts
+  );
+    logic [7:0] words;
+    words = '0;
+    for (int unsigned b = 0; b < 64; b++)
+      if (counts[b] && (check[b] != ~(^data[b*8 +: 8])))
+        words[b / 8] = 1'b1;
+    return words;
+  endfunction
+
+  // The bytes of the line a write may carry: the Size-aligned window that
+  // holds Addr (IHI 0050H B2.9.3.1).
+  function automatic logic [63:0] writeWindow(
+    input logic [5:0] addr,
+    input logic [2:0] size
+  );
+    logic [63:0] mask;
+    int unsigned bytes;
+    int unsigned base;
+    bytes = 32'd1 << ((size > 3'd6) ? 6 : int'(size));
+    base = 32'(addr) & ~(bytes - 32'd1);
+    mask = '0;
+    for (int unsigned b = 0; b < 64; b++)
+      if ((b >= base) && (b < (base + bytes)))
+        mask[b] = 1'b1;
+    return mask;
   endfunction
 endpackage

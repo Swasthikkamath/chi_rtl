@@ -102,9 +102,9 @@ packed flit field by itself is carriage, not implementation.
 | Per-hop L-Credits inside the fabric | B13.11 | Not implemented | Internal topology links use ready/valid with registered crosspoint outputs. CHI L-Credits terminate at the node ports. |
 | Requester SAM, HN striping and HN-I SAM | B3.1--B3.3 | Implemented | Ordered region table, security rejection, XOR-fold hash and runtime update ports. The decode result overwrites the incoming `TgtID`, which B3.3.1 permits. All five B3.3.1 cases are distinguished, including the two that bypass the address mapper; see Section 6.1. |
 | `PrefetchTgt` routing | B3.3.1, B4.2.6.2 | Implemented | `chi_prefetch_map` maps the address to an SN-F independently of the HN hash, the request bypasses the Home, and both the HN-F and HN-I accept and discard it without a response and without a RetryAck. |
-| Coherent read family | B2.3.1, B4.2.1, B4.4, B4.5.1 | Implemented | Every allocating read, `MakeReadUnique` (Comp without data while the Requester still holds the line), the `ReadOnce` family and `ReadNoSnp`. The Home reads memory with its own `ReadNoSnp` only when no snoop returned the whole line, merges partial Dirty data over memory data, and grants `CompData` per Table B4.27 from what the other caches keep; Dirty data a read cannot take is written back. The data passes through the Home unless DCT or DMT is used (see their rows). |
-| Write family | B2.3.2, B4.2.3, B4.5.1.3 | Implemented | Immediate, Write Zero and CopyBack writes, stash and Combined forms. The Home issues its own `DBIDResp` or `CompDBIDResp` with its entry as DBID, buffers the data, merges a partial write over Dirty snoop data, honours `WriteDataCancel` and `CopyBackWriteData_I`, and writes memory with `WriteNoSnpFull` or `WriteNoSnpPtl`; a `WriteNoSnp` keeps its own address, Size and attributes. `WriteNoSnpDef` is answered OK/Unsupported (B4.5.1.3.1). |
-| CMO and combined write-CMO | B2.3.2.4, B2.3.2.5, B2.3.5, B4.2.2 | Implemented | Every CMO and Combined write including PoPA and the Issue H Storage forms. Dirty copies are snooped out and written back before `Comp`; persist, PoPA and Storage maintenance is forwarded to the SN-F, `CleanSharedPersistSep` with `ReturnNID` naming the Requester so the Persist goes straight to it; `CompCMO` follows the write. PoP, PoPA and PoPS are taken to be at or behind the SN-F. |
+| Coherent read family | B2.3.1, B4.2.1, B4.4, B4.5.1 | Implemented | Every allocating read, `MakeReadUnique` (Comp without data while the Requester still holds the line), the `ReadOnce` family and `ReadNoSnp`. The Home reads memory with its own `ReadNoSnp` only when no snoop returned the whole line, merges partial Dirty data over memory data, and grants `CompData` per Table B4.27 from what the other caches keep; Dirty data a read cannot take is written back. The data passes through the Home unless DCT or DMT is used (see their rows). Every grant is one Table B4.38 allows for the request (Table 9.7): `ReadPreferUnique` and `ReadNotSharedDirty` never get SD_PD, so Dirty data is written back and SC granted when another copy stays, and a `MakeReadUnique` that keeps the Requester's copy is answered `Comp_UD_PD` when a snooped SD copy's data comes back (Table B4.41). |
+| Write family | B2.3.2, B4.2.3, B4.5.1.3 | Implemented | Immediate, Write Zero and CopyBack writes, stash and Combined forms. The Home issues its own `DBIDResp` or `CompDBIDResp` with its entry as DBID, buffers the data, merges a partial write over Dirty snoop data, honours `WriteDataCancel` and `CopyBackWriteData_I`, and writes memory with `WriteNoSnpFull` or `WriteNoSnpPtl`; a `WriteNoSnp` keeps its own address, Size and attributes. `WriteNoSnpDef` is answered OK/Unsupported (B4.5.1.3.1). Requester bytes outside the window that Addr and Size give are not taken (B2.9.3.1), every byte the Home sends with BE 0 is 0 (B2.9.3), and Poison is kept per 64-bit word as data merges. Bound SVA reports a Requester that enables bytes outside the window or cancels a write Table B4.44 does not let it cancel. |
+| CMO and combined write-CMO | B2.3.2.4, B2.3.2.5, B2.3.5, B4.2.2 | Implemented | Every CMO and Combined write including PoPA and the Issue H Storage forms. Dirty copies are snooped out and written back before `Comp`; persist, PoPA and Storage maintenance is forwarded to the SN-F, `CleanSharedPersistSep` with `ReturnNID` naming the Requester so the Persist goes straight to it; `CompCMO` follows the write. PoP, PoPA and PoPS are taken to be at or behind the SN-F. The Deep bit, PoP or PoDP (B13.10.19), and the PGroupID pass to the Subordinate unchanged. |
 | DCT | B2.3.1.1 alt 5, B2.5.1.3, Table B4.26, Table B2.6 | Implemented | All six forwarding snoops: `SnpSharedFwd`, `SnpCleanFwd`, `SnpNotSharedDirtyFwd`, `SnpUniqueFwd`, `SnpPreferUniqueFwd` for the allocating reads, `SnpOnceFwd` for a whole-line `ReadOnce`. Sent to the owning RN-F when it has `RNF_DCT_CAP`, with FwdNID and FwdTxnID naming the Requester; `SnpRespFwded` and `SnpRespDataFwded` record the state given, Dirty data that comes back is written to memory, and a declined forward falls back to the SLC, DMT, then the Home. Never for Exclusives, stash requests, ordered requests or with `mteEn`. Section 9.14. |
 | DMT | B2.3.1.1 alts 3-4, B2.5.1.1-2, B2.3.9.1, B4.7.1 | Implemented | Once its snoops are done, a read granted UC with nothing buffered at the Home sends `ReadNoSnp` with ReturnNID and ReturnTxnID naming the Requester and Order 0b01, so the SN-F returns `CompData_UC` to the Requester and `ReadReceipt` to the Home. With `dmtSepEn` it sends `ReadNoSnpSep` instead and answers the Requester itself with `RespSepData_UC` after the `ReadReceipt`, so the Requester may acknowledge before the data arrives. `ReadNoSnpSep` from a Requester is still rejected with NDERR (B1.6). Section 9.14. |
 | DWT | B2.3.2.1 alt 1, B13.10.24, Table B13.20 | Implemented for `WriteNoSnpFull` and `WriteNoSnpPtl` | `WriteNoSnp` with DoDWT 1 and ReturnNID and ReturnTxnID naming the Requester: the SN-F sends `DBIDResp` to the Requester, takes the data (or `WriteDataCancel`) from it, and sends `Comp` to the Home, which then sends `Comp`. Not for CopyBacks (B2.3.2.3), Combined writes, `WriteNoSnpDef`, `WriteUnique*`, Exclusives, ordered writes, writes with `ExpCompAck`, or lines the SLC holds or allocates. Section 9.14. |
@@ -115,16 +115,16 @@ packed flit field by itself is carriage, not implementation.
 | Cache stashing | B2.3.4, B7 | Implemented | Writes with stash hint and `StashOnce*`. A `StashOnce*` stashes only when memory holds the latest copy (and, for a Unique stash, no other copy exists); otherwise it completes without stashing, which B7 permits. A Data Pull is served from the Home's buffer or memory as an Allocating Read and waits for the stash target's `CompAck`. `StashOnceSep*` completes with `CompStashDone`. |
 | RN cache states and transitions | B4.1, B4.6--B4.8 | Not implemented | Out of project scope. State encodings exist in `chi_pkg` and the required model is documented in Section 10, but there is no RN cache controller here. |
 | Home concurrency, POS and same-location hazards | B2.7.5, B4.11.2 | Implemented | Every POS entry runs its own transaction. Transactions to different `{line, PAS}` locations proceed together; one location runs one transaction at a time in arrival order (age matrix in `chi_pos`, start permission in `chi_hazard`). |
-| Inclusive precise snoop filter | B4.4, B4.6 | Partial | Sharer vector and owner per `{line, PAS}`; one lookup and one update per cycle; eviction never takes a way a transaction holds, and the evicted location is snooped out with `SnpCleanInvalid` and written back by the victim buffer. Silent evictions leave stale sharer bits, which cost a snoop. Section 9.3. |
+| Inclusive precise snoop filter | B4.4, B4.6 | Partial | Sharer vector and owner per `{line, PAS}`; one lookup and one update per cycle; eviction never takes a way a transaction holds, and the evicted location is snooped out with `SnpCleanInvalid` and written back by the victim buffer. Silent evictions leave stale sharer bits, which cost a snoop. Dirty data a back-invalidation collects is merged into the SLC's copy when the SLC holds the line, so no older copy survives there. Section 9.3. |
 | Request Retry, `RetryAck` and `PCrdGrant` | B2.5.5, B2.10 | Implemented | HN-F and HN-I. `chi_retry` counts the grants it owes per Requester and credit type, so a Home can always answer with `RetryAck` and its REQ input is never held. One of four P-Credit types is used; `PCrdGrant` names the Requester, carries no `TxnID` and no `DBID`, and goes to the highest recorded QoS, then round-robin. Every granted credit holds a transaction entry in reserve, so a request re-sent on it is always accepted. |
 | Deadlock freedom across REQ, RSP, SNP and DAT | B2.10, B4.11, B2.7.5.3 | Implemented | Every Home accepts RSP and DAT unconditionally into storage reserved before the message was invited and answers REQ with an entry or `RetryAck`, so no channel waits on another in a cycle. The argument is in Section 9.7; `chi_home_liveness_sva` states its environment assumptions and the entry-completion property for a formal tool, with per-entry bounded-completion covers in every build. |
 | P-Credit return | B2.5.6, B2.10.1 | Implemented | A granted credit leaves the accounting either when a request arrives with `AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`, which the Home accepts and discards. |
 | Exclusives | B6.2, B6.3 | Implemented | HN-F PoC and System monitor, HN-I System monitor. An LP is a Requester ordinal and an LPID below `RN_NUM_LP`. Every LP has the single bit B6.2.2 requires; with `exclAddrCheck` it also has an address monitor on `{line, PAS}`, per LP or in an LRU pool. One commit per start after same-location ordering: loads register, stores pass on the bit or a matching address monitor and otherwise fail and register again, a pass resets other LPs' bits and their monitors on that location, and another LP's write to a Non-snoopable location resets the monitors there (B6.2.4). Failed `CleanUnique` and `MakeReadUnique` upgrade nothing (Shared state); a failed `WriteNoSnp` writes nothing. Section 9.13. |
-| Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
+| Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. Order 0b10 and 0b11 are never sent to an SN-F (Table B2.9). Endpoint Order is kept per Home (Section 13.1). |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | System Level Cache | B2.8.3, B4.2.2.1, B7.4.2 | Implemented | One slice per HN-F when `slcEn`: set-associative, `{line, PAS}` tags, clean and dirty lines, PLRU, RRIP or random replacement, SECDED data with `slcEccEn`. Looked up with the directory when an entry starts; hits are read through a one-line port, fills and dirty data are written when the entry retires, dirty evictions are written back by victim entries that hold the location. Only Cacheable, non-Device lines are kept; CMOs, Combined writes, `ReadOnce*Invalid` and Device or Non-cacheable accesses take the line out first. `slcTagPipelineDepth` other than 1 is rejected. Section 9.10. |
 | Granule Protection Check | B9.1.1, B10.7.3.1; Arm ARM RME (GPT format) | Implemented | `gpcMode` TABLE (on-chip GPI array) or WALK (GPT in memory, shared cache and two-level walker). Every request a Home admits is checked before it snoops, looks up the SLC or goes downstream; a failure completes with NDERR and has no other effect, and the first fault is recorded with its address, PAS and SrcID. GPT reads go through a tracker reserved in the HN-F that owns each line. Root-only registers, including cache invalidation by all or by PA. The GPT layout follows the Arm ARM as recalled, not checked against it (Section 9.11). GPT TLBIs from the MN invalidate the cache. |
-| `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
+| `DataCheck`, Poison and error responses | B9.1, B9.2 | Implemented | Both Homes check the DataCheck of every DAT packet they keep bytes from. An error on a kept byte poisons its 64-bit word, or marks the data DERR when `poisonEn` is 0 (B9.2.3); every packet they send carries newly generated DataCheck. Poison is replaced where a Requester writes a whole word and accumulated where data merges. A Snoopee the directory recorded as possible owner that answers with an error makes the entry's data DERR. Unmapped, PAS-refused, GPC-failed and unsupported requests complete with NDERR and use no direct transfer (B9.1.1, B9.1.3). Section 9.15. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
 | MTE tag semantics | B12, B13.10 | Not implemented | `Tag`, `TU` and `TagOp` are carried. There is no allocation-tag storage, matching or tag-operation behaviour. |
@@ -1607,7 +1607,28 @@ depend only on snoop responses and the Subordinate, so they always drain.
 The new state comes from the snapshot and the snoop responses: a snooped RN-F
 keeps its place only if its response kept a copy, the owner is whichever RN-F
 still holds an owning state, and the Requester is added or removed according
-to the grant (Table B4.27) or the transaction kind.
+to the grant (Table B4.27) or the transaction kind. A Requester that owned the
+line keeps ownership when it is granted SC (B4.7.1, Table B4.38 notes b to d),
+and a request that completes with NDERR changes nothing.
+
+| Directory entry | States the recorded RN-Fs may hold |
+|-----------------|-------------------------------------|
+| absent | I in every RN-F |
+| sharers, no owner | I or SC in each sharer |
+| sharers and an owner | the owner I, UC, UCE, UD, UDP or SD; each other sharer I, or SC when the owner is SD |
+
+: Table 9.3a Directory entries and the RN-F states they allow
+
+The owner is the one RN-F that may hold the line Unique or Dirty; the
+directory does not separate those states, so it snoops the owner whenever a
+transaction needs the newest data or an invalidation. I is always possible for
+a recorded RN-F because clean lines are evicted silently (B4.6).
+
+A back-invalidation that collects Dirty data reconciles it with the SLC
+before memory (Section 9.10): the victim entry reads the SLC line and, on a
+hit, merges the Dirty bytes over it and writes the merged line back to the
+SLC as Dirty; on a miss it writes memory, `WriteNoSnpFull` or, for a partial
+line, `WriteNoSnpPtl`.
 
 ## 9.4 Retry credits
 
@@ -1835,6 +1856,12 @@ waits; victim entries depend only on the Subordinate, so they always drain.
 - DCT: a peer that may hold the line Dirty or Unique is still snooped, because
   its copy may be newer; the SLC supplies the data only where the directory
   shows no such owner.
+- Directory eviction: an RN-F's copy may be newer than the SLC's, since a
+  Unique grant leaves a non-inclusive SLC its copy. When a back-invalidation
+  collects Dirty data, the victim entry reads the SLC line first; on a hit
+  the Dirty bytes are merged over it and the SLC takes the merged line as
+  Dirty, with no memory write. Writing memory and leaving the SLC copy would
+  let a later hit return old data and a later eviction write it over the new.
 - Response state: an SLC hit does not change the state a read grants (Table
   B4.27); the SLC keeps any Dirty responsibility it holds rather than passing
   it to the Requester.
@@ -2095,6 +2122,63 @@ snoops, that `RespSepData` answers only a `ReadNoSnpSep` read, that a DWT
 write gets no data request from the Home, and that no Exclusive and no SLC
 line uses a direct transfer.
 
+## 9.15 Response states, data integrity and errors
+
+**Read response states.** The HN-F grants a read the state Table 9.7 shows,
+which is always one Table B4.38 (Tables B4.41 and B4.42 for
+`MakeReadUnique`) allows. "Another copy stays" means a snooped or unsnooped
+RN-F other than the Requester keeps a copy. A forwarded read gets the state
+the Snoopee chose (FwdState), and DMT gives UC (Section 9.14).
+
+| Request | No other copy stays | Another copy stays | Dirty data the Home holds |
+|---------|---------------------|--------------------|---------------------------|
+| `ReadClean` | UC | SC | written back; UC or SC |
+| `ReadNotSharedDirty` | UC | SC | UD_PD; written back and SC when a copy stays |
+| `ReadShared` | UC | SC | UD_PD, or SD_PD when a copy stays |
+| `ReadPreferUnique` | UC | SC | UD_PD; written back and SC when a copy stays |
+| `ReadUnique` | UC | not possible: every copy is invalidated | UD_PD |
+| `MakeReadUnique`, Requester holds the line | `Comp_UC` | not possible | `Comp_UD_PD` |
+| `MakeReadUnique`, line lost | UC | not possible | UD_PD |
+| `MakeReadUnique(Excl)` that fails | `Comp_SC`, or SC data if the line was lost | | written back |
+| `ReadOnce*`, `ReadNoSnp` | I | I | written back; I |
+
+: Table 9.7 Read grants of the HN-F
+
+**Write data.** A Requester's write data is taken only inside the window its
+Addr and Size give (B2.9.3.1); atomic operands and DVM payloads follow their
+own window rules and are taken as sent. Every byte of write data the HN-F or
+HN-I sends with BE 0 is 0 (B2.9.3). `WriteDataCancel` and
+`CopyBackWriteData_I` write nothing, though Dirty data a snoop returned is
+still written back; bound SVA reports a cancel on a write that Table B4.44
+does not let the Requester cancel.
+
+**DataCheck and Poison.** The line buffers keep no DataCheck of their own, so
+both Homes check the DataCheck of every packet they take bytes from: Requester
+write data inside its window, snoop data the Requester has not overwritten,
+and memory data under both. An error on such a byte poisons its 64-bit word,
+or, with `poisonEn` 0, marks the line for DERR (B9.2.3). Every packet the
+Homes send carries DataCheck generated from its data. Poison is kept per
+64-bit word (B9.2.1): a Requester that writes a whole word replaces its
+Poison, and anything that merges into part of a word accumulates it. The SLC
+turns an uncorrectable ECC error into Poison on that word.
+
+**Error responses.**
+
+| Cause | Response | Notes |
+|-------|----------|-------|
+| Address no region maps (`decodeErr`) | NDERR | Answered by the Home the hash picks (Section 6). |
+| PAS the region refuses | NDERR | Section 9.9. |
+| Granule protection fault | NDERR | No CHI-defined code exists; NDERR is the illegal-access case of B9.1.1. |
+| Opcode the Home does not support | NDERR | The HN-I's CopyBack and DVM; `ReadNoSnpSep` from a Requester. |
+| DataCheck error on kept data | Poison, or DERR without `poisonEn` | B9.2.3. |
+| DERR from a Snoopee or the Subordinate | DERR on the data the entry sends | B9.1.1: a request the Home must propagate still goes downstream. |
+| Error from the Snoopee recorded as possible owner | DERR on the data the entry sends | The latest data may be gone with its copy (B9.1.4.7). |
+
+: Table 9.8 Error sources at the Homes and what the Requester sees
+
+A request with an error uses no DMT or DCT (B9.1.3), changes no directory
+entry, and still sends every data packet, with values that need not be valid.
+
 # 10 RN-F boundary cache-state model
 
 These tables are the required architectural model for an RN-F cache
@@ -2191,6 +2275,7 @@ or performance guarantees are supplied.
 | `chi_slc_sva.sv` | `SLC_ONE_WAY_PER_LOCATION`, `SLC_DIRTY_NEVER_DROPPED`, `SLC_NO_DEVICE_ALLOCATION`, `SLC_DISCARD_ONLY_AFTER_WRITEBACK` | `SLC_HIT`, `SLC_MISS_FILL`, `SLC_DIRTY_EVICTION`, `SLC_EVICTION_HOLDS_REQUEST`, `SLC_CMO_HITS_DIRTY`, `SLC_MAINTENANCE` |
 | `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
 | `chi_direct_sva.sv` | `DIRECT_DATA_BYPASSES_HOME`, `RESP_SEP_DATA_FOR_DMT_SEP`, `DWT_NO_DATA_REQUEST_FROM_HOME`, per-entry `DMT_AFTER_SNOOPS`, `EXCLUSIVE_NOT_DIRECT`, `DWT_NOT_ON_SLC_LINE` | `FORWARDING_SNOOP_SENT` per forwarding snoop, `DCT_FORWARDED`, `DCT_FALLBACK`, `DMT_COMBINED`, `DMT_SEPARATE`, `DWT_USED`, `DWT_COMP_FROM_SUBORDINATE`, `WRITE_COMP_DBID_RESP`, `WRITE_SEPARATE_DBID_RESP`, `WRITE_SEPARATE_COMP`, `WRITE_DATA_CANCEL_AT_HOME` |
+| `chi_correctness_sva.sv` (HN-F and HN-I) | `READ_DATA_STATE_LEGAL`, `MAKE_READ_UNIQUE_COMP_STATE_LEGAL`, `WRITE_DATA_ZERO_WHERE_DISABLED`, `REQUESTER_BE_IN_WINDOW`, `WRITE_DATA_CANCEL_PERMITTED`, per-word `POISON_KEPT_UNDER_PARTIAL_WRITE` and `DATACHECK_ERROR_KEPT`, per-victim `DIRECTORY_EVICTION_RECONCILES_SLC`; HN-I `WRITE_DATA_ZERO_WHERE_DISABLED` | `READ_SHARED_SD_PD`, `READ_PREFER_UNIQUE_UD_PD`, `MAKE_READ_UNIQUE_COMP_UD_PD`, `PARTIAL_WRITE_OVER_POISON`, `DATACHECK_ERROR_SEEN`, `DIRECTORY_EVICTION_INTO_SLC`; HN-I `DATACHECK_ERROR_SEEN` |
 | `chi_excl_sva.sv` | `EXCL_SECOND_PASS_NEEDS_REGISTRATION`, `EXCL_PASS_CLEARS_SAME_LOCATION`, `EXCL_PASS_KEEPS_OTHER_LOCATIONS`, `EXCL_FAIL_REREGISTERS`, `EXCL_ONE_MONITOR_PER_LP`, `EXCL_LPID_IN_RANGE` | `EXCL_PASS`, `EXCL_FAIL_REGISTERS`, `EXCL_FAIL_THEN_PASS`, `EXCL_TWO_LPS_ONE_LOCATION`, `EXCL_TWO_LPS_TWO_LOCATIONS_PASS`, `EXCL_ADDRESS_MISMATCH_FAIL` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
@@ -2316,6 +2401,7 @@ rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_excl_sva.sv
 rtl/sva/chi_direct_sva.sv
+rtl/sva/chi_correctness_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```
@@ -2509,7 +2595,9 @@ the cross-references in the prose stay correct in every output format.
    Exclusive, and none at the HN-I.
 8. The `FwdNID` and `VMIDExt` packing of `SnpDVMOp` is not verified against
    Table B8.14 (Section 9.12).
-9. Runtime SAM writes lack complete validation, CHI-MMIO lacks security and
+9. Runtime SAM writes lack complete validation: CHI-MMIO checks the PAS and
+   commits only while traffic is quiescent, but not byte enables, base and
+   limit or target validity (Section 7.2), and
    quiescent commit, and APB quiescence does not inspect every internal
    topology slot.
 10. A flit for an unknown fabric destination is dropped at its first
@@ -2524,7 +2612,14 @@ the cross-references in the prose stay correct in every output format.
     claims a P-Credit it was never granted, cannot be retried and is held with
     back-pressure; every request from a well-behaved Requester is allocated,
     dropped or retried (Section 9.4).
-13. There is no full protocol testbench, no formal proof closure, no
+13. Endpoint Order is kept per Home: an HN-F treats its own address set as
+    the endpoint range. Two HN-Fs that share an SN-F do not order
+    Endpoint-ordered requests against each other, so a Requester that needs
+    that across interleaved Homes must wait for completion.
+14. DataCheck is not checked on the GPT walker's reads, on atomic operands
+    the HN-F executes, or on DVM payloads at the MN, and a snoop error from a Snoopee the directory did not record as
+    owner is ignored, because a clean copy loses nothing.
+15. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
     performance characterization. The smoke run in Section 12.7 drives no
     traffic at all: it brings the links up and then asserts that no flit is
@@ -2553,7 +2648,9 @@ the cross-references in the prose stay correct in every output format.
 | Crosspoint output | Two-entry FIFO | Fully registered crosspoint at one flit per cycle per output. |
 | Unroutable flit | Dropped and flagged at the first crosspoint | The channel never wedges; the transaction is lost. |
 | Home concurrency | One transaction per POS entry, one per location at a time | Throughput scales with `posEntries`; same-location requests queue in arrival order. |
-| Directory eviction | Victim buffer snoops with `SnpCleanInvalid` and writes back | Dirty data is never lost to a capacity eviction. |
+| Directory eviction | Victim buffer snoops with `SnpCleanInvalid` and writes back, into the SLC's copy when it holds the line | Dirty data is never lost to a capacity eviction, and no stale SLC copy survives one. |
+| DataCheck errors | Converted to Poison on the word, DERR without Poison | Errors survive the buffers, which keep no DataCheck. |
+| Requester BE outside the write window | Not taken; reported by SVA | A bad Requester cannot corrupt bytes it did not address. |
 | Snoop fanout | A transaction's snoops in flight together, `maxOutstandingSnoops` per Home | One snoop round trip per transaction; SNP traffic bounded per Home. |
 | DVM fanout | `dvmMaxOps` DVMOps; per Request Node one Sync and one Non-sync `SnpDVMOp` | Overlapped DVM latency within what every Request Node must accept. |
 | Home to subordinate mapping | Index modulo the subordinate count | Static striping rather than address-based balancing. |

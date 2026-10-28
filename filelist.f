@@ -55,5 +55,6 @@ rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_excl_sva.sv
 rtl/sva/chi_direct_sva.sv
+rtl/sva/chi_correctness_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv

@@ -368,6 +368,14 @@ module chi_hni_top #(
   logic [IDX_W-1:0] snDatEntry;
   logic wrDatValid;
   logic [IDX_W-1:0] wrDatEntry;
+  // The DAT packet arriving this cycle: the Requester bytes inside a
+  // write's window, the bytes the HN-I keeps from it, and its DataCheck.
+  logic [63:0] wrWindow;
+  logic [63:0] wrDatBeatBe;
+  logic [63:0] datInKept;
+  logic [7:0] dcWords;
+  logic [7:0] dcPoison;
+  logic dcDerr;
   logic [3:0] wrDatGranules;
   logic compAckValid;
   logic [IDX_W-1:0] compAckEntry;
@@ -940,6 +948,30 @@ module chi_hni_top #(
     dnReqFlit.payload[CHI_MAX_REQ_FLIT_W-1:0] = packReqFlit(CFG, request);
   end
 
+  // Write data outside the window its Addr and Size give is not taken
+  // (IHI 0050H B2.9.3.1); atomic operands and DVM payloads have windows of
+  // their own and pass as sent. A DataCheck error on a byte the HN-I keeps
+  // becomes Poison on its 64-bit word, or DERR when Poison is not carried
+  // (B9.2.3).
+  always_comb begin
+    wrWindow = (entry[wrDatEntry].kind == HNI_K_WRITE)
+               ? writeWindow(entry[wrDatEntry].req.addr[5:0],
+                             entry[wrDatEntry].req.size)
+               : '1;
+    wrDatBeatBe = '0;
+    datInKept = '0;
+    for (int unsigned b = 0; b < DAT_BYTES; b++) begin
+      wrDatBeatBe[b] = incomingDat.be[b]
+                       && wrWindow[int'(incomingDat.dataId)*16 + b];
+      datInKept[b] = wrDatValid ? wrDatBeatBe[b] : snDatForEntry;
+    end
+    dcWords = CFG.dataCheckEn
+              ? dataCheckWords(incomingDat.data, incomingDat.dataCheck, datInKept)
+              : '0;
+    dcPoison = CFG.poisonEn ? dcWords : '0;
+    dcDerr = !CFG.poisonEn && (dcWords != '0);
+  end
+
   // Write data and atomic operands towards the SN-I.
   always_comb begin
     chi_dat_flit_t data;
@@ -956,8 +988,12 @@ module chi_hni_top #(
     data.dataId = dnDatDataId;
     data.ccId = (e.kind == HNI_K_WRITE_ZERO) ? '0 : e.req.addr[5:4];
     data.data[CFG.dataW-1:0] = bufReq[dnDatOwner][int'(dnDatDataId)*128 +: CFG.dataW];
-    for (int unsigned b = 0; b < DAT_BYTES; b++)
+    // A byte whose BE is 0 carries 0 (IHI 0050H B2.9.3).
+    for (int unsigned b = 0; b < DAT_BYTES; b++) begin
       data.be[b] = bufReqBe[dnDatOwner][int'(dnDatDataId)*16 + b];
+      if (!data.be[b])
+        data.data[b*8 +: 8] = '0;
+    end
     data.dataCheck = dataCheckOf(data.data);
     data.poison[POISON_PER_BEAT-1:0] =
       bufReqPoison[dnDatOwner][int'(dnDatDataId)*2 +: POISON_PER_BEAT];
@@ -1331,6 +1367,8 @@ module chi_hni_top #(
         entry[snDatEntry].dnResp <= incomingDat.resp;
         if (incomingDat.respErr != RESP_ERR_OK)
           entry[snDatEntry].dnErr <= incomingDat.respErr;
+        else if (dcDerr && (entry[snDatEntry].dnErr == RESP_ERR_OK))
+          entry[snDatEntry].dnErr <= RESP_ERR_DERR;
       end
 
       // Requester data.
@@ -1445,21 +1483,21 @@ module chi_hni_top #(
       if (wrDatValid && entry[wrDatEntry].wrOwed
           && (incomingDat.opcode != DAT_WRITE_DATA_CANCEL)) begin
         for (int unsigned b = 0; b < DAT_BYTES; b++)
-          if (incomingDat.be[b])
+          if (wrDatBeatBe[b])
             bufReq[wrDatEntry][(int'(incomingDat.dataId)*16 + b)*8 +: 8] <=
               incomingDat.data[b*8 +: 8];
         for (int unsigned b = 0; b < DAT_BYTES; b++)
-          bufReqBe[wrDatEntry][int'(incomingDat.dataId)*16 + b] <= incomingDat.be[b];
+          bufReqBe[wrDatEntry][int'(incomingDat.dataId)*16 + b] <= wrDatBeatBe[b];
         bufReqPoison[wrDatEntry][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
-          incomingDat.poison[POISON_PER_BEAT-1:0];
-        if (incomingDat.respErr == RESP_ERR_DERR)
+          incomingDat.poison[POISON_PER_BEAT-1:0] | dcPoison[POISON_PER_BEAT-1:0];
+        if ((incomingDat.respErr == RESP_ERR_DERR) || dcDerr)
           bufReqErr[wrDatEntry] <= 1'b1;
       end
       if (snDatForEntry) begin
         bufRsp[snDatEntry][int'(incomingDat.dataId)*128 +: CFG.dataW] <=
           incomingDat.data[CFG.dataW-1:0];
         bufRspPoison[snDatEntry][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
-          incomingDat.poison[POISON_PER_BEAT-1:0];
+          incomingDat.poison[POISON_PER_BEAT-1:0] | dcPoison[POISON_PER_BEAT-1:0];
       end
     end
   end

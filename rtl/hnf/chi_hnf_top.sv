@@ -267,6 +267,13 @@ module chi_hnf_top #(
     logic               snpDirty;
     logic               dnBusy;
     logic               dnWriteDone;
+    // A directory eviction that collected Dirty data reconciles it with the
+    // SLC first: a copy the SLC holds takes the merged line instead of
+    // memory, so no stale copy is left behind (Section 9.10).
+    logic               fromSf;
+    logic               slcChecked;  // the SLC line has been looked for
+    logic               slcHeld;     // the SLC held it and takes the data
+    logic               slcWritten;  // and has taken it
   } victim_t;
 
   // ---------------------------------------------------------------------
@@ -490,6 +497,10 @@ module chi_hnf_top #(
   logic slcLookupDirty;
   logic slcReadValid;
   logic [POS_W-1:0] slcReadEntry;
+  logic slcReadHit;
+  logic slcReadForVictim;
+  logic [VB_W-1:0] slcReadVictim;
+  logic [KEY_W-1:0] slcReadKey;
   logic [511:0] slcReadData;
   logic [7:0] slcReadPoison;
   logic slcReadCorrected;
@@ -504,6 +515,10 @@ module chi_hnf_top #(
   logic slcUpdateFromRetire;
   logic [POS_W-1:0] slcUpdateEntry;
   logic [POS_W-1:0] slcUpdatePointer;
+  logic slcUpdateForVictim;
+  logic [VB_W-1:0] slcUpdateVictim;
+  logic [NUM_VB-1:0] vNeedSlcRead;
+  logic [NUM_VB-1:0] vNeedSlcWrite;
   logic slcVictimReady;
   logic slcVictimValid;
   logic [KEY_W-1:0] slcVictimKey;
@@ -556,6 +571,14 @@ module chi_hnf_top #(
   // Direct transfers.
   logic [POS_DEPTH-1:0] eDmtOk;
   logic [POS_DEPTH-1:0] eDctFwded;
+  // The DAT packet arriving this cycle: the Requester bytes inside the
+  // write's window, the bytes the Home keeps from it, and its DataCheck.
+  logic [63:0] wrWindow;
+  logic [63:0] wrDatBeatBe;
+  logic [63:0] datInKept;
+  logic [7:0] dcWords;
+  logic [7:0] dcPoison;
+  logic dcDerr;
   // For the bound direct-transfer assertions.
   logic [POS_DEPTH-1:0] eDmtUsed;
   logic [POS_DEPTH-1:0] eDmtSep;
@@ -835,9 +858,9 @@ module chi_hnf_top #(
       .clk, .resetn,
       .lookupKey(posKey[startIndex]),
       .lookupHit(slcLookupHit), .lookupDirty(slcLookupDirty),
-      .readValid(slcReadValid), .readKey(posKey[slcReadEntry]),
+      .readValid(slcReadValid || slcReadForVictim), .readKey(slcReadKey),
       .readData(slcReadData), .readPoison(slcReadPoison),
-      .readCorrected(slcReadCorrected),
+      .readCorrected(slcReadCorrected), .readHit(slcReadHit),
       .updateValid(slcUpdateValid), .updateKey(slcUpdateKey),
       .updateRemove(slcUpdateRemove), .updateDiscard(slcUpdateDiscard),
       .updateDirty(slcUpdateDirty), .updateData(slcUpdateData),
@@ -858,6 +881,7 @@ module chi_hnf_top #(
       slcReadData = '0;
       slcReadPoison = '0;
       slcReadCorrected = 1'b0;
+      slcReadHit = 1'b0;
       slcUpdateReady = 1'b1;
       slcVictimValid = 1'b0;
       slcVictimKey = '0;
@@ -871,21 +895,41 @@ module chi_hnf_top #(
   end
 
   // SLC read port: one entry per cycle takes the whole line into its buffer
-  // as memory-level data.
+  // as memory-level data. A directory eviction that collected Dirty data
+  // goes first; it reads once, holding its location until it has.
   always_comb begin
+    for (int unsigned v = 0; v < NUM_VB; v++) begin
+      vNeedSlcRead[v] = CFG.slcEn && victim[v].valid && victim[v].fromSf
+                        && victim[v].snpDirty && !victim[v].slcChecked
+                        && (victim[v].snpToSend == '0)
+                        && (victim[v].snpPending == '0);
+      vNeedSlcWrite[v] = victim[v].valid && victim[v].slcHeld
+                         && !victim[v].slcWritten;
+    end
+    slcReadForVictim = 1'b0;
+    slcReadVictim = '0;
+    for (int unsigned v = 0; v < NUM_VB; v++)
+      if (!slcReadForVictim && vNeedSlcRead[v]) begin
+        slcReadForVictim = 1'b1;
+        slcReadVictim = VB_W'(v);
+      end
     slcReadValid = 1'b0;
     slcReadEntry = '0;
-    for (int unsigned i = 0; i < POS_DEPTH; i++)
-      if (!slcReadValid && eNeedSlcRead[i]) begin
-        slcReadValid = 1'b1;
-        slcReadEntry = POS_W'(i);
-      end
+    if (!slcReadForVictim)
+      for (int unsigned i = 0; i < POS_DEPTH; i++)
+        if (!slcReadValid && eNeedSlcRead[i]) begin
+          slcReadValid = 1'b1;
+          slcReadEntry = POS_W'(i);
+        end
+    slcReadKey = slcReadForVictim ? victim[slcReadVictim].key
+                                  : posKey[slcReadEntry];
   end
 
   // SLC update port: a start candidate the SLC must give its line up for
-  // first, else one retiring entry in rotation; the maintenance walk uses
-  // the port when neither does. A dirty line leaving the SLC needs a victim
-  // entry the directory is not taking this cycle.
+  // first, then a directory eviction whose merged line the SLC takes back,
+  // else one retiring entry in rotation; the maintenance walk uses the port
+  // when none does. A dirty line leaving the SLC needs a victim entry the
+  // directory is not taking this cycle.
   always_comb begin
     logic found;
     int unsigned candidate;
@@ -903,17 +947,29 @@ module chi_hnf_top #(
         slcUpdateEntry = POS_W'(candidate);
       end
     end
+    slcUpdateForVictim = 1'b0;
+    slcUpdateVictim = '0;
+    for (int unsigned v = 0; v < NUM_VB; v++)
+      if (!slcFlushWant && !slcUpdateForVictim && vNeedSlcWrite[v]) begin
+        slcUpdateForVictim = 1'b1;
+        slcUpdateVictim = VB_W'(v);
+      end
     e = entry[slcUpdateEntry];
-    slcUpdateFromRetire = found && !slcFlushWant;
-    slcUpdateValid = slcFlushWant || found;
-    slcUpdateKey = slcFlushWant ? posKey[startIndex] : posKey[slcUpdateEntry];
+    slcUpdateFromRetire = found && !slcFlushWant && !slcUpdateForVictim;
+    slcUpdateValid = slcFlushWant || slcUpdateForVictim || found;
+    slcUpdateKey = slcFlushWant ? posKey[startIndex]
+                   : (slcUpdateForVictim ? victim[slcUpdateVictim].key
+                                         : posKey[slcUpdateEntry]);
     // A flush writes the SLC's own line back; a retiring entry that removes
-    // the line has already written the latest data to memory itself.
-    slcUpdateRemove = slcFlushWant || e.slcRemove;
-    slcUpdateDiscard = !slcFlushWant && e.slcRemove;
-    slcUpdateDirty = e.slcKeepDirty;
-    slcUpdateData = bufData[slcUpdateEntry];
-    slcUpdatePoison = bufPoison[slcUpdateEntry];
+    // the line has already written the latest data to memory itself; a
+    // directory eviction rewrites, Dirty, the line it found in the SLC.
+    slcUpdateRemove = slcFlushWant || (!slcUpdateForVictim && e.slcRemove);
+    slcUpdateDiscard = !slcFlushWant && !slcUpdateForVictim && e.slcRemove;
+    slcUpdateDirty = slcUpdateForVictim || e.slcKeepDirty;
+    slcUpdateData = slcUpdateForVictim ? bufData[POS_DEPTH + slcUpdateVictim]
+                                       : bufData[slcUpdateEntry];
+    slcUpdatePoison = slcUpdateForVictim ? bufPoison[POS_DEPTH + slcUpdateVictim]
+                                         : bufPoison[slcUpdateEntry];
     slcVictimReady = victimFree && !(sfVictimValid && sfUpdateValid && sfUpdateReady);
     slcUpdateCacheable = slcCacheable(e.req);
     slcUpdateWroteBack = e.dnWriteDone || !e.slcKeepDirty;
@@ -1917,6 +1973,72 @@ module chi_hnf_top #(
     memDatOwner = OWNER_W'(incomingDat.txnId);
   end
 
+  // Requester data outside the window its Addr and Size give is not taken
+  // (IHI 0050H B2.9.3.1). A DataCheck error on a byte the Home keeps
+  // becomes Poison on its 64-bit word, or DERR when Poison is not carried,
+  // because the line buffers keep no DataCheck of their own (B9.2.3).
+  always_comb begin
+    wrWindow = writeWindow(entry[wrDatEntry].req.addr[5:0],
+                           entry[wrDatEntry].req.size);
+    wrDatBeatBe = '0;
+    datInKept = '0;
+    for (int unsigned b = 0; b < DAT_BYTES; b++) begin
+      wrDatBeatBe[b] = incomingDat.be[b]
+                       && wrWindow[int'(incomingDat.dataId)*16 + b];
+      if (wrDatValid)
+        datInKept[b] = wrDatBeatBe[b];
+      else if (snpDatExpected)
+        datInKept[b] = incomingDat.be[b]
+                       && !bufWrBe[snpDatOwner][int'(incomingDat.dataId)*16 + b];
+      else if (memDatValid)
+        datInKept[b] = !bufWrBe[memDatOwner][int'(incomingDat.dataId)*16 + b]
+                       && !bufSnpBe[memDatOwner][int'(incomingDat.dataId)*16 + b];
+    end
+    dcWords = CFG.dataCheckEn
+              ? dataCheckWords(incomingDat.data, incomingDat.dataCheck, datInKept)
+              : '0;
+    dcPoison = CFG.poisonEn ? dcWords : '0;
+    dcDerr = !CFG.poisonEn && (dcWords != '0);
+  end
+
+  // For the bound correctness assertions (chi_correctness_sva).
+  chi_req_opcode_e datEntryOpcode;
+  chi_req_opcode_e rspEntryOpcode;
+  chi_req_opcode_e wrDatEntryOpcode;
+  logic wrDatMerge;
+  logic datInTaken;
+  logic [OWNER_W-1:0] datInOwner;
+  logic [NUM_VB-1:0] vValid;
+  logic [NUM_VB-1:0] vFromSf;
+  logic [NUM_VB-1:0] vSlcChecked;
+  logic [NUM_VB-1:0] vSlcHeld;
+  logic [NUM_VB-1:0] vSlcWritten;
+  logic [NUM_VB-1:0] vDnStart;
+  logic [NUM_OWNERS-1:0][7:0] bufPoisonPacked;
+  always_comb begin
+    datEntryOpcode = entry[datEntry].req.opcode;
+    rspEntryOpcode = entry[rspEntry].req.opcode;
+    wrDatEntryOpcode = entry[wrDatEntry].req.opcode;
+    wrDatMerge = wrDatValid && entry[wrDatEntry].wrOwed
+                 && (entry[wrDatEntry].kind != HNF_KIND_ATOMIC)
+                 && (incomingDat.opcode != DAT_WRITE_DATA_CANCEL)
+                 && !((incomingDat.opcode == DAT_COPY_BACK_WR_DATA)
+                      && (incomingDat.resp == RESP_I));
+    datInTaken = wrDatMerge || snpDatExpected || memDatValid;
+    datInOwner = wrDatValid ? OWNER_W'(wrDatEntry)
+                 : (snpDatExpected ? snpDatOwner : memDatOwner);
+    for (int unsigned v = 0; v < NUM_VB; v++) begin
+      vValid[v] = victim[v].valid;
+      vFromSf[v] = victim[v].fromSf;
+      vSlcChecked[v] = victim[v].slcChecked;
+      vSlcHeld[v] = victim[v].slcHeld;
+      vSlcWritten[v] = victim[v].slcWritten;
+      vDnStart[v] = dnStartValid[POS_DEPTH + v];
+    end
+    for (int unsigned o = 0; o < NUM_OWNERS; o++)
+      bufPoisonPacked[o] = bufPoison[o];
+  end
+
   // A snoop with data retires on the packet that completes its Snoopee's
   // line. Each Snoopee's packets are counted on their own, because several
   // Snoopees can be returning data to one owner at once, and only a response
@@ -1981,7 +2103,8 @@ module chi_hnf_top #(
                             && !dnBusy[owner] && !victim[v].dnWriteDone
                             && (victim[v].snpToSend == '0)
                             && (victim[v].snpPending == '0)
-                            && victim[v].snpDirty;
+                            && victim[v].snpDirty
+                            && !vNeedSlcRead[v] && !victim[v].slcHeld;
       dnStartKind[owner] = HNF_DN_WRITE;
       dnStartGranules[owner] = 4'hf;
       dnStartNoData[owner] = 1'b0;
@@ -2157,8 +2280,12 @@ module chi_hnf_top #(
     data.ccId = (isPos && dnExactWrite(entry[POS_W'(dnDatOwner)]))
                 ? entry[POS_W'(dnDatOwner)].req.addr[5:4] : '0;
     data.data[CFG.dataW-1:0] = bufData[dnDatOwner][int'(dnDatDataId)*128 +: CFG.dataW];
-    for (int unsigned b = 0; b < DAT_BYTES; b++)
+    // A byte whose BE is 0 carries 0 (IHI 0050H B2.9.3).
+    for (int unsigned b = 0; b < DAT_BYTES; b++) begin
       data.be[b] = writeBe[int'(dnDatDataId)*16 + b];
+      if (!data.be[b])
+        data.data[b*8 +: 8] = '0;
+    end
     data.dataCheck = dataCheckOf(data.data);
     data.poison[POISON_PER_BEAT-1:0] =
       bufPoison[dnDatOwner][int'(dnDatDataId)*2 +: POISON_PER_BEAT];
@@ -2260,8 +2387,10 @@ module chi_hnf_top #(
               response.resp = RESP_UC_UD;
             end else begin
               // MakeReadUnique: Unique on a pass, Shared on an exclusive
-              // fail (IHI 0050H B6.3.1.1).
-              response.resp = eMruFail[rspEntry] ? RESP_SC : RESP_UC_UD;
+              // fail (IHI 0050H B6.3.1.1), UD_PD when a snooped copy's Dirty
+              // data passes with it (Table B4.41). eGrant records which, and
+              // the entry writes nothing back when it passes.
+              response.resp = eGrant[rspEntry];
             end
           default:
             response.resp = RESP_I;
@@ -2934,9 +3063,17 @@ module chi_hnf_top #(
           victim[v].dnBusy <= 1'b0;
           victim[v].dnWriteDone <= 1'b1;
         end
+        if (slcReadForVictim && (int'(slcReadVictim) == v)) begin
+          victim[v].slcChecked <= 1'b1;
+          victim[v].slcHeld <= slcReadHit;
+        end
+        if (slcUpdateValid && slcUpdateReady && slcUpdateForVictim
+            && (int'(slcUpdateVictim) == v))
+          victim[v].slcWritten <= 1'b1;
         if (victim[v].valid && (victim[v].snpToSend == '0)
             && (victim[v].snpPending == '0) && !victim[v].dnBusy
-            && (!victim[v].snpDirty || victim[v].dnWriteDone))
+            && (!victim[v].snpDirty || victim[v].dnWriteDone
+                || (victim[v].slcHeld && victim[v].slcWritten)))
           victim[v].valid <= 1'b0;
       end
       if (sfVictimValid && sfUpdateValid && sfUpdateReady) begin
@@ -2944,6 +3081,7 @@ module chi_hnf_top #(
         victim[victimFreeIndex].valid <= 1'b1;
         victim[victimFreeIndex].key <= sfVictimKey;
         victim[victimFreeIndex].snpToSend <= sfVictimSharers;
+        victim[victimFreeIndex].fromSf <= 1'b1;
       end
       // A dirty line leaving the SLC is written back by a victim entry,
       // which holds the location until memory has it.
@@ -3005,6 +3143,18 @@ module chi_hnf_top #(
         bufMemBe[slcReadEntry] <= ALL_BYTES;
         bufPoison[slcReadEntry] <= bufPoison[slcReadEntry] | slcReadPoison;
       end
+      // A directory eviction's Dirty data lands over the SLC's copy of the
+      // line, and the whole merged line goes back to the SLC.
+      if (slcReadForVictim && slcReadHit) begin
+        for (int unsigned b = 0; b < 64; b++)
+          if (!bufSnpBe[POS_DEPTH + slcReadVictim][b])
+            bufData[POS_DEPTH + slcReadVictim][b*8 +: 8] <= slcReadData[b*8 +: 8];
+        bufSnpBe[POS_DEPTH + slcReadVictim] <= ALL_BYTES;
+        for (int unsigned w = 0; w < 8; w++)
+          if (bufSnpBe[POS_DEPTH + slcReadVictim][w*8 +: 8] != 8'hff)
+            bufPoison[POS_DEPTH + slcReadVictim][w] <=
+              bufPoison[POS_DEPTH + slcReadVictim][w] | slcReadPoison[w];
+      end
 
       if (wrDatValid && entry[wrDatEntry].wrOwed
           && (entry[wrDatEntry].kind != HNF_KIND_ATOMIC)
@@ -3012,16 +3162,34 @@ module chi_hnf_top #(
           && !((incomingDat.opcode == DAT_COPY_BACK_WR_DATA)
                && (incomingDat.resp == RESP_I))) begin
         for (int unsigned b = 0; b < DAT_BYTES; b++)
-          if (incomingDat.be[b])
+          if (wrDatBeatBe[b])
             bufData[wrDatEntry][(int'(incomingDat.dataId)*16 + b)*8 +: 8] <=
               incomingDat.data[b*8 +: 8];
         bufWrBe[wrDatEntry] <= bufWrBe[wrDatEntry]
-                               | beatEnables(incomingDat.dataId, incomingDat.be);
-        bufPoison[wrDatEntry][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
-          incomingDat.poison[POISON_PER_BEAT-1:0];
-        if (incomingDat.respErr == RESP_ERR_DERR)
+                               | beatEnables(incomingDat.dataId, wrDatBeatBe);
+        // Poison per 64-bit word (IHI 0050H B9.2.1): replaced where the
+        // Requester writes the whole word, accumulated where it writes part.
+        for (int unsigned w = 0; w < POISON_PER_BEAT; w++)
+          if (wrDatBeatBe[w*8 +: 8] == 8'hff)
+            bufPoison[wrDatEntry][int'(incomingDat.dataId)*2 + w] <=
+              incomingDat.poison[w] || dcPoison[w];
+          else if (wrDatBeatBe[w*8 +: 8] != 8'h00)
+            bufPoison[wrDatEntry][int'(incomingDat.dataId)*2 + w] <=
+              bufPoison[wrDatEntry][int'(incomingDat.dataId)*2 + w]
+              || incomingDat.poison[w] || dcPoison[w];
+        if ((incomingDat.respErr == RESP_ERR_DERR) || dcDerr)
           bufDataErr[wrDatEntry] <= 1'b1;
       end
+
+      // A Snoopee that answers with an error has dropped its copy without
+      // data (IHI 0050H B9.1.4.7). If the directory recorded it as the
+      // possible owner, the latest data may be gone, so what the entry
+      // sends is marked DERR rather than passed on as good.
+      if (snpRspComplete && (int'(snpRspOwner) < POS_DEPTH)
+          && (incomingRsp.respErr != RESP_ERR_OK)
+          && entry[POS_W'(snpRspOwner)].sfOwnerValid
+          && (entry[POS_W'(snpRspOwner)].sfOwner == snpRspTarget))
+        bufDataErr[snpRspOwner] <= 1'b1;
 
       // Valid copies of a line agree, so the data of several Snoopees
       // merges into one buffer; a poisoned copy keeps the line poisoned.
@@ -3033,10 +3201,12 @@ module chi_hnf_top #(
               incomingDat.data[b*8 +: 8];
         bufSnpBe[snpDatOwner] <= bufSnpBe[snpDatOwner]
                                  | beatEnables(incomingDat.dataId, incomingDat.be);
-        bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
-          bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT]
-          | incomingDat.poison[POISON_PER_BEAT-1:0];
-        if (incomingDat.respErr == RESP_ERR_DERR)
+        for (int unsigned w = 0; w < POISON_PER_BEAT; w++)
+          if (datInKept[w*8 +: 8] != 8'h00)
+            bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 + w] <=
+              bufPoison[snpDatOwner][int'(incomingDat.dataId)*2 + w]
+              || incomingDat.poison[w] || dcPoison[w];
+        if ((incomingDat.respErr == RESP_ERR_DERR) || dcDerr)
           bufDataErr[snpDatOwner] <= 1'b1;
       end
 
@@ -3048,10 +3218,12 @@ module chi_hnf_top #(
               incomingDat.data[b*8 +: 8];
         bufMemBe[memDatOwner] <= bufMemBe[memDatOwner]
                                  | beatBytes(incomingDat.dataId);
-        bufPoison[memDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT] <=
-          bufPoison[memDatOwner][int'(incomingDat.dataId)*2 +: POISON_PER_BEAT]
-          | incomingDat.poison[POISON_PER_BEAT-1:0];
-        if (incomingDat.respErr != RESP_ERR_OK)
+        for (int unsigned w = 0; w < POISON_PER_BEAT; w++)
+          if (datInKept[w*8 +: 8] != 8'h00)
+            bufPoison[memDatOwner][int'(incomingDat.dataId)*2 + w] <=
+              bufPoison[memDatOwner][int'(incomingDat.dataId)*2 + w]
+              || incomingDat.poison[w] || dcPoison[w];
+        if ((incomingDat.respErr != RESP_ERR_OK) || dcDerr)
           bufDataErr[memDatOwner] <= 1'b1;
       end
 

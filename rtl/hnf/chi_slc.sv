@@ -9,7 +9,8 @@
 // Ports, each serving one request per cycle:
 //   lookup  tag only, combinational: the HN-F reads it for the entry that
 //           starts this cycle, in the same stage as the directory lookup.
-//   read    the whole line of a location that is present.
+//   read    the whole line of a location, and readHit, whether it is
+//           present.
 //   update  write a whole line, clean or dirty, or remove a location (with
 //           updateDiscard when the HN-F has already written the latest data
 //           to memory, so a dirty copy is dropped rather than written back). A
@@ -48,6 +49,7 @@ module chi_slc #(
   output logic [511:0] readData,
   output logic [7:0] readPoison,
   output logic readCorrected,
+  output logic readHit,
   input  logic updateValid,
   input  logic [KEY_W-1:0] updateKey,
   input  logic updateRemove,
@@ -170,7 +172,6 @@ module chi_slc #(
   logic [WAY_W-1:0] lookupWay;
   logic [SET_W-1:0] readSet;
   logic [WAY_W-1:0] readWay;
-  logic readHit;
 
   always_comb begin
     lookupSet = lookupKey[SET_W-1:0];
