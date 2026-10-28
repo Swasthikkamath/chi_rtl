@@ -45,7 +45,10 @@ fabric endpoints with no external link.
 
 [`docs/chi_interconnect_design_spec.docx`](docs/chi_interconnect_design_spec.docx)
 is the design document: feature matrix, hierarchy, parameters, interface
-directions, transaction flows, Home Node internals, and limitations.
+directions, transaction flows, Home Node internals, the RTL micro-architecture
+of every block (link layer, address map, fabric crosspoints and arbiters, HN-F
+point of serialization and coherence, HN-I, MN, GPC), transactions followed
+through the RTL, a module parameter reference, and limitations.
 
 It is generated from the single Markdown source in
 [`doc-src/`](doc-src/chi_interconnect_design_spec.md) so that the document and

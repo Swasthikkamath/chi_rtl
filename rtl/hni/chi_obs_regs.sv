@@ -16,8 +16,9 @@
 //
 // The register map and security rule are implementation defined; CHI
 // defines no register interface. Writes need a Root access with RME
-// (PNSE == 1, PPROT[1] == 0) and a Secure access without it, the rule of the
-// other blocks. Reads are unrestricted. A register of a feature that is not
+// (PNSE == 1, PPROT[1] == 0), or a Secure one as well when apbRootWrites is
+// 0, and a Secure access without RME: the rule of the other blocks. Reads are
+// unrestricted. A register of a feature that is not
 // configured is not implemented and answers PSLVERR.
 //
 //   0x00 SELECT        RW  record or HN-F the next registers refer to

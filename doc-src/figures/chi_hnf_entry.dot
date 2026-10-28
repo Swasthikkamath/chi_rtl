@@ -1,0 +1,26 @@
+// Life of a POS entry in chi_hnf_top (Section 13.6.4).
+// Rendered by the doc target; see Makefile.
+digraph chiHnfEntry {
+  rankdir=LR;
+  splines=polyline;
+  nodesep=0.35;
+  ranksep=0.6;
+  bgcolor="white";
+  node [shape=box, style="rounded,filled", fillcolor="#f5f5f5",
+        fontname="Helvetica", fontsize=10, margin="0.16,0.10"];
+  edge [fontname="Helvetica", fontsize=9, color="#555555"];
+  graph [fontname="Helvetica", fontsize=11, labeljust="l"];
+
+  free   [label="PH_FREE\nunused", fillcolor="#eeeeee"];
+  wait   [label="PH_WAIT\nallocated, waiting\nGPC answer pending or not", fillcolor="#fdf0d5"];
+  run    [label="PH_RUN\nplan written; obligations:\nsnoops, data, memory ops,\nresponses, CompAck", fillcolor="#f7dce9"];
+  retire [label="PH_RETIRE\ndirectory and SLC\nupdates owed", fillcolor="#e8f0e0"];
+
+  free -> wait [label="  admitted: chi_pos entry,\n  key, Requester, age row"];
+  wait -> run [label="  chosen to start:\n  mayStart (no older entry, no Endpoint\n  hazard, no victim) and GPC known and\n  Endpoint Order ticket served"];
+  run -> retire [label="  eAllDone:\n  nothing owed, nothing in flight"];
+  retire -> free [label="  directory written, SLC written\n  or removed: posFreeMask,\n  ticket retired"];
+
+  retry [label="no entry it may use:\nRetryAck, PCrdGrant later", shape=note, fillcolor="#ffffff"];
+  retry -> free [style=dashed, arrowhead=none, constraint=false];
+}

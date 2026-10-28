@@ -36,6 +36,13 @@ The document is generated from a single Markdown source in `doc-src/` so that
 the Word file in `docs/` and the RTL never drift apart. See Section 12.9 for
 the regeneration command.
 
+Chapters 1 to 12 describe the interconnect's behaviour and how it is
+configured and verified. Chapter 13 describes the RTL of every block: its
+state, logic and timing, including how the HN-F acts as Point of
+Serialization and Point of Coherence. Chapter 14 follows transactions through
+those blocks, Chapter 15 lists every module parameter, and Chapter 16 records
+open issues and decisions.
+
 # 1 Scope, Issue H baseline, and feature status
 
 ## 1.1 Baseline and exclusions
@@ -481,51 +488,47 @@ block holds the HN-F event counters and the crosspoint flit counters (Section
 
 ```
 chi_interconnect_top
-├── chi_cfg_check                            (elaboration assertions)
-├── rnf_ports[*] / rnd_ports[*] / rni_ports[*] : chi_link_port
-│   ├── chi_link_rx  x3   (REQ, RSP, DAT from the node)
-│   │   └── chi_link_fsm      (receive direction activation)
-│   └── chi_link_tx  x3   (RSP, SNP, DAT to the node)
-│       ├── chi_lcrd_mgr      (credit pool, lcrdDepth deep)
-│       └── chi_link_fsm      (transmit direction activation)
-├── snf_ports[*] / sni_ports[*] : chi_link_port
-│   ├── chi_link_rx  x2   (RSP, DAT from the node)
-│   └── chi_link_tx  x3   (REQ, RSP, DAT to the node)
-├── requester_sam[*]
-│   ├── chi_sam  ── chi_hn_hash
-│   └── chi_prefetch_map
-├── apb_cfg : chi_cfg_slave                          [CFG_APB]
-├── hnf_nodes[*] : chi_hnf_top
-│   ├── chi_pos               (allocation, keys, age matrix)
-│   ├── chi_hazard            (start permission per entry)
-│   ├── chi_snoop_filter      (lookup and update ports, eviction)
-│   ├── chi_excl_mon
-│   ├── chi_slc               (System Level Cache)        [slcEn]
-│   ├── chi_stash_ctrl
-│   ├── chi_retry
-│   ├── chi_atomic_alu
-│   ├── chi_snp_gen           (snoop issue, maxOutstandingSnoops)
-│   ├── chi_sn_tracker        (one downstream tracker per owner)
-│   └── chi_flit_fifo  x4     (REQ, RSP, SNP, DAT out)
-├── hni_nodes[*] : chi_hni_top
-│   ├── chi_sam
-│   ├── chi_pos               (entries, keys, age matrix)
-│   ├── chi_retry
-│   ├── chi_sn_tracker        (one tracker per entry, credits per SN-I)
-│   └── chi_flit_fifo  x3     (REQ, RSP, DAT out)
+├── chi_cfg_check                          elaboration checks ($fatal)
+├── rnf_ports[*], rnd_ports[*], rni_ports[*] : chi_link_port
+│   ├── chi_link_rx x3 (REQ, RSP, DAT in)   each with a chi_link_fsm
+│   └── chi_link_tx x3 (RSP, SNP, DAT out)  each with chi_lcrd_mgr, chi_link_fsm
+├── snf_ports[*], sni_ports[*] : chi_link_port
+│   ├── chi_link_rx x2 (RSP, DAT in)
+│   └── chi_link_tx x3 (REQ, RSP, DAT out)
+├── requester_sam[*]                       one per Request Node port
+│   ├── sam : chi_sam ── hash : chi_hn_hash
+│   └── prefetch_map : chi_prefetch_map
+├── qos_regulator : chi_qos_reg            REQ token buckets
+├── endpoint_order : chi_eo_order          Endpoint Order tickets
+├── system_coherency : chi_sysco           SYSCOREQ / SYSCOACK
+├── apb_cfg                                [cfgAccess = CFG_APB]
+│   ├── cfg_slave : chi_cfg_slave          block 0, region editor
+│   ├── policy_regs : chi_hnf_policy_regs  block 1, HN-F policy
+│   ├── observability.obs_regs : chi_obs_regs   block 3 [rasEn or pmuEn]
+│   └── qos_registers.qos_regs : chi_qos_regs   block 4 [qosRegEn]
+├── gpc.gpc_unit : chi_gpc                 block 2 [gpcMode != NONE]
+├── hnf_nodes[*].hnf : chi_hnf_top
+│   ├── chi_pos, chi_hazard, chi_snoop_filter, chi_excl_mon
+│   ├── chi_slc [slcEn], chi_stash_ctrl, chi_retry, chi_atomic_alu
+│   ├── chi_snp_gen, chi_sn_tracker
+│   └── chi_flit_fifo x4 (REQ, RSP, SNP, DAT)
+├── hni_nodes[*].hni : chi_hni_top
+│   ├── chi_sam, chi_pos, chi_retry, chi_excl_mon, chi_sn_tracker
+│   └── chi_flit_fifo x3 (REQ, RSP, DAT)
 ├── mn_nodes[*] : chi_mn_dvm
-├── apb_cfg/policy_regs : chi_hnf_policy_regs     [CFG_APB]
-├── gpc/gpc_unit : chi_gpc                         [gpcMode != NONE]
-└── chi_noc_top
-    └── chi_mesh | chi_ring | chi_xbar              [topology]
-        └── chi_xp[*]
-            └── chi_router[REQ/RSP/SNP/DAT]
-                ├── chi_route_compute[*]
-                └── chi_vc_arb[*]
+│   └── chi_flit_fifo x2 (RSP, SNP)
+└── noc : chi_noc_top
+    └── meshTopology | ringTopology | crossbarTopology .noc
+        : chi_mesh | chi_ring | chi_xbar
+        └── xps[*].xp : chi_xp
+            └── channelRouters[0..3].router : chi_router
+                ├── routeComputes[*] : chi_route_compute
+                └── outputArbiters[*] : chi_vc_arb
 ```
 
-Every link block is inside the product hierarchy; none of them is
-harness-only. The figures above are generated from Graphviz sources in
+Generate-block and instance names are shown as the hierarchy path shows
+them. Section 13 describes every block in this tree. Every link block is
+inside the product hierarchy; none of them is harness-only. The figures above are generated from Graphviz sources in
 `doc-src/figures/`, which `make doc` rebuilds.
 
 ## 2.8 Handshake discipline
@@ -625,7 +628,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `dmtEn` | 1 | if 1, a Home and SN-F must exist | Enables DMT at the HN-F (Section 9.14). |
 | `dmtSepEn` | 0 | needs `dmtEn` | DMT reads use `ReadNoSnpSep` and the Home's `RespSepData` instead of `ReadNoSnp` (B2.3.1.1 alt 4). |
 | `dwtEn` | 1 | if 1, a Home and SN-F must exist | Enables DWT at the HN-F for `WriteNoSnpFull` and `WriteNoSnpPtl` (Section 9.14). |
-| `atomicEn` | 1 | if 1, a Home must exist | Enables the atomic transaction path. |
+| `atomicEn` | 1 | if 1, a Home must exist | Declares that Requesters may send atomics (B16.1.1). No block reads it: the Homes execute or forward atomics whatever its value. |
 | `dvmEn` | 1 | if 1, an MN and a Requester must exist | Enables the MN sequencer. |
 | `stashEn` | 1 | if 1, RN-F and HN-F must exist | Enables stash decode, stash snoops and Data Pull. |
 | `exclEn` | 1 | if 1, a Home and monitors must exist | Enables exclusive monitors. |
@@ -2847,9 +2850,1712 @@ but may route edges and set text slightly differently. The `.docx` in
 Section numbers are written into the headings rather than generated, so that
 the cross-references in the prose stay correct in every output format.
 
-# 13 Open issues, known limitations and decisions
+# 13 RTL micro-architecture
 
-## 13.1 Known limitations
+Chapters 2 to 9 describe what the interconnect does. This chapter describes
+how the RTL does it: the state each block keeps, how its logic is divided,
+what happens in each cycle, and which configuration fields shape it.
+Chapter 14 follows complete transactions through these blocks, and
+Chapter 15 lists every module parameter and where its value comes from.
+
+Each block is described under the same headings where they apply:
+
+- **Role**: what the block is for and where it sits in the hierarchy.
+- **Structure**: the registers, arbiters and datapaths it contains.
+- **Behaviour**: what it does each cycle, in the order the logic does it.
+- **Timing**: latency and throughput.
+- **Configuration**: the `chi_cfg_t` fields and parameters that change it.
+- **Checks**: the bound assertions that guard it (Section 12.1).
+
+## 13.1 Conventions shared by every block
+
+**Clock and reset.** There is one clock, `clk`, and one synchronous
+active-low reset, `resetn` (Chapter 11). Every flop is written in an
+`always_ff @(posedge clk)` block that tests `!resetn` first, and no block
+relies on an initial block. Control state is reset. Some data storage is
+not, such as the link receive buffers and the SLC's data array. Its contents
+are used only where a reset valid bit or count says they were written.
+
+**Configuration.** Every module takes the whole configuration record `CFG`
+(`chi_cfg_t`, Section 3.1) as a parameter, together with a small number of
+structural parameters its parent computes: counts, NodeID tables and
+placements. Widths and depths are local parameters derived from `CFG` inside
+the module, so two blocks can never disagree about a width.
+`chi_cfg_check` in the product top refuses a combination that cannot work
+with `$fatal` at elaboration (Section 3.3).
+
+**Handshakes.** Every internal interface is valid/ready, and a transfer
+happens in a cycle where both are high. A valid never depends
+combinationally on the ready it is paired with. Logic that computes a
+forward signal (a valid or a payload) and logic that computes a backward
+signal (a ready) sit in separate `always_comb` blocks (Section 2.8). Where
+the two directions must be fully decoupled, the block ends in a FIFO whose
+valid and ready both depend only on its occupancy. These FIFOs are
+`chi_flit_fifo`, the crosspoint output FIFOs and the link receive buffers.
+
+**The fabric flit.** A CHI flit is packed at the node port at its configured
+width (Section 4.2). Inside the interconnect every channel carries the same
+wrapper, `chi_noc_flit_t`, defined in `chi_pkg`:
+
+| Field | Width | Meaning |
+|-------|-------|---------|
+| `channel` | 2 | REQ, RSP, SNP or DAT. |
+| `qos` | 4 | The flit's QoS field, copied out so that arbiters need not unpack the payload. |
+| `targetNodeId` | `CHI_MAX_NODEID_W` | Where the fabric delivers the flit: the SAM's target for REQ, `TgtID` for RSP and DAT, and the snooped RN-F for SNP, which has no `TgtID` field. |
+| `hops` | 8 | Crosspoint-to-crosspoint links crossed so far, for the route-length assertions. |
+| `decodeErr` | 2 | Why the Requester-side SAM refused a request (`NOC_ERR_ADDRESS`, `NOC_ERR_PAS`); the Home completes such a request with NDERR. |
+| `payload` | `CHI_MAX_NOC_PAYLOAD_W` | The packed CHI flit, aligned to bit 0. |
+
+: Table 13.1 Fields of the fabric flit `chi_noc_flit_t`
+
+`hops` and `decodeErr` are fabric bookkeeping. They never reach a node pin:
+the node port transmits only the payload.
+
+**Locations.** A Home names a cache line in a PAS by its location key,
+`{PAS, addr[addrW-1:6]}`, which is `KEY_W = addrW - 6 + 3` bits wide
+(Section 9.9). Two accesses conflict only when their keys match. The low
+`addrW - 6` bits are the line alone, which is what a physical-aliasing
+operation compares.
+
+**Identifiers.** A Home uses its entry index as the DBID it gives a
+Requester. It uses its owner index (a transaction entry or a victim entry)
+as the TxnID of every snoop and every downstream request, so no Requester's
+TxnID ever leaves the Home (Section 9.1).
+
+**Packed arrays for assertions.** Arrays that bound assertions read are
+packed, because binding an unpacked array port is not portable between
+simulators (Section 16.2). Some blocks therefore keep a packed copy of an
+unpacked table for the assertions alone.
+
+## 13.2 Packages
+
+Three packages hold every type, constant and pure function the RTL shares.
+They contain no state.
+
+### 13.2.1 `chi_cfg_pkg`
+
+`chi_cfg_pkg` defines the configuration record `chi_cfg_t` and its default
+`CHI_CFG_DEFAULT` (Section 3.1), the global width limits, and the
+enumerations the configuration uses:
+
+| Type | Values | Used by |
+|------|--------|---------|
+| `chi_topology_e` | `CROSSBAR`, `RING`, `MESH_2D` | the fabric wrappers and route compute |
+| `chi_cfg_access_e` | `CFG_PARAM_ONLY`, `CFG_APB`, `CFG_CHI_MMIO` | the configuration plane (Chapter 7) |
+| `chi_sam_region_kind_e` | `SAM_REGION_HNF_HASH`, `SAM_REGION_DIRECT`, `SAM_REGION_MMIO` | the SAM |
+| `chi_slc_repl_e` | `SLC_REPL_PLRU`, `SLC_REPL_RRIP`, `SLC_REPL_RANDOM` | SLC victim choice |
+| `chi_slc_incl_e` | `SLC_NON_INCLUSIVE`, `SLC_EXCLUSIVE_OF_RNF` | whether a line an RN-F receives leaves the SLC |
+| `chi_slc_alloc_e` | `SLC_ALLOC_HINT`, `SLC_ALLOC_CACHEABLE` | when a line is allocated into the SLC |
+| `chi_gpc_mode_e` | `GPC_NONE`, `GPC_TABLE`, `GPC_WALK` | the Granule Protection Check |
+| `chi_excl_mon_mode_e` | `EXCL_PER_LP`, `EXCL_POOL` | the exclusive monitors |
+| `chi_hnf_snf_map_e` | `HNF_SNF_MAP_MODULO`, `HNF_SNF_MAP_TABLE` | HN-F to SN-F pairing |
+
+: Table 13.2 Enumerations of `chi_cfg_pkg`
+
+A SAM region's attributes are one 12-bit field, built by `samAttributes`
+and read by `samAllowedPas`:
+
+| Bits | Field |
+|------|-------|
+| `[0]` | Valid. A region with this bit clear matches nothing. |
+| `[1]` | Reserved, must be 0. It was the Secure-only bit before Issue H. |
+| `[3:2]` | Kind: `00` HNF_HASH, `01` DIRECT, `10` MMIO, `11` reserved. |
+| `[11:4]` | Allowed PASs: bit `p` allows the PAS whose encoding is `p`. |
+
+: Table 13.3 SAM region attribute field (`CHI_SAM_ATTR_W` = 12)
+
+The package also defines the run-time policy record of one HN-F, written
+over APB (Table 7.1b), and the width limits every other package builds on:
+NodeID 7 to 16 bits, address 44 to 52 bits, TxnID 8 to 12 bits.
+
+### 13.2.2 `chi_pkg`
+
+`chi_pkg` holds the protocol types and the functions every block shares.
+
+**Flit records.** `chi_req_flit_t`, `chi_rsp_flit_t`, `chi_snp_flit_t` and
+`chi_dat_flit_t` are packed records with every Issue H field at its widest
+legal size. A block always works on these records. The functions
+`packReqFlit` and `unpackReqFlit`, and their RSP, SNP and DAT counterparts,
+convert between a record and the flit as it appears on the pins. They place
+only the fields the configuration enables, each at its configured width.
+Examples are MPAM, PBHA, MECID or StreamID, and `RSVDC` at `rsvdcW` bits.
+So `reqFlitWidth(CFG)`, `rspFlitWidth(CFG)`, `snpFlitWidth(CFG)` and
+`datFlitWidth(CFG)` equal the Issue H totals of B13.9 for that
+configuration. Fields that CHI overlays share one record field and are named
+for every meaning, for example `returnNidOrStashNidOrDataTarget`.
+
+**Protocol enumerations.** Opcodes for each channel, `Resp`, `RespErr`, the
+`Order` field, tag operations, DVM types, and the PAS:
+
+| Encoding | PAS | Legal when |
+|----------|-----|-----------|
+| `000` | Secure | always |
+| `001` | Non-secure | always |
+| `010` | Root | `rmeEn` |
+| `011` | Realm | `rmeEn` |
+| `100` | System Agent | `rmeEn` and `gdiEn` |
+| `101` | Non-secure Protected | `rmeEn` and `gdiEn` |
+| `110`, `111` | reserved | never |
+
+: Table 13.4 PAS encodings and `pasLegalMask` (IHI 0050H Table B13.47)
+
+**NodeIDs and placement.**
+- `encodeXpNodeId`, `nodeIdXpIndex`, `nodeIdDevicePort`, `nodeIdDeviceId`,
+  `nodeIdMeshX` and `nodeIdMeshY` are the only place the NodeID layout of
+  Section 5.2 is written down.
+- `autoPlacements` computes the default placement of Section 5.3.
+- `classOffset` and `classCount` give the node ordinal space of
+  Section 2.2.
+- `snfIndexOfHnf` gives the SN-F each HN-F is paired with.
+
+**Error protection.** `secdedEncode` and `secdedDecode` implement the 72/64
+SECDED code used by the snoop filter, the SLC and the GPT cache. 64 data bits
+carry 8 check bits; a single-bit error is corrected and a double-bit error is
+detected.
+
+**Data helpers.** `datIdStep` gives the DataID step per packet for the data
+width. `datLastDataId` and `datLastPacket` tell when the last packet of a
+transfer has arrived.
+
+**GPC helpers.** `gpiPermits` checks a 4-bit GPI against a PAS.
+`gpcGranuleShift`, `gpcPpsBits` and `gpcL0Bits` decode the GPCCR fields the
+walker needs (Section 9.11).
+
+### 13.2.3 `chi_hnf_pkg`
+
+`chi_hnf_pkg` holds the HN-F's private vocabulary:
+
+- **Entry phases.** `PH_FREE`, `PH_WAIT`, `PH_RUN` and `PH_RETIRE`
+  (Section 13.6.4).
+- **Transaction kinds.** `chi_hnf_kind_e` sorts every opcode into one of 12
+  kinds, and the transaction plan is chosen per kind (Table 13.13).
+- **CMO classes.** `chi_hnf_cmo_e` names the cache maintenance an opcode
+  carries, standalone or combined with a write.
+- **Error causes.** `chi_hnf_err_e`: none, unmapped address, PAS refused,
+  GPC fault, unsupported opcode.
+- **Downstream operations.** `chi_hnf_dn_e`: read, write, CMO and atomic.
+- **PMU events.** The indices of the 16 HN-F events (Section 9.16).
+- **Helpers.** The functions that decode opcodes into kinds (`hnfKind`,
+  `hnfCmo`) and compute DataCheck word errors (`dataCheckWords`).
+
+## 13.3 Link layer
+
+![Fig 13.1 `chi_link_port` for a Requester port. Each received channel has a receive buffer that issues L-Credits; each transmitted channel has a credit counter and sends only while it holds a credit.](figures/chi_link_port.png){width=100%}
+
+### 13.3.1 `chi_link_port`
+
+**Role.** One instance sits between every external node's `chi_if` and the
+fabric. It turns the node's credited link (B13, B14) into the internal
+valid/ready handshake. HN-F, HN-I and MN are internal and have no link port.
+
+**Structure.** The port has one `chi_link_rx` per channel it receives and
+one `chi_link_tx` per channel it transmits:
+
+| Port kind | Receives from the node | Transmits to the node |
+|-----------|------------------------|-----------------------|
+| Requester (RN-F, RN-D, RN-I) | REQ, RSP, DAT | RSP, SNP, DAT |
+| Subordinate (SN-F, SN-I) | RSP, DAT | REQ, RSP, DAT |
+
+: Table 13.5 Channels of a link port
+
+Activation belongs to a link direction, not to a channel (B13.5). So the
+port combines the per-channel activation outputs of one direction with an
+OR onto the shared `LINKACTIVEREQ` or `LINKACTIVEACK`:
+- Every channel of a direction leaves STOP in the same cycle, so the OR
+  behaves as an AND while the link activates.
+- During deactivation, the OR keeps the handshake asserted until the last
+  channel has given back its credits.
+
+The interconnect activates its own transmit links as soon as reset is
+released and keeps them running. No block asserts deactivation
+(Section 16.1, item 11).
+
+**Status.** `linkUp`, `parityError` and `creditError` leave the port per
+node ordinal. A credit error is a counter overflow or underflow, or a flit
+that arrived when its receive buffer was full. The port also carries
+`SYSCOREQ` and `SYSCOACK` to and from `chi_sysco` (Section 13.10.2).
+
+### 13.3.2 `chi_link_fsm`
+
+**Role.** The activation state machine of one channel in one direction
+(B14.5).
+
+**Structure.** Two state bits: STOP, ACTIVATE, RUN, DEACTIVATE. The
+`INITIATOR` parameter selects the transmit-side behaviour (the side that
+drives `LINKACTIVEREQ`) or the receive side (the side that drives
+`LINKACTIVEACK`).
+
+| State | Transmit side (`INITIATOR` = 1) leaves when | Receive side leaves when |
+|-------|---------------------------------------------|--------------------------|
+| STOP | `activate`, to ACTIVATE | the peer raises `LINKACTIVEREQ`, to ACTIVATE |
+| ACTIVATE | the peer acknowledges, to RUN; or `deactivate`, to DEACTIVATE | at once: to RUN, or to DEACTIVATE if the peer has dropped its request |
+| RUN | `deactivate`, to DEACTIVATE | the peer drops `LINKACTIVEREQ`, to DEACTIVATE |
+| DEACTIVATE | every credit returned and the peer's acknowledge low, to STOP | buffer empty and every issued credit back, to STOP |
+
+: Table 13.6 Link activation state machine
+
+`linkActive` is high in ACTIVATE and RUN. On the receive side it also stays
+high in DEACTIVATE until the credits are quiescent, which keeps the
+acknowledge asserted while credits are still in flight. `linkRun` is high in
+RUN only.
+
+### 13.3.3 `chi_link_rx`
+
+**Role.** Receives one channel from the node, buffers it, and issues
+L-Credits for the buffer space (B14.2).
+
+**Structure.**
+- A receive FIFO of `LCRD_DEPTH` entries (`lcrdDepth`, at least 2), with
+  read and write pointers and a count.
+- `pendingCredits`: credits owed to the peer and not yet sent.
+- `peerCredits`: credits the peer holds and has not spent.
+- A receive-side `chi_link_fsm`.
+
+**Behaviour.**
+- **Issuing credits.** On the first cycle of RUN, `pendingCredits` is loaded
+  with `LCRD_DEPTH`: one credit for every buffer slot. `LCRDV` is high while
+  the link runs and a credit is owed, so the credits go out one per cycle.
+  Every flit delivered upstream frees a slot and adds one owed credit.
+  Credits stop as soon as the link leaves RUN, which B14.5.1 permits.
+- **Accepting flits.** A flit is accepted whenever `LINKACTIVEACK` is high,
+  in DEACTIVATE as well as in RUN. A transmitter may still have a flit in
+  flight when it drops `LINKACTIVEREQ`, and its LCrdReturn flits arrive only
+  after that.
+- **LCrdReturn.** A flit whose Opcode field is zero is an LCrdReturn
+  (B13.11). It hands a credit back: it is neither buffered nor delivered,
+  and earns no replacement credit. The Opcode bits are located with a mask
+  computed from the configuration, because their position depends on the
+  NodeID width.
+- **Returning to STOP.** `peerCredits` rises with every `LCRDV` and falls
+  with every accepted flit. The state machine may return to STOP only when
+  the buffer is empty and `peerCredits` is zero (B14.6).
+- **Parity.** With `parityEn`, every byte of `FLIT` is checked against its
+  bit of the check field. A mismatch is registered as `parityError` for the
+  flit that carried it. The polarity used is even; Section 16.1 records that
+  B9.3.1 requires odd.
+- **Overflow.** A flit that arrives while the buffer is full is a credit
+  protocol violation by the peer. It is not stored and raises
+  `bufferOverflow`.
+
+**Timing.** A flit is written into the buffer at the clock edge after it
+arrives and is offered upstream from the next cycle, so the receive side
+adds one cycle. The buffer drains at one flit per cycle. With credits
+returned as fast as slots free, a channel sustains one flit per cycle when
+`lcrdDepth` covers the credit round trip.
+
+### 13.3.4 `chi_link_tx` and `chi_lcrd_mgr`
+
+**Role.** `chi_link_tx` sends one channel to the node. `chi_lcrd_mgr` counts
+the credits it holds.
+
+**Structure.** `chi_link_tx` has no buffer: the flit it sends comes straight
+from the upstream source, which is always registered. That source is a
+crosspoint output FIFO or an endpoint output FIFO. Its state is a
+`chi_lcrd_mgr` and an initiator-side `chi_link_fsm`. `chi_lcrd_mgr` is a
+saturating counter of `LCRD_DEPTH + 1` values:
+- It adds one for every `LCRDV` received.
+- It subtracts one for every flit sent.
+- It flags `overflow` beyond `LCRD_DEPTH` and `underflow` below zero.
+
+**Behaviour.**
+- **Sending.** `internalReady` is high only while the link runs and a credit
+  is held. A flit is therefore sent (`FLITV`) in the same cycle as the
+  internal handshake, and spends one credit.
+- **Deactivation.** In DEACTIVATE, every credit still held is returned with
+  an LCrdReturn flit, all zero, one per cycle (B13.11). The state machine
+  reaches STOP once the count is zero and the peer has dropped its
+  acknowledge.
+- **Holding off deactivation.** A requested deactivation waits until no
+  flit is pending, so the protocol side drains first.
+- **Parity.** With `parityEn`, each bit of the check field is generated as
+  the XOR of its byte.
+- **Lanes.** The `REPL_CHANNELS` lane selection exists, but only one channel
+  replica is supported (Section 16.1, item 1).
+
+**Timing.** `chi_link_tx` adds no cycle. A flit leaves on the same cycle its
+upstream FIFO offers it, if a credit is held.
+
+## 13.4 System address map
+
+### 13.4.1 Where the SAM sits
+
+The top builds one Requester-side SAM per Request Node port, in the generate
+block `requester_sam[i]`. A received REQ flit is unpacked, and its address
+and PAS go through `chi_sam` and `chi_prefetch_map` in the same cycle. The
+top then chooses the routing target with a fixed precedence, last rule
+winning:
+
+1. The SAM's target.
+2. A `DVMOp` goes to the MN.
+3. A `PrefetchTgt` goes to the SN-F that `chi_prefetch_map` names (B3.3.1).
+4. A `PCrdReturn`, or any request with `AllowRetry` = 0, keeps the `TgtID`
+   the Requester put in it. A P-Credit belongs to the Home that granted it,
+   and a region table edited between the `RetryAck` and the replay must not
+   redirect the replay.
+5. An address no region maps goes to the first HN-I when there is no HN-F to
+   hash to.
+
+The top also records a `decodeErr` for every request except `DVMOp`,
+`PrefetchTgt` and `PCrdReturn`. It then writes the chosen target into the
+request's `TgtID` and into `targetNodeId`, copies QoS, and offers the
+wrapped flit to the QoS regulator (Section 13.5.7).
+
+Every Requester-side SAM receives the same region updates from the
+configuration plane, so all of them hold the same table. The HN-I holds one
+more `chi_sam`, without hashing, to find the SN-I behind a region.
+
+### 13.4.2 `chi_sam`
+
+**Structure.** `NUM_REGIONS` region registers, each a base, an inclusive
+limit, a target and the attribute field of Table 13.3. Reset loads them from
+the `REGION_*` parameters. `regionUpdate` overwrites one region per cycle
+with the committed values (Section 7.1).
+
+**Behaviour.** The lookup is combinational and searches the regions in
+ascending index order. The first valid region with
+`base <= address <= limit` is the match:
+
+- **Matched.** `unmappedError` is low. `pasError` is high when the region's
+  allowed PASs, masked with `pasLegalMask`, exclude the request's PAS. A PAS
+  refusal never falls through to a lower-priority region. The target is the
+  hashed HN-F for an HNF_HASH region in a hashing SAM, and the region's
+  `TARGET` otherwise.
+- **Unmatched.** `unmappedError` is high. A hashing SAM still names the
+  HN-F the hash picks, so that Home can complete the request with NDERR.
+
+**Timing.** Combinational; the lookup adds no cycle.
+
+### 13.4.3 `chi_hn_hash` and `chi_prefetch_map`
+
+`chi_hn_hash` picks the HN-F for a hashed address. Both blocks take the
+granule number of the address, `granule = address >> log2(interleaveGranule)`:
+
+```
+hnf index    = (granule XOR (granule >> hnHashShift)) mod numHnf
+target       = HN_NODE_IDS[hnf index]
+```
+
+The modulo is by a constant, so any positive `numHnf` works.
+`chi_prefetch_map` interleaves the same granule number straight across the
+SN-Fs, `snf index = granule mod numSnf`. It deliberately does not follow the
+HN-F hash, because B3.3.1 gives `PrefetchTgt` its own mapper. Section 6.3
+works an example.
+
+## 13.5 Fabric
+
+![Fig 13.2 One channel of one crosspoint (`chi_router`). Every input computes its route; every output arbitrates among the inputs routed to it and ends in a two-entry FIFO.](figures/chi_xp_router.png){width=100%}
+
+### 13.5.1 Layers of the fabric
+
+| Level | Module | Count |
+|-------|--------|-------|
+| Transport top | `chi_noc_top` | one |
+| Topology wrapper | `chi_mesh`, `chi_ring` or `chi_xbar` | one, chosen by `topology` |
+| Crosspoint | `chi_xp` | `meshX * meshY`, or `numXp` |
+| Channel router | `chi_router` | four per crosspoint: REQ, RSP, SNP, DAT |
+| Route compute | `chi_route_compute` | one per router input |
+| Output arbiter | `chi_vc_arb` | one per router output |
+| Output FIFO | inside `chi_router` | one per router output, `OUT_DEPTH` = 2 entries |
+
+: Table 13.7 Structure of the fabric
+
+The four channels are four separate networks. They share nothing below
+`chi_xp`, so a blocked channel can never hold up another (Section 5.6).
+
+### 13.5.2 `chi_noc_top`
+
+**Role.** Maps the node ordinal space (Section 2.2) onto crosspoint device
+ports and instantiates the topology wrapper.
+
+**Behaviour.**
+- **Placement.** Each node `n` has a placement `{xp, devicePort}`
+  (Section 5.3). Four `always_comb` blocks connect node `n`'s REQ, RSP, SNP
+  and DAT inputs and outputs to that device port: device inputs forward,
+  node outputs forward, device outputs ready, node inputs ready. Keeping the
+  four apart means no block reads a ready to compute a valid.
+- **`POPULATED` map.** At elaboration the block builds a bitmap with one bit
+  per `xp * NUM_DEV_PORTS + devicePort`, set where a node is attached. Every
+  route compute uses it to tell a real destination from an empty port.
+- **Outputs.** It reports `routeError` when any crosspoint dropped an
+  unroutable flit, and `fabricBusy` when any crosspoint output FIFO is
+  occupied, for quiescence (Section 7.1). `xpInjected` and `xpEjected`
+  count flits per crosspoint per channel in this cycle, for the PMU.
+
+**Timing.** Wiring only; it adds no cycle.
+
+### 13.5.3 Topology wrappers
+
+The wrappers only wire crosspoints together; none contains routing logic.
+Each connects crosspoint `a`'s network output to crosspoint `b`'s network
+input, and `b`'s input ready back to `a`'s output ready. Unused boundary
+ports are tied off, valid low and ready low.
+
+| Wrapper | Crosspoint index | Network ports |
+|---------|------------------|---------------|
+| `chi_mesh` | `xp = y * meshX + x` | 0 north (`y+1`), 1 south (`y-1`), 2 east (`x+1`), 3 west (`x-1`); boundary ports tied off |
+| `chi_ring` | `xp` | 0 clockwise, to `xp+1`; 1 counter-clockwise, to `xp-1`; both modulo `numXp` |
+| `chi_xbar` | `xp` | `numXp - 1` ports; port `p` leads to crosspoint `p` when `p < xp`, else to `p+1` |
+
+: Table 13.8 Network port numbering per topology
+
+Each wrapper drives `busy` high when any output FIFO of any of its
+crosspoints holds a flit. Links between crosspoints are wires, so every flit
+inside the fabric is in some output FIFO, and `busy` low means the fabric
+holds nothing.
+
+### 13.5.4 `chi_xp`
+
+`chi_xp` is one crosspoint: four `chi_router` instances, one per channel.
+Ports `0` to `NUM_NET_PORTS - 1` are network ports and the remaining
+`numDevPortsPerXp` ports are device ports. The block re-derives the
+configuration with the wrapper's topology, so the route rule and the NodeID
+layout always agree. For a ring it sets `BUBBLE_FLOW` in every router.
+
+### 13.5.5 `chi_router`
+
+**Role.** One channel of one crosspoint: `NUM_PORTS` inputs, `NUM_PORTS`
+outputs.
+
+**Structure.**
+- One `chi_route_compute` per input, giving a one-hot output vector and a
+  `routeValid` bit.
+- One `chi_vc_arb` per output.
+- One `OUT_DEPTH`-entry FIFO per output: storage, read and write pointers,
+  and a count.
+
+**Behaviour.**
+1. **Route.** Every input with a flit computes its output from the flit's
+   `targetNodeId`.
+2. **Request and eligibility.** Input `i` requests output `o` when it is
+   valid and routed to `o`. The request is eligible when `o`'s FIFO has a
+   free entry. With `BUBBLE_FLOW`, a device input asking for a network
+   output needs two free entries, which is the ring's bubble rule
+   (Section 5.6).
+3. **Arbitrate.** Each output's arbiter grants at most one eligible input.
+4. **Push.** The granted flit is written into the output FIFO at the clock
+   edge. A flit that leaves on a network port has `hops` incremented.
+5. **Ready.** An input is ready when an output granted it. Grants are
+   already masked by FIFO space, so a grant is always taken.
+6. **Drop.** An input with a flit but no route (`routeValid` low) is made
+   ready at once, and the flit is discarded and reported on `routeError`.
+   Holding it would block the input forever.
+7. **Present.** An output is valid when its FIFO is not empty, and offers
+   the FIFO's head.
+
+No input ready depends on an output ready. The forward block (request,
+eligibility, payload) and the backward block (input ready) are separate
+`always_comb` blocks, and the FIFO isolates the downstream handshake.
+
+**Timing.** A flit presented at an input in cycle `t` is arbitrated in cycle
+`t` and appears at the output FIFO head in cycle `t + 1`. A crosspoint
+therefore costs one cycle per hop (Section 5.5). Two entries per output let
+a single input stream one flit per cycle through a free output. The output
+pops its head in the same cycle the push of the next flit is granted.
+
+### 13.5.6 `chi_route_compute` and `chi_vc_arb`
+
+**`chi_route_compute`** is combinational. It reads the destination
+crosspoint and device port out of `targetNodeId`, checks that the
+destination exists and that `POPULATED` has a node there, and then picks
+the output:
+
+- **Destination is this crosspoint.** The output is the destination's
+  device port.
+- **`MESH_2D`.** East while the destination X is greater, west while it is
+  smaller, then north or south. For a mesh whose `meshX` is not a power of
+  two, an X field beyond the last column is treated as having no route.
+  Otherwise it would alias a crosspoint in the next row.
+- **`RING`.** Port 0, clockwise, when the clockwise distance
+  `(dest - here) mod numXp` is at most half the ring; port 1 otherwise.
+- **`CROSSBAR`.** The direct link to the destination crosspoint.
+
+**`chi_vc_arb`** arbitrates one output. Per input it keeps an age counter of
+`log2(AGE_LIMIT + 1)` bits. Shared state is a round-robin pointer and a
+lock.
+
+1. **Candidates.** An input is a candidate when it requests the output and
+   is eligible.
+2. **Aged candidates first.** If any candidate's age has reached
+   `AGE_LIMIT`, only aged candidates compete, round-robin from the pointer,
+   and QoS is ignored. This bounds how long any input can be passed over.
+3. **Otherwise QoS.** The highest QoS value wins. Among equal QoS, the first
+   candidate at or after the round-robin pointer wins.
+4. **Ageing.** An input's age counter rises every cycle it requests and is
+   not granted, including cycles in which it is ineligible. It saturates at
+   `AGE_LIMIT` and clears when the input stops requesting or is granted. A
+   ring injection held back by the bubble rule therefore keeps its age and
+   is served first when space appears.
+5. **Pointer.** After a grant the pointer moves to the input after the
+   winner.
+
+The arbiter can hold a grant that was not taken (`locked`). The router ties
+`ready` high, because grants are already masked by FIFO space, so the lock
+never engages inside the fabric.
+
+### 13.5.7 Endpoint FIFOs and the QoS regulator
+
+**`chi_flit_fifo`.** A Home or MN never drives the fabric directly. Each
+output channel ends in a two-entry `chi_flit_fifo`:
+- `pushReady` depends only on the count.
+- `outValid` is the count being non-zero.
+- `outFlit` is the head.
+
+An endpoint can therefore push one flit per cycle without seeing the
+fabric's ready. The HN-F has four, for REQ, RSP, SNP and DAT. The HN-I has
+three, for REQ, RSP and DAT. The MN has two, for RSP and SNP.
+
+**`chi_qos_reg`.** Every Request Node port's REQ path passes through one
+token bucket before it enters the fabric:
+- **Tokens.** Each port has a token count and an 8-bit fraction. Every cycle
+  the fraction gains `rate`, and each carry out of the fraction adds a whole
+  token. So `rate` tokens arrive every 256 cycles.
+- **Bucket.** The count is capped at `burst`, and a bucket above a lowered
+  `burst` is cut to it the next cycle.
+- **Spending.** A REQ flit passes only by taking a token. Valid towards the
+  fabric is `inValid && tokens != 0`, and the input ready is
+  `outReady && tokens != 0`, so neither direction depends on the other.
+- **Holding back.** A port without a token holds its REQ in the link
+  receive buffer. That back-pressures the Requester through L-Credits, and
+  a response never waits for it.
+- **Programming.** `rate` and `burst` come from the APB QoS block
+  (Table 7.1e), or from `qosRegRate` and `qosRegBurst` without APB.
+- **Disabled.** With `qosRegEn` = 0 every flit passes and the bucket is idle.
+
+**Timing.** The regulator adds no cycle; it only gates.
+
+## 13.6 HN-F: `chi_hnf_top`
+
+The coherent Home is the largest block, and it is where the Point of
+Serialization and the Point of Coherence live. Section 13.6.1 explains those
+two terms and how the RTL realizes them. The sections after it follow a
+request through the HN-F stage by stage, then describe each storage
+structure.
+
+### 13.6.1 Point of Serialization and Point of Coherence
+
+CHI names several points in the memory system (B1.3). Two of them define
+what a Home is for, and B1.6 expects an HN-F to provide both:
+
+- The **Point of Serialization (PoS)** is where the order between requests
+  from different agents is decided. Once two requests to one location have
+  passed the PoS, every agent observes their effects in that order.
+- The **Point of Coherence (PoC)** is where every agent that can access
+  memory sees the same copy of a location. The PoC snoops the RN-F caches
+  that may hold a copy, combines their responses, and gives the Requester a
+  single completion.
+
+| Point | Where it is in this design | What makes it so in the RTL |
+|-------|----------------------------|-----------------------------|
+| PoS | The HN-F that owns the location. Each location has exactly one owning HN-F at a time. | The SAM sends every request for a location to one Home. `chi_pos` records the arrival order of each request at allocation, and `chi_hazard` lets requests to one location start only in that order. The region table changes only on a quiescent fabric, so ownership never moves while a request is in flight (Section 7.1). |
+| PoC | The same HN-F. | The snoop filter records every RN-F that may hold the line. An entry snoops those copies and gathers their data before it completes. The SLC is inside the PoC, so a write the SLC keeps is complete once the Home holds it. |
+| PoP, Point of Persistence | Below the Home, at the SN-F. | `CleanSharedPersist` and `CleanSharedPersistSep` are forwarded to the SN-F after any Dirty data has been written there (B4.2.2.2.2). |
+| PoPA, Point of Physical Aliasing | Below the Home, at memory. | `CleanInvalidPoPA` cleans its line in every PAS from the RN-F caches and the SLC, then is forwarded to the SN-F (Section 9.9). |
+| PoE, Point of Encryption | Not modelled. | MECID is carried only (Section 1.3). |
+
+: Table 13.9 Points of the memory system and where this design places them
+
+**How the PoS orders requests.** An accepted REQ flit is written into a free
+`chi_pos` entry in the cycle it is accepted. That cycle is the request's
+place in the order. `chi_pos` does not keep a sequence number. Instead it
+records, for the new entry, which entries were already active: the age
+matrix, Section 13.6.4. `chi_hazard` then lets an entry start only when no
+older active entry holds the same location. So requests to one location run
+one at a time in arrival order, while requests to different locations run in
+parallel, up to `posEntries` of them. A request that finds its location busy
+is not refused. It is allocated and waits, so it neither blocks the REQ
+input nor loses its place.
+
+Other consequences of the PoS:
+- **Ordered reads.** Allocation is the ordering point, so the HN-F sends
+  `ReadReceipt` for an ordered `ReadNoSnp` or `ReadOnce*` as soon as the
+  request is allocated (B2.7.5.1).
+- **Early completion of writes.** When nothing needs snooping and the write
+  allows Early Write Acknowledge, the HN-F combines Comp with the data
+  request in one `CompDBIDResp` (B2.3.2.1). It can do so because the order is
+  already fixed.
+- **Endpoint Order.** Its order across HN-Fs is kept by the tickets of
+  `chi_eo_order` (Section 9.5, Section 13.10.3).
+
+**How the PoC keeps copies coherent.** The PoC works in five steps:
+1. **Look up.** When an entry starts, it reads the directory once, in the
+   same cycle (Section 13.6.6).
+2. **Plan.** The plan lists the RN-Fs that must be snooped and with which
+   snoop.
+3. **Snoop.** The snoops go out, and the entry collects every response
+   before completing (B4.11.2).
+4. **Merge.** Dirty data from a Snoopee is merged into the entry's line
+   buffer and either passed to the Requester or written back.
+5. **Record.** At retirement the entry writes the new sharer set and owner
+   into the directory.
+
+Because only one entry per location runs at a time, the directory state an
+entry reads at its start stays true until it writes it back. So the PoC
+needs no further locking.
+
+### 13.6.2 Structure and owners
+
+![Fig 13.3 Life of a POS entry. A request is allocated in PH_WAIT, starts once chi_hazard, the GPC and its Endpoint Order ticket allow, runs its obligations in PH_RUN, and frees after its directory and SLC updates.](figures/chi_hnf_entry.png){width=90%}
+
+Figure 2.2 shows the sub-blocks. Their state is organized around
+**owners**. An owner is anything that can snoop, hold a line buffer, or
+have an operation in flight to the SN-F:
+
+| Owner index | Owner | Count |
+|-------------|-------|-------|
+| `0` to `posEntries - 1` | transaction entries (POS) | `posEntries` |
+| `posEntries` to `posEntries + 1` | victim-buffer entries | `VICTIM_DEPTH` = 2 |
+| `posEntries + 2` | the GPT walker's read, with `gpcMode` WALK | 1 |
+
+: Table 13.10 Owner index space of one HN-F
+
+The owner index is the TxnID of a snoop and of a downstream request. A
+response or data packet therefore finds its owner directly from its TxnID.
+
+| Sub-block | Instance | What it holds |
+|-----------|----------|---------------|
+| Transaction table | `chi_pos` | per entry: active, started, location key, Requester, TxnID, opcode, Order; the age matrix |
+| Per-entry state | `entry[]` in `chi_hnf_top` | the obligation record of Section 13.6.5 |
+| Hazard check | `chi_hazard` | combinational; no state |
+| Directory | `chi_snoop_filter` | `snpFilterEntries` ways in `snpFilterWays`-way sets |
+| System Level Cache | `chi_slc`, with `slcEn` | `slcSizePerHnf` bytes of 64-byte lines |
+| Victim buffer | `victim[]` in `chi_hnf_top` | 2 entries: key, snoop vectors, write-back state |
+| Line buffers | `bufData[]` and masks | one 64-byte buffer per owner, three byte-valid masks, Poison per 64-bit word |
+| Snoop scheduler | `chi_snp_gen` | round-robin pointer, outstanding count |
+| Downstream trackers | `chi_sn_tracker` | one tracker per owner, plus one for the GPT walker |
+| Retry credits | `chi_retry` | owed grants per Requester and credit type |
+| Exclusive monitor | `chi_excl_mon` | one bit per LP, plus address monitors |
+| Atomic ALU | `chi_atomic_alu` | combinational, 64-bit |
+| Stash decode | `chi_stash_ctrl` | combinational |
+| Output stages | four `chi_flit_fifo` | REQ to the SN-F, RSP, SNP, DAT; two entries each |
+
+: Table 13.11 HN-F sub-blocks and their state
+
+### 13.6.3 Admission
+
+At most one REQ flit is offered to the HN-F per cycle, and the admission
+logic decides in that cycle what happens to it:
+
+1. **Drop.** `PCrdReturn` and `PrefetchTgt` are accepted and discarded.
+   `PCrdReturn` hands a P-Credit back to `chi_retry`, and `PrefetchTgt` has
+   no response (B2.10.2.1).
+2. **Allocate.** The request is allocated when `chi_pos` has an entry it
+   may use. A request with `AllowRetry` = 1 may not take one of the entries
+   held in reserve for granted P-Credits; a request re-sent on a P-Credit may
+   (Section 9.4).
+3. **Retry.** With no entry it may use, the request is answered with
+   `RetryAck`, if the RSP output stage has room, and consumed. `chi_retry`
+   records that the Requester is owed a `PCrdGrant` of the credit type for
+   the request's class. The classes are atomics; writes; allocating reads,
+   dataless requests, CMOs and `StashOnce`; and every other request.
+4. **Hold.** Only a request from a node outside the Requester list, or one
+   claiming a P-Credit never granted, cannot be retried. It is held with
+   back-pressure (Section 16.1, item 12).
+
+Because steps 1 to 3 always consume the request, the REQ input never waits
+on anything inside the Home (Section 9.7).
+
+On allocation the entry is initialized in `PH_WAIT` with:
+- **The request.** The decoded request, its kind (Table 13.13) and its CMO
+  class.
+- **An error cause, decided now.** The SAM's `decodeErr` or an illegal PAS
+  gives `HNF_ERR_ADDRESS` or `HNF_ERR_PAS`. An opcode the HN-F does not
+  accept gives `HNF_ERR_UNSUPPORTED`. A request with an error is still
+  allocated: it completes with NDERR in its normal message structure and
+  touches nothing else.
+- **The GPC check.** The request is checked in the cycle it is allocated
+  (Section 13.7). A cached answer arrives in the same cycle, and a failure
+  sets `HNF_ERR_GPC`. A missing answer sets `gpcPending`, and the entry is
+  re-presented to the GPC in later cycles, round-robin among pending
+  entries, until the answer exists.
+- **`ReadReceipt`.** It is marked owed for an ordered `ReadNoSnp` or
+  `ReadOnce*`.
+- **An Endpoint Order ticket.** An Endpoint-ordered request from a known
+  Requester takes one with `eoAcrossHnf` (Section 13.10.3).
+
+### 13.6.4 The transaction table: `chi_pos`
+
+`chi_pos` holds the identity of every transaction: active and started bits,
+location key, Requester, TxnID, opcode and Order. It also holds a
+`posEntries` x `posEntries` age matrix.
+
+- **Allocation.** A new request takes the lowest free index. `allocReady`
+  is high when a free entry exists that the request may use, that is, a free
+  entry beyond the reserved ones unless the request is credited.
+  `freeCount` and `unreservedCount` feed the retry logic.
+- **Age matrix.** `older[i][j]` = 1 means entry `j` was already active when
+  entry `i` was allocated. On allocation, row `i` is loaded with the active
+  set, less any entry freeing in the same cycle, and column `i` is cleared in
+  every row. So a reused index is never mistaken for an older transaction.
+  "Older" is exact for any interleaving of allocations and frees, without a
+  counter.
+- **Start and free.** `startMask` sets `started` for the entry that starts
+  this cycle. `freeMask` clears `active` and `started` for entries that
+  retire this cycle.
+
+The per-entry protocol state lives beside the table in `chi_hnf_top`, at the
+same index, and moves through four phases:
+
+| Phase | Meaning | Leaves when |
+|-------|---------|-------------|
+| `PH_FREE` | unused | a request is allocated: `PH_WAIT` |
+| `PH_WAIT` | allocated, not started | it is chosen to start: `PH_RUN` |
+| `PH_RUN` | started; obligations in progress | every obligation is met (`eAllDone`): `PH_RETIRE` |
+| `PH_RETIRE` | obligations met; directory or SLC update outstanding | both updates done: `PH_FREE` |
+
+: Table 13.12 Phases of a POS entry
+
+### 13.6.5 Hazards and the start condition: `chi_hazard`
+
+`chi_hazard` is combinational. For every entry it computes `mayStart`, which
+is false when any of the following holds:
+
+- **Line hazard.** An older active entry has the same location key. When
+  either entry is a physical-aliasing CMO, the same line in any PAS counts.
+- **Order hazard.** The entry is Endpoint-ordered and an older active entry
+  from the same Requester carries any Order. This keeps Endpoint Order among
+  this Home's requests.
+- **Victim hazard.** A victim entry is evicting the location, or the line in
+  any PAS for a physical-aliasing CMO.
+
+`chi_hnf_top` adds three conditions of its own. The entry must be in
+`PH_WAIT`, its GPC answer must be known (`!gpcPending`), and its Endpoint
+Order ticket must be the one served (`!eoBlocked`). An entry that meets all
+of them is a start candidate.
+
+### 13.6.6 Start: the directory lookup and the plan
+
+**One start per cycle.** One start candidate is chosen per cycle,
+round-robin from a pointer. Its location key drives the snoop filter's
+lookup port, the SLC's lookup port and the exclusive monitor's commit, all
+combinational and all in the same cycle. Two cases divert the start:
+
+- **Alias eviction.** A physical-aliasing CMO whose line is in the
+  directory under another PAS evicts that alias to the victim buffer, one
+  per cycle, instead of starting. It starts once no alias is left.
+- **SLC flush.** An entry that must bypass the SLC flushes the SLC's line
+  first, through the update port. Such an entry is a CMO, a write with CMO,
+  `ReadOnceCleanInvalid` or `ReadOnceMakeInvalid`, or a Non-cacheable access.
+
+**The plan.** Otherwise the entry moves to `PH_RUN`, and the start logic
+writes its whole plan into the entry in that cycle. The plan is computed
+from the request kind, the directory snapshot (hit, sharer vector, owner),
+the SLC hit and its dirty bit, the exclusive outcome and the stash decode:
+
+| Kind (`chi_hnf_kind_e`) | Requests | Snooped at start | Owed to the Requester |
+|-------------------------|----------|------------------|-----------------------|
+| `READ` | allocating reads, `MakeReadUnique` | the possible owner for a shared read; every other sharer for `ReadUnique` and `MakeReadUnique` | CompData, or Comp for a `MakeReadUnique` whose Requester still holds the line; CompAck if `ExpCompAck` |
+| `READ_ONCE` | `ReadOnce*` | the possible owner | CompData; CompAck if asked |
+| `READ_NOSNP` | `ReadNoSnp` | none | CompData |
+| `DATALESS` | `CleanUnique`, `MakeUnique`, `Evict` | every other sharer, except for `Evict` and a failing Exclusive | Comp |
+| `CMO` | standalone cache maintenance | invalidating CMO: every other sharer; cleaning CMO: the possible owner | Comp |
+| `STASH_ONCE` | `StashOnce*`, `StashOnceSep*` | the stash target, when stashing is allowed | Comp |
+| `WRITE` | immediate writes, stash and Combined writes | `WriteUnique*`: every other sharer; a stash write also snoops its target | DBIDResp, or CompDBIDResp; Comp; CompCMO for a Combined write |
+| `WRITE_ZERO` | `WriteNoSnpZero`, `WriteUniqueZero` | `WriteUniqueZero`: every other sharer | CompDBIDResp |
+| `WRITE_DEF` | `WriteNoSnpDef` | none | CompDBIDResp with OK/Unsupported (Table B4.29) |
+| `COPYBACK` | `WriteBack*`, `WriteClean*`, `WriteEvict*` | none | CompDBIDResp; CompCMO for a Combined write |
+| `ATOMIC` | `Atomic*` | every other sharer, and the Requester too with `SnoopMe` | DBIDResp; Comp, or CompData for the original value |
+| `ILLEGAL` | anything else | none | an NDERR completion |
+
+: Table 13.13 The plan an entry is given at its start
+
+`RetToSrc` goes only to the RN-F the directory records as possible owner. A
+dead directory way makes every live RN-F a possible owner (Section 9.3).
+
+The same cycle also plans three more things:
+- **Direct transfers.** DCT plans a forwarding snoop to a DCT-capable owner.
+  DWT sends write data straight to the SN-F. Section 9.14 gives the rules.
+  DMT is decided later, once the snoops are done, because it needs to know
+  that the snoops brought no data.
+- **The SLC outcome.** Whether the line ends in the SLC (`slcKeep`) or
+  leaves it (`slcRemove`), from the kind, the hit, the inclusion policy and
+  the run-time allocation policy (Section 9.10).
+- **The directory update.** Whether the entry must write the directory when
+  it retires (`sfUpdOwed`).
+
+### 13.6.7 Obligations: how an entry runs
+
+A running entry is a set of owed items, not a state machine. Every cycle,
+combinational logic recomputes which of its items are ready, and shared
+engines pick among the ready items of all entries. When an engine serves an
+item, it clears the item in the entry.
+
+| Obligation | Ready when | Served by |
+|------------|-----------|-----------|
+| send snoops (`snpToSend`) | from the start, for RN-Fs inside system coherency | `chi_snp_gen`, Section 13.6.8 |
+| collect snoop responses (`snpPending`) | each snoop sent | the RSP and DAT inputs, matched by TxnID and SrcID |
+| receive write data (`wrOwed`) | after DBIDResp or CompDBIDResp | the DAT input, matched by DBID = entry index |
+| read memory (`eNeedMemRead`) | snoops done and the line buffer does not hold every byte needed, for a read, an atomic's initial value, a Data Pull or an SLC fill | the SN tracker (`ReadNoSnp`), or the SLC read port on an SLC hit |
+| write memory (`eNeedWriteback`) | snoops done, and the data complete: Dirty snoop data the Requester does not take, write data, an atomic result, or a Dirty SLC line leaving with the entry | the SN tracker (`WriteNoSnpFull`/`Ptl`), unless the SLC keeps the line |
+| forward a CMO (`eNeedCmoFwd`) | snoops done and any write it must follow complete; Persist, PoPA and Storage only | the SN tracker |
+| execute an atomic (`eAtomicReady`) | snoops done, operand received, line complete | `chi_atomic_alu`, one entry per cycle |
+| `ReadReceipt` | from allocation | RSP arbitration |
+| `DBIDResp` / `CompDBIDResp` | from the start; a zero write waits for its snoops | RSP arbitration |
+| Comp / CompData | after any `ReadReceipt` and `DBIDResp`, once the kind's condition holds: snoops done and the line complete for a read; the write serialized and, without Early Write Acknowledge, in memory or the SLC; the atomic done | RSP or DAT arbitration |
+| `CompCMO` | after the write's Comp, once the write and any forwarded CMO are complete | RSP arbitration |
+| Data Pull CompData | the stash target asked for it and the line is complete | DAT arbitration |
+| CompAck (`compAckOwed`) | the Requester has every response | the RSP input |
+
+: Table 13.14 Obligations of a running entry
+
+Two rules hold for every kind:
+- **No completion while a snoop is outstanding.** Nothing completes while a
+  snoop for the location is still outstanding (B4.11.2).
+- **Retirement.** An entry with nothing owed and no operation in flight
+  satisfies `eAllDone` and moves to `PH_RETIRE`.
+
+### 13.6.8 Snoops: `chi_snp_gen`
+
+**Issue.** `chi_snp_gen` chooses the next (owner, RN-F) snoop:
+- **Owners** are served round-robin, and within an owner the lowest-numbered
+  RN-F goes first.
+- **The pointer** stays on an owner until it has nothing left to send, so a
+  transaction's snoops leave back to back and are in flight together.
+- **The limit.** A register counts snoops in flight across the Home. Issue
+  stops at `maxOutstandingSnoops`, and every completed snoop lowers the
+  count. A response without data and the last packet of a response with
+  data may complete in the same cycle.
+
+**The snoop flit.** The HN-F builds it from the owner:
+- **Identity.** TxnID is the owner index, SrcID is the Home, and the
+  address and PAS are those of the location.
+- **Opcode.**
+  - The stash target gets the stash snoop, with `{StashLPIDValid,
+    StashLPID}` in the `FwdTxnID` slot.
+  - A DCT owner gets the forwarding snoop, with `FwdNID` and `FwdTxnID`
+    naming the Requester and its TxnID.
+  - Every other target gets the plan's snoop. `RetToSrc` is set only for the
+    directory's owner, and never on `SnpCleanShared`, `SnpCleanInvalid` or
+    `SnpMakeInvalid`.
+- **Victim snoops.** A victim entry always sends `SnpCleanInvalid`.
+- **System coherency.** No new snoop goes to an RN-F outside system
+  coherency (`rnfSnoopable`, Section 9.16).
+
+**Responses.** RSP and DAT are always accepted: a Home must sink responses
+without depending on anything else. A snoop response is matched to its owner
+by TxnID and to its Snoopee by SrcID:
+- **Pending bit.** It clears that Snoopee's pending bit.
+- **What it records.** Whether the Snoopee kept a copy and whether it kept
+  an owning state, which later sets the directory update. It also records
+  any `PassDirty`, a partial Dirty line, or an error.
+- **Forwarded data.** A forwarded response records that the Snoopee sent
+  CompData to the Requester itself, and in which state.
+- **Snoop data.** Data packets are counted per Snoopee, so several Snoopees
+  can return data for one owner at once.
+
+### 13.6.9 Line buffers and data merging
+
+Every owner has a 64-byte line buffer and three byte-valid masks:
+- `bufWrBe` for bytes the Requester wrote;
+- `bufSnpBe` for bytes a Snoopee returned;
+- `bufMemBe` for bytes memory returned.
+
+A source never overwrites a more recent one. Requester bytes beat snoop
+bytes, and snoop bytes beat memory bytes. So a partial write merges over
+Dirty snoop data, which merges over memory data, in whatever order they
+arrive. Requester data outside the window its `Addr` and `Size` give is not
+taken (B2.9.3.1).
+
+**Errors.**
+- **Poison** is kept per 64-bit word. Where the Requester writes a whole
+  word its Poison replaces the old value; elsewhere Poison accumulates.
+- **DataCheck** is checked on every byte the Home keeps. A DataCheck error
+  becomes Poison on its word, or DERR when Poison is not carried, because
+  the buffers keep no DataCheck of their own (B9.2.3).
+- **DERR and NDERR** on data are recorded per owner and returned with the
+  completion (Section 9.15).
+
+### 13.6.10 Downstream: `chi_sn_tracker`
+
+**Structure and order.** There is one tracker per owner, plus one for the
+GPT walker, so an owner has at most one operation in flight to the SN-F.
+Within an owner the order is read, then write, then forwarded CMO, which is
+the order every kind needs. The tracker index is the TxnID towards the SN-F,
+so the SN-F never sees a Requester's TxnID.
+
+| Operation | Request sent | Completion |
+|-----------|-------------|------------|
+| read | `ReadNoSnp`, or with DMT `ReadNoSnp`/`ReadNoSnpSep` whose data goes to the Requester | the CompData packets have arrived; with DMT, the `ReadReceipt` |
+| write | `WriteNoSnpFull` or `WriteNoSnpPtl`; with DWT the data comes from the Requester | the data has been sent after `DBIDResp`, and `Comp` has arrived |
+| CMO | `CleanSharedPersist`, `CleanSharedPersistSep`, `CleanInvalidPoPA`, `CleanInvalidStorage` | `Comp` |
+
+: Table 13.15 Downstream operations of an HN-F
+
+**Request fields.** Every downstream request has `SnpAttr` = 0 and an
+`Order` no stronger than Request accepted (Table B2.9). The atomic operation
+the tracker also supports is used only by the HN-I, because the HN-F
+executes atomics itself.
+
+**Request Retry as a Requester.** The tracker runs Request Retry towards the
+SN-F (B2.10). A `RetryAck` parks the operation until a `PCrdGrant` of the
+recorded type arrives. The request is then re-sent with `AllowRetry` = 0. A
+credit no parked operation can use is handed back with `PCrdReturn`.
+
+**Write data and the DAT output.** Downstream write data shares the DAT
+output stage with the entries' CompData. When both wait, whichever did not
+go last has priority.
+
+### 13.6.11 Responses to Requesters
+
+The RSP output takes one flit per cycle, in this priority:
+1. `RetryAck`, so that a refused request leaves the REQ channel at once.
+2. `PCrdGrant`, from `chi_retry`, to the waiting Requester with the highest
+   recorded QoS, round-robin among equals.
+3. The entries, round-robin. Within an entry the order is `ReadReceipt`,
+   `DBIDResp`, Comp, `CompCMO`.
+
+CompData goes out on DAT in one packet per cycle, `datIdStep` granules
+each, and every packet carries the line buffer's bytes for its DataID. The
+`Resp` of a completion comes from the plan and from what the snoops
+returned. Section 9.15 gives the state rules.
+
+### 13.6.12 Retirement: directory and SLC updates
+
+An entry in `PH_RETIRE` still owes one or both updates.
+
+**Directory update (`sfUpdOwed`).** The directory's update port serves one
+entry per cycle. The new state starts from the snapshot taken at the start:
+- A snooped RN-F keeps its place only if its response said it kept a copy.
+- The owner is whichever RN-F still holds an owning state.
+- The Requester is added in the state it was given.
+
+An update that needs a way in a full set evicts an unlocked way to the
+victim buffer (Section 13.6.13).
+
+**SLC update (`slcUpdOwed`).** It writes the line clean or Dirty, or
+removes it, through the SLC's update port (Section 13.6.14). The port's
+priority is:
+1. a flush;
+2. a victim's SLC write;
+3. a GPT walker's fill;
+4. a retiring entry.
+
+**Freeing.** When both updates are done the entry frees: `posFreeMask`
+clears it in `chi_pos`, and an Endpoint Order ticket it held is retired.
+
+**Victim entries.** Two of them hold locations evicted from the directory,
+or Dirty lines evicted from the SLC:
+- **Directory evictions.** The entry snoops the location out with
+  `SnpCleanInvalid`. If Dirty data comes back and the SLC holds the line, it
+  is written into the SLC. Otherwise it is written to memory.
+- **SLC evictions.** The entry only writes the line to memory.
+- **While a victim holds a location**, `chi_hazard` keeps every transaction
+  for it waiting (the victim hazard).
+
+### 13.6.13 Directory: `chi_snoop_filter`
+
+**Organization.** An inclusive, precise directory of `snpFilterEntries`
+ways in sets of `snpFilterWays`:
+
+| Field per way | Width |
+|---------------|-------|
+| valid | 1 |
+| tag | `KEY_W - log2(sets)` |
+| sharer vector | one bit per RN-F |
+| owner valid | 1 |
+| owner | `log2(numRnf)` |
+
+: Table 13.16 Snoop filter way
+
+The set index comes from the line bits alone, so every PAS of a line maps
+to the same set. That lets a lookup also report another PAS of the same line
+(an alias).
+
+**Lookup port.** Combinational, for the entry starting this cycle. It
+returns hit, sharers, owner, an alias, and `lookupError` when the set has a
+dead way.
+
+**Update port.**
+- It writes one way per cycle.
+- An update that needs a way in a full set evicts one. The ways whose
+  locations a transaction or victim holds are locked and never chosen.
+- The evicted location goes out with its sharers to the victim buffer.
+- When every unlocked choice would need a victim entry and none is free, the
+  update waits.
+
+**System coherency.** An RN-F that leaves system coherency is hidden at
+once by `liveMask`, which removes it from every lookup, update and eviction.
+A walk then removes its bits from the array, one set per cycle.
+
+**RAS** (`rasEn`). Each way carries SECDED check bits, 8 per 64-bit chunk of
+the way.
+- **Single-bit errors** are corrected on every read. The way is rewritten
+  corrected by the next update of its set, or by the walk, which runs
+  continuously as a patrol scrub.
+- **Double-bit errors** make the way dead. It matches nothing and is never
+  replaced. Every lookup of its set reports `lookupError`, and the HN-F then
+  snoops every live RN-F instead of trusting the way.
+
+### 13.6.14 System Level Cache: `chi_slc`
+
+**Organization.** `sets = slcSizePerHnf / (64 * slcWays)` sets of `slcWays`
+ways, keyed like the directory by `{PAS, line}`. Per line it holds:
+- valid and dirty bits;
+- a tag;
+- 512 data bits;
+- 64 ECC bits, 8 per 64-bit word;
+- 8 Poison bits.
+
+Per set it holds the replacement state:
+- `SLC_REPL_PLRU`: a pseudo-LRU tree of `ways - 1` bits;
+- `SLC_REPL_RRIP`: two bits per way;
+- `SLC_REPL_RANDOM`: an LFSR.
+
+With `rasEn` the tag state carries its own SECDED code and a fence bit.
+
+| Port | Use | Timing |
+|------|-----|--------|
+| lookup | tag-only lookup for the entry starting this cycle | combinational |
+| read | the whole line of a location, with hit, Poison and a corrected flag | combinational read of the arrays |
+| update | write a line clean or Dirty, or remove it, with `updateDiscard` when memory already has the latest data | written at the clock edge; may wait for a victim slot |
+| maintenance | a walk over every way that cleans, or cleans and invalidates, every line | uses the update port when no update is waiting |
+
+: Table 13.17 SLC ports
+
+**Writes, removals and victims.** A write that misses takes an invalid way;
+otherwise it takes the replacement policy's choice among unlocked ways.
+Locks are the keys of every active POS entry and every victim, so a line in
+use is never replaced. A Dirty line leaving the cache, by replacement or
+removal, goes to the victim buffer, which writes it back; the update waits
+for a free victim slot. A clean fill that finds no usable way is dropped,
+because allocation is only ever a choice.
+
+**ECC.** Single-bit data errors are corrected on the way out. Double-bit
+errors poison their word (B9.2.3) and are reported (Section 9.16).
+
+### 13.6.15 Other HN-F blocks
+
+**`chi_retry`.**
+- **Owed grants.** Kept as counters per Requester and credit type. A
+  Requester has at most 1024 requests outstanding (B2.4.2), so the counters
+  cannot overflow and a `RetryAck` is always possible.
+- **Grant order.** The waiting Requester with the highest recorded QoS gets
+  the next grant, round-robin among equals.
+- **Credits outstanding.** `creditsOutstanding` counts credits granted and
+  not yet used or returned. A grant is made only while
+  `creditsOutstanding < retryCredits` and an unreserved free entry exists
+  for it, and each outstanding credit holds one POS entry in reserve.
+- **Credit types.** The HN-F and HN-I use four, one per request class (`CHI_CREDIT_TYPES`); the MN uses two.
+
+**`chi_excl_mon`** decides exclusives at the start of the entry, in one
+commit per cycle. Every exclusive-capable LP has the single monitor bit
+B6.2.2 requires. With `exclAddrCheck` each LP also has an address monitor:
+one per LP in `EXCL_PER_LP`, or `exclMonitors` shared least-recently-used in
+`EXCL_POOL`.
+- **Load.** An Exclusive Load registers the LP.
+- **Store.** An Exclusive Store passes if the LP's bit is set, or if its
+  address monitor holds the location. A pass clears the other LPs.
+- **System monitor.** A Non-snoopable write by another LP resets the System
+  monitor of that location (B6.2.4).
+- **Waiting for CompAck.** While a passing store waits for its CompAck, no
+  other LP registers.
+
+**`chi_atomic_alu`** is combinational and 64 bits wide:
+- It computes the atomic operations of B4.2.5 with the endianness rules of
+  B2.9.6.
+- One ready atomic entry per cycle takes its operand packet and initial
+  value through it.
+- The result is written back when the location changed or was Dirty. The
+  original value is returned in CompData.
+
+**`chi_stash_ctrl`** decodes the stash target, its snoop opcode, the LPID
+and the state a Data Pull grants (B7). Stashing is only a hint, so every
+output may be ignored. A request without `StashNIDValid` stashes nothing.
+
+**Events and status.**
+- **PMU.** The HN-F reports 16 PMU event counts per cycle (Section 9.16).
+- **RAS.** It reports corrected and uncorrected errors with their source,
+  address and PAS.
+- **Idle.** `idle` is high when no entry, victim, output stage, downstream
+  operation, SLC walk or GPT fill is busy. The quiescence check of the
+  configuration plane uses it.
+
+## 13.7 Granule Protection Check: `chi_gpc`
+
+**Role.** One unit, shared by every Home, answers whether a request's PAS
+may access its physical granule (B9.1.1). Each Home has a check port. It
+presents an address, PAS and SrcID, and receives `done`, plus `fail` when
+the access is not permitted.
+
+**Modes.**
+
+| Mode | Structure | Answer |
+|------|-----------|--------|
+| `GPC_TABLE` | a GPI per granule in an on-chip array of `gpcTableGranules` entries, from a programmable base; reset to a configured GPI | combinational, for any address in the range; an address outside the range is not protected |
+| `GPC_WALK` | a cache of `gpcCacheEntries` GPT entries and a two-level walker | combinational on a cache hit; a miss starts a walk and the Home re-presents the request until the cache holds the answer |
+
+: Table 13.18 GPC modes
+
+**The walker.**
+- **Levels.** It reads the level 0 descriptor for the address. A block
+  descriptor gives one GPI. A table descriptor points to level 1 entries,
+  each holding sixteen 4-bit GPIs.
+- **Faults.** A descriptor of any other type, or a failed read, caches a
+  fault.
+- **Reads.** Each line is read through the HN-F that owns its address, in
+  the Root PAS, on the tracker reserved for the walker (Table 13.10). So a
+  walk never waits for a POS entry. With `gpcSlcAlloc` the read looks in
+  the SLC first (Section 9.11).
+
+**Registers** are APB block 2, Table 7.1c. Writes need the Root PAS.
+Writing CTRL or GPT_BASE invalidates the cache, and GPT TLBIs from the MN
+invalidate it by address or entirely.
+
+## 13.8 HN-I: `chi_hni_top`
+
+**Role.** The HN-I is the Home for the address ranges the SAM sends to it,
+which are I/O and device memory behind the SN-Is. It also hosts the CHI MMIO
+configuration window (Section 7.2). It keeps no coherence state and never
+snoops, but it is an ordering point.
+
+**Structure.** The HN-I follows the HN-F's pattern without the coherence
+machinery:
+
+| Part | Instance | Notes |
+|------|----------|-------|
+| Transaction table | `chi_pos` | `hniEntries` entries with the age matrix |
+| Per-entry state | `entry[]` | request, owed responses, downstream state, a request buffer and a response buffer |
+| Address decode | `chi_sam`, without hashing | finds the SN-I behind the address (see below) |
+| Retry credits | `chi_retry` | as in the HN-F |
+| Exclusive monitor | `chi_excl_mon` | the System monitor for Non-snoopable locations (B6.2.4) |
+| Downstream trackers | `chi_sn_tracker` | one per entry, with P-Credits kept per SN-I |
+| Output stages | three `chi_flit_fifo` | REQ to the SN-Is, RSP, DAT |
+
+: Table 13.19 HN-I sub-blocks
+
+**Address decode.** The HN-I's own SAM is elaborated with every region
+covering the whole address space and targeting SN-I `i mod numSni`. It also
+re-checks the request's PAS. The target must be a known SN-I; otherwise the
+request completes with NDERR. Section 16.1 records a defect: this SAM also
+receives the global region updates.
+
+**Ordering.** Two rules decide when an entry may send its downstream
+request. Both use the age matrix of `chi_pos`:
+- **Same line.** It waits for every older entry for the same `{line, PAS}`,
+  or for the line in any PAS for `CleanInvalidPoPA`. One transaction per
+  location runs at a time, in arrival order.
+- **Endpoint Order.** An Endpoint-ordered request waits until every older
+  ordered request from the same source has been accepted downstream: by a
+  `ReadReceipt`, a `DBIDResp`, data or a completion, but never a `RetryAck`.
+  The downstream request carries the same Order, which HN-I to SN-I permits
+  (Table B2.9), so the SN-I keeps the order from there.
+
+**Responses.**
+- **Early responses.** `ReadReceipt` for an ordered read and `DBIDResp` for
+  a write are sent as soon as the request has an entry. The HN-I is the
+  ordering point, and the entry owns a buffer for the data.
+- **CompData** is sent from the response buffer once the SN-I's data is
+  complete.
+- **Comp for a write** follows the SN-I's Comp, unless the write permits
+  Early Write Acknowledge.
+- **Ordered Write Observation.** A write with `ExpCompAck` is not sent
+  downstream until its CompAck arrives (B2.7.5.3).
+
+**Forwarding.**
+- **Atomics** are forwarded to the SN-I: the operand goes after the SN-I's
+  `DBIDResp`, and the result comes back in CompData or Comp.
+- **Combined writes.** A CMO is forwarded only when it must reach a point
+  behind the HN-I, that is a Persist or Storage CMO. The others complete at
+  the HN-I, which holds no data.
+
+**Errors.** Requests the HN-I cannot serve complete with NDERR, after any
+data the Requester owes. These are coherent allocating reads, CopyBacks,
+`CleanUnique`, `MakeUnique`, `DVMOp`, `ReadNoSnpSep` from a Requester, and
+addresses no SN-I serves.
+
+**Configuration window.** Accesses to the 4 KiB window at `CFG_MMIO_BASE` are
+served by the HN-I itself (Section 7.2):
+- A read returns the register at its byte position.
+- A write merges its enabled bytes into the register.
+- A COMMIT takes effect only on a quiescent fabric, and only for a legal
+  region.
+
+## 13.9 MN: `chi_mn_dvm`
+
+**Role.** The Miscellaneous Node runs DVM operations (B8). Every `DVMOp` is
+sent to it, whatever its address.
+
+**Structure.**
+- **Entries.** `dvmMaxOps` entries. One entry is always kept for a Non-sync
+  DVMOp, because a Request Node may hold its answer to a `SnpDVMOp(Sync)`
+  until its own Non-sync completes (B8.2.3.1).
+- **Per entry.** The DVMOp, its 8-byte payload, a vector of snoop targets
+  still to send and a vector of responses outstanding.
+- **Supporting blocks.** A `chi_retry` for `RetryAck` and `PCrdGrant`, and
+  two `chi_flit_fifo` output stages, RSP and SNP.
+
+**Flow of one DVMOp.**
+1. **Allocate.** The `DVMOp` is allocated an entry, or answered with
+   `RetryAck`.
+2. **Data request.** The MN sends `DBIDResp` with the entry index as DBID.
+   The Requester then sends the payload as one `NonCopyBackWriteData`
+   packet.
+3. **Snoop.** The MN sends the two-part `SnpDVMOp` to every RN-F and RN-D
+   inside system coherency, except the Requester. Both parts carry the entry
+   index as TxnID and go out back to back. A node holds at most one Sync and
+   one Non-sync `SnpDVMOp` at a time (B8.2.3.2).
+4. **Sync order.** A Sync sends its snoops only once every older DVMOp has
+   collected all its responses. Each Request Node answers a Sync only after
+   its earlier DVM operations complete (B8.2.2), so the Sync's Comp follows
+   them all.
+5. **Complete.** Once every target has answered, the MN sends Comp. A Non-sync DVMOp does not get an early Comp.
+
+**Payload placement and GPT invalidation.**
+- **Payload placement.** Part 1 carries `Addr[MPA-1:3]` and part 2 the write
+  data bits `[MPA-1:3]`, each with bit 0 marking the part. Range and Num
+  travel in part 1's `FwdNID`, and `VMID[15:8]` in its `VMIDExt`. This
+  packing is not verified against Table B8.14 (Section 16.1, item 8).
+- **GPT invalidation.** A TLBI whose Stage is GPT also invalidates the GPC's
+  GPT cache. It invalidates by PA when `AddrV` is set and the size is one
+  granule, and entirely otherwise.
+
+## 13.10 Top-level integration: `chi_interconnect_top`
+
+### 13.10.1 Generate structure
+
+The product top builds everything from `CFG` and a few top parameters
+(Section 3.3). Section 2.7 shows its hierarchy with generate-block and
+instance names.
+
+
+**Node ordinals.** Every node has an ordinal in one space, in the class
+order RN-F, RN-D, RN-I, SN-F, SN-I, HN-F, HN-I, MN (Section 2.2). The fabric
+ports, the placements and the NodeID table are all indexed by ordinal, and
+`classOffset` gives the first ordinal of each class.
+
+**Port macro.** One macro, `CHI_CONNECT_PORT`, builds each external class's
+link ports. A class configured out still gets a one-element sentinel port,
+because an interface array cannot have zero elements. Its link layer is
+held idle.
+
+**Wiring per port.**
+- **Requester port.** Its received REQ goes through the SAM, then the QoS
+  regulator, into the fabric. Its received RSP and DAT go straight into the
+  fabric. Its RSP, SNP and DAT outputs come from the fabric.
+- **Subordinate port.** Its REQ, RSP and DAT outputs come from the fabric,
+  and its received RSP and DAT go into it.
+- **Unused directions** are drained, so that a misrouted flit cannot stall
+  the fabric.
+
+### 13.10.2 System coherency: `chi_sysco`
+
+`chi_sysco` holds one `SYSCOACK` register per RN-F and RN-D, RN-Fs first
+(B15). An RN-I has no snoop channel, so its `SYSCOACK` simply echoes
+`SYSCOREQ`.
+
+- **Connect.** `SYSCOACK` rises the cycle after `SYSCOREQ` is seen high. The
+  node is snoopable from the moment `SYSCOREQ` is high.
+- **Disconnect.** The moment `SYSCOREQ` falls, `snoopable` drops for that
+  node: the Homes and MNs send it no new snoop, drop snoops they had not yet
+  sent, and the directory hides it (Section 13.6.13). `SYSCOACK` falls once
+  every HN-F and MN reports the node drained, meaning no snoop to it is
+  outstanding and, for an RN-F, no directory bit of it remains.
+- **With `syscoEn` = 0** every node is always snoopable and `SYSCOACK`
+  echoes `SYSCOREQ`.
+
+### 13.10.3 Endpoint Order across HN-Fs: `chi_eo_order`
+
+**State.** For every pair {Requester, SN-F}, `chi_eo_order` holds two
+`TICKET_W`-bit counters:
+- `issued`: the next ticket to hand out;
+- `served`: the ticket that may run now.
+
+`TICKET_W = log2(numHnf * posEntries + 1) + 1`, wide enough that the tickets
+outstanding for one pair can never wrap onto each other.
+
+**Behaviour.**
+1. **Take a ticket.** An HN-F allocating an Endpoint-ordered request from a
+   Requester in its list takes `issued` of that pair, through its SN-F's
+   index. Two HN-Fs taking a ticket for one pair in the same cycle take them
+   in HN-F order.
+2. **Wait for it.** The entry starts only when its ticket equals `served`
+   (`eoBlocked` in Section 13.6.5).
+3. **Serve the next.** When the entry frees, it retires its ticket, and
+   `served` advances.
+
+A Requester sends its next ordered request only after the Home acknowledges
+the last (B2.7.5.1), so allocation order is the order it sent them. Section
+9.5 gives the argument and the cost: requests of one stream to one SN-F run
+one at a time.
+
+### 13.10.4 Configuration plane
+
+**APB decode.** `PADDR[11:8]` selects one of the 256-byte blocks of
+Table 7.1 to 7.1e. An unselected block, or a block whose feature is not
+configured, answers `PSLVERR`. Every block answers in the same cycle:
+`PREADY` is always 1.
+
+| Block | Module | Register state |
+|-------|--------|----------------|
+| 0 | `chi_cfg_slave` | SELECT and the staged region of each region index |
+| 1 | `chi_hnf_policy_regs` | SELECT, a staged and an active policy per HN-F, SLC maintenance trigger |
+| 2 | `chi_gpc` | CTRL, bases, GPI table access, invalidation, fault record |
+| 3 | `chi_obs_regs` | per-record RAS state, PMU counters, crosspoint flit counters |
+| 4 | `chi_qos_regs` | SELECT, rate and burst per Request Node port |
+
+: Table 13.20 APB blocks and their state
+
+**Write rule.** Every block applies the same write rule (Section 7.1), and
+reads are open.
+- With RME, a write needs the Root PAS (`PNSE` = 1, `PPROT[1]` = 0).
+  `apbRootWrites` = 0 also accepts a Secure write, except at the GPC
+  registers.
+- Without RME, a write needs the Secure PAS.
+
+**Quiescence.** The top computes `trafficQuiescent`: no node offering a flit
+to the fabric, `fabricBusy` low, and every HN-F, HN-I and MN idle. The
+region editor's COMMIT and the policy block's COMMIT are refused unless it
+holds. A CHI MMIO COMMIT uses the same test, except that the HN-I hosting
+the window is allowed to be busy with the commit itself
+(`hniOthersQuiescent`).
+
+**Region updates.**
+- **Selection.** A legal, quiescent commit from APB or from an HN-I's window
+  produces one region update. The top selects it into
+  `selectedRegionUpdate`. The code gives a CHI MMIO commit precedence, but
+  the two cannot coincide: an APB commit needs every HN-I idle, and a CHI
+  MMIO commit keeps its HN-I busy.
+- **Distribution.** Every Requester-side SAM and every HN-I's SAM receives
+  that update.
+- **Assertion.** `REGION_UPDATE_WHEN_QUIESCENT` checks that an APB update
+  lands only after a quiescent cycle.
+
+# 14 Transaction flows through the RTL
+
+Chapter 8 gives the message sequence of each flow, as the protocol sees it.
+This chapter follows the same kind of flows through the RTL blocks of
+Chapter 13. It shows which block handles each step, and the cycles a step
+adds where the RTL fixes them.
+
+## 14.1 How to read the walkthroughs
+
+- **Assumptions.** Each walkthrough assumes an uncongested fabric, credits
+  and tokens available, and no other transaction to the same location.
+  Contention, back-pressure and the Subordinate's own latency add to the
+  figures.
+- **Units.** "Adds" counts clock cycles. `h` is the number of network hops
+  between two crosspoints (Table 5.2), so a fabric crossing costs `h + 1`
+  crosspoint cycles.
+- **Fixed costs** (Chapter 13):
+  - a link receive buffer adds one cycle;
+  - a link transmitter adds none;
+  - the SAM and the QoS regulator add none;
+  - a crosspoint adds one;
+  - an endpoint output FIFO adds one.
+
+![Fig 14.1 A ReadShared that misses everywhere, through the RTL: numbered steps match Table 14.1.](figures/chi_flow_read.png){width=100%}
+
+## 14.2 ReadShared that misses everywhere
+
+No RN-F holds the line and the SLC misses, so memory supplies the data.
+
+| Step | Where | What happens | Adds |
+|------|-------|--------------|------|
+| 1 | RN-F port, `chi_link_rx` (REQ) | The flit is written into the receive buffer. The credit it used comes back once the flit leaves the buffer. | 1 |
+| 2 | `requester_sam`, `chi_qos_reg` | `chi_sam` matches an HNF_HASH region, so `chi_hn_hash` picks the HN-F. The target is written into `TgtID` and `targetNodeId`, and the regulator takes a token. | 0 |
+| 3 | `chi_noc_top`, REQ network | The flit is routed on `targetNodeId`, one crosspoint per cycle, to the HN-F's device port. | `h + 1` |
+| 4 | HN-F admission | `chi_pos` has a free entry, so the request is allocated in `PH_WAIT` and its GPC answer is taken in the same cycle. | 1 |
+| 5 | HN-F start | No older entry holds the location. The snoop filter and SLC both miss. The plan: no snoop, CompData owed, CompAck owed (`ExpCompAck`). The entry moves to `PH_RUN`. | 1 or more |
+| 6 | HN-F obligations, `chi_sn_tracker` | With no snoop pending and no bytes in the buffer, the entry needs a memory read. The entry's tracker enters `DN_REQ` and sends `ReadNoSnp` to the REQ output FIFO; TxnID is the entry index. | 2 |
+| 7 | Fabric, SN-F port | The request crosses to the SN-F. The SN-F returns CompData packets addressed to the Home. | `h + 1` each way, plus the SN-F |
+| 8 | HN-F DAT input | Each packet is written into the entry's line buffer as memory bytes. | 1 per packet |
+| 9 | HN-F DAT arbitration | Once the line is complete, the entry's CompData is pushed into the DAT output FIFO, one packet per cycle, with `Resp` from the read rules of Section 9.15. | 2 to the first packet |
+| 10 | Fabric, RN-F port | The packets cross to the Requester's port, and `chi_link_tx` sends each as soon as it holds a credit. | `h + 1` |
+| 11 | HN-F RSP input | The Requester's CompAck clears `compAckOwed`. Nothing more is owed, so the entry moves to `PH_RETIRE`. | 2 |
+| 12 | Directory update port | The directory records the Requester as a sharer, or as owner when it was given a Unique state. If the plan kept the line in the SLC, the SLC update port fills it. The entry frees. | 2 or more |
+
+: Table 14.1 ReadShared that misses everywhere
+
+**Where an SLC hit changes this.** At step 5 the SLC lookup hits, so step 6
+reads the line through the SLC read port in one cycle. Nothing goes
+downstream, and steps 7 and 8 disappear.
+
+## 14.3 ReadUnique with a Dirty copy elsewhere
+
+An RN-F other than the Requester holds the line UD, and the directory
+records it as owner.
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 to 4 | as Table 14.1 | The request is allocated. |
+| 5 | HN-F start | The directory hits with an owner. The plan snoops every other sharer. When DCT is allowed for this request (Section 9.14), the owner gets the forwarding snoop `SnpUniqueFwd` and the other sharers get `SnpUnique`. |
+| 6 | `chi_snp_gen` | The entry's snoops leave back to back, one per cycle, each carrying the entry index as TxnID, as long as `maxOutstandingSnoops` allows. |
+| 7a | with DCT | The owner sends CompData straight to the Requester, UD_PD for its Dirty line, and answers the Home with `SnpRespFwded`. The entry records that a Snoopee forwarded the data, and owes no data of its own. |
+| 7b | without DCT | The owner's snoop carries `RetToSrc`. It answers with `SnpRespData` and its Dirty line, which lands in the line buffer as snoop bytes. The entry then sends CompData UD_PD, passing the Dirty responsibility, and nothing is written to memory. |
+| 8 | HN-F RSP and DAT inputs | Each other sharer answers `SnpResp_I`. When every pending bit is clear, the snoops are done. |
+| 9 | completion | CompAck arrives; the entry retires. The directory records the Requester as the only holder and owner. |
+
+: Table 14.2 ReadUnique with a Dirty copy in another RN-F
+
+## 14.4 WriteBackFull
+
+The Requester evicts a Dirty line.
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 to 4 | as Table 14.1 | The request is allocated. |
+| 5 | HN-F start | Kind COPYBACK: no snoop. The plan owes `CompDBIDResp` and expects the write data. The SLC decision is made here: the SLC keeps the line on a hit, or allocates it under the eviction policy. |
+| 6 | RSP arbitration | `CompDBIDResp` goes out with the entry index as DBID. |
+| 7 | HN-F DAT input | `CopyBackWriteData` arrives with DBID = entry index and is written as Requester bytes. Its `Resp` says whether the line is Dirty. |
+| 8a | the SLC keeps the line | No memory write. At retirement the SLC update port writes the line Dirty. |
+| 8b | the SLC does not keep it | The entry's tracker sends `WriteNoSnpFull`. After the SN-F's `DBIDResp` it sends the data, and the write is done on the SN-F's Comp. |
+| 9 | retirement | The directory removes the Requester. The entry frees. |
+
+: Table 14.3 WriteBackFull
+
+A `CopyBackWriteData` with state I, or a write cancelled with
+`WriteDataCancel`, writes nothing, and the directory is still updated.
+
+## 14.5 WriteNoSnpPtl to device memory through the HN-I
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 to 3 | as Table 14.1 | The SAM matches a DIRECT or MMIO region whose target is the HN-I. |
+| 4 | HN-I admission | The request is allocated an HN-I entry, which owns a request buffer. `DBIDResp` goes out at once. |
+| 5 | HN-I DAT input | The write data is written into the entry's buffer, under its byte enables. |
+| 6 | HN-I ordering | The entry waits for older entries for the same line and, if Endpoint-ordered, for older ordered requests from its source to be accepted downstream. |
+| 7 | `chi_sn_tracker` | `WriteNoSnpPtl` goes to the SN-I with the same Order. After the SN-I's `DBIDResp` the data follows. |
+| 8 | completion | The HN-I sends Comp after the SN-I's Comp, or earlier when the write permits Early Write Acknowledge. A write with `ExpCompAck` (Ordered Write Observation) goes downstream only after its CompAck. |
+
+: Table 14.4 WriteNoSnpPtl at the HN-I
+
+## 14.6 A request that is retried
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 | HN-F admission | `chi_pos` has no free entry this request may use. The request is consumed and answered with `RetryAck`, carrying the credit type of its class. `chi_retry` records one grant owed to that Requester and type. |
+| 2 | `chi_retry` | Later, a free unreserved entry exists and `creditsOutstanding` is below `retryCredits`. The waiting Requester with the highest recorded QoS gets `PCrdGrant`, and one entry is now held in reserve. |
+| 3 | Requester | It re-sends the request with `AllowRetry` = 0 and the granted `PCrdType`. |
+| 4 | `requester_sam` | `AllowRetry` = 0 makes the request keep the `TgtID` it carries: the Home that granted the credit. |
+| 5 | HN-F admission | The request may take a reserved entry, so it is allocated. `chi_retry` counts the credit as used. |
+
+: Table 14.5 Request Retry
+
+A Requester that no longer needs a granted credit returns it with
+`PCrdReturn`, which the HN-F accepts and drops, releasing the reserved
+entry.
+
+## 14.7 A directory eviction
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 | Directory update port | A retiring entry needs a way in a full set. An unlocked way is chosen, and its location and sharers go to a free victim entry. If no victim entry is free, the update waits. |
+| 2 | `chi_hazard` | From now until the victim frees, every transaction for that location waits (victim hazard). |
+| 3 | `chi_snp_gen` | The victim's owner index sends `SnpCleanInvalid` to every recorded sharer. |
+| 4 | snoop responses | Dirty data collected from a Snoopee lands in the victim's line buffer. |
+| 5 | Dirty data | The victim first looks for the line in the SLC. If the SLC holds it, the merged line is written into the SLC, Dirty. Otherwise the victim's tracker writes it to memory with `WriteNoSnpFull`. |
+| 6 | free | The victim entry frees and the location is open again. |
+
+: Table 14.6 Directory eviction
+
+## 14.8 A request whose GPC answer is not cached
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 | HN-F admission | The GPC cache misses. The request is allocated with `gpcPending` set and cannot start. |
+| 2 | `chi_gpc` walker | It computes the level 0 descriptor address and asks the HN-F that owns that line for a read. |
+| 3 | owning HN-F | The read goes out on the tracker reserved for the walker, in the Root PAS: `ReadNoSnp` for the whole line. With `gpcSlcAlloc` the SLC is looked in first, and a miss fills it. |
+| 4 | walker | A block descriptor gives the GPI. A table descriptor needs a level 1 read, repeating step 3. The result, or a fault, is written into the GPT cache. |
+| 5 | HN-F | The pending entry is presented again, round-robin among pending entries. The cache now answers. A fault sets `HNF_ERR_GPC`, and the entry completes with NDERR; otherwise it starts normally. |
+
+: Table 14.7 GPC miss and walk
+
+## 14.9 A region commit over APB
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 | software | It writes SELECT, then BASE, LIMIT, TARGET and ATTRIBUTES of the staged region, with the write rule of Section 7.1. |
+| 2 | `chi_cfg_slave` | A write to COMMIT with `PSTRB[0]` set is checked in its access phase. It needs quiescent traffic, a legal staged region and an existing target Home. Otherwise `PSLVERR` is returned and nothing changes. |
+| 3 | `chi_cfg_slave` | On success `regionUpdate` pulses for one cycle, registered, carrying the staged values. |
+| 4 | every SAM | Every Requester-side SAM, and every HN-I's SAM, writes the region at the next clock edge. Requests that arrive afterwards use the new map. |
+
+: Table 14.8 Region commit over APB
+
+## 14.10 A DVM Sync
+
+| Step | Where | What happens |
+|------|-------|--------------|
+| 1 | `requester_sam` | A `DVMOp` is routed to the MN whatever its address. |
+| 2 | `chi_mn_dvm` | The Sync is allocated an entry, unless only the entry kept for a Non-sync is free, in which case it is retried. `DBIDResp` goes out with the entry index as DBID. |
+| 3 | MN DAT input | The 8-byte payload arrives in `NonCopyBackWriteData`. |
+| 4 | MN ordering | The Sync waits until every older DVMOp has collected all its snoop responses. |
+| 5 | MN SNP output | The two parts of `SnpDVMOp(Sync)` go back to back to every RN-F and RN-D in system coherency except the Requester. |
+| 6 | completion | Every target answers once its earlier DVM operations are complete. The MN then sends Comp, and the entry frees. |
+
+: Table 14.9 DVM Sync
+
+# 15 Module parameter reference
+
+Section 3.1 lists the fields of `chi_cfg_t` and Section 3.3 the parameters
+of the product top. This chapter lists every module's parameters, gives the
+value the product top passes, and shows which configuration fields each
+block reads.
+
+A module's own default is used only when the module is instantiated alone,
+for example by a compile harness. Widths a module derives from its other
+parameters (names ending `_W`) are omitted.
+
+## 15.1 Counts the top derives
+
+| Name | Value | Used for |
+|------|-------|----------|
+| `NUM_NODES` | the sum of every node count | fabric ports, NodeID table, placements |
+| `NUM_REQ` | `numRnf + numRnd + numRni` | Requester-side SAMs, QoS buckets, the Requester list of every Home |
+| `NUM_DVM` | `NUM_REQ`, at least 1 | Requesters a Home or MN knows: retry, exclusives, Endpoint Order |
+| `NUM_DVM_TGT_E` | `numRnf + numRnd`, at least 1 | snoopable nodes: DVM targets and the `chi_sysco` ports |
+| `NUM_HOMES_E` | `numHnf + numHni`, at least 1 | GPC check ports |
+| `NUM_REC` | `numHnf`, plus 1 with `gpcMode` WALK | RAS error records |
+| `TOTAL_LP` | the sum of `RN_NUM_LP` over the Requesters | exclusive-capable LPs |
+| `NUM_XP_E` | the number of crosspoints | crosspoint flit counters |
+| `EO_TICKET_W` | `log2(numHnf * posEntries + 1) + 1` | Endpoint Order tickets |
+| `CFG_MMIO_BASE` | top parameter, default the last 4 KiB of the address space | the CHI MMIO window |
+
+: Table 15.1 Counts derived in `chi_interconnect_top`
+
+Most counts are forced to at least 1, which the `_E` suffix marks. This keeps
+an array declarable when a class is configured out; the generate blocks then
+leave the sentinel element unused.
+
+## 15.2 Link layer and address map
+
+| Module | Parameter | Default | Product top passes |
+|--------|-----------|---------|--------------------|
+| `chi_link_port` | `CFG` | default record | `CFG` |
+| | `REQUESTER_PORT` | 1 | 1 for RN-F, RN-D, RN-I; 0 for SN-F, SN-I |
+| | `REQ_FLIT_W`, `RSP_FLIT_W`, `SNP_FLIT_W`, `DAT_FLIT_W` | from `CFG` | default |
+| `chi_link_rx` | `LCRD_DEPTH` | `lcrdDepth` | `lcrdDepth`, at least 2 |
+| | `PARITY_EN` | `parityEn` | default |
+| | `OPCODE_MASK` | 0 | the Opcode field of the channel, from `CFG` |
+| `chi_link_tx` | `LCRD_DEPTH`, `PARITY_EN`, `REPL_CHANNELS` | from `CFG` | default |
+| | `LANE_ID` | 0 | 0 |
+| `chi_link_fsm` | `INITIATOR` | 1 | 1 in `chi_link_tx`, 0 in `chi_link_rx` |
+| `chi_lcrd_mgr` | `LCRD_DEPTH` | 8 | the transmitter's depth |
+| `chi_sam` | `NUM_REGIONS` | 4 | top `NUM_REGIONS` |
+| | `HASH_TO_HNF` | 1 | 1 at the Requesters, 0 at the HN-I |
+| | `NUM_HNF`, `HN_NODE_IDS` | `numHnf`, zeros | the HN-F count and NodeIDs |
+| | `REGION_BASE`, `REGION_LIMIT`, `REGION_TARGET`, `REGION_ATTRIBUTES` | zeros | the effective region table (Section 6.2); the HN-I gets its own (Section 13.8) |
+| `chi_hn_hash` | `INTERLEAVE_GRANULE`, `HN_HASH_SHIFT` | `interleaveGranule`, `hnHashShift` | default |
+| `chi_prefetch_map` | `NUM_SNF`, `SNF_NODE_IDS` | `numSnf`, zeros | the SN-F count and NodeIDs |
+| | `INTERLEAVE_GRANULE` | `interleaveGranule` | default |
+
+: Table 15.2 Parameters of the link layer and address map
+
+## 15.3 Fabric
+
+| Module | Parameter | Default | Product top passes |
+|--------|-----------|---------|--------------------|
+| `chi_noc_top` | `NUM_PORTS` | 1 | `NUM_NODES` |
+| | `AGE_LIMIT` | 16 | top `AGE_LIMIT` |
+| | `OUT_DEPTH` | 2 | default (2) |
+| | `NODE_IDS`, `PLACEMENTS` | zeros | the effective NodeIDs and placements |
+| | `NUM_XP_OUT` | crosspoints | `NUM_XP_E` |
+| `chi_mesh`, `chi_ring`, `chi_xbar` | `NUM_XP`, `NUM_DEV_PORTS`, `POPULATED` | from `CFG`; all ports populated | from `chi_noc_top` |
+| `chi_xp` | `TOPOLOGY`, `XP_ID`, `NUM_NET_PORTS` | `topology`, 0, 4 | from the wrapper: 4 (mesh), 2 (ring), `numXp - 1` (crossbar) |
+| `chi_router` | `BUBBLE_FLOW` | 0 | 1 on a ring |
+| | `AGE_LIMIT`, `OUT_DEPTH` | 16, 2 | from `chi_noc_top` |
+| `chi_route_compute` | `XP_ID`, `NUM_XP`, `NUM_NET_PORTS`, `NUM_DEV_PORTS`, `POPULATED` | as `chi_router` | from `chi_router` |
+| `chi_vc_arb` | `NUM_REQUESTERS`, `AGE_LIMIT` | 4, 16 | the router's port count, `AGE_LIMIT` |
+| `chi_flit_fifo` | `DEPTH` | 2 | default (2) at every endpoint |
+| `chi_qos_reg` | `NUM_PORTS` | 1 | `NUM_REQ_E` |
+
+: Table 15.3 Parameters of the fabric
+
+## 15.4 Homes, MN and services
+
+| Module | Parameter | Default | Product top passes |
+|--------|-----------|---------|--------------------|
+| `chi_hnf_top` | `HN_NODE_ID`, `SN_NODE_ID` | 0 | its NodeID, and the NodeID of its paired SN-F (Section 5.7) |
+| | `NUM_RNF`, `RNF_NODE_IDS` | `numRnf`, zeros | the RN-F count and NodeIDs |
+| | `NUM_REQUESTERS`, `REQUESTER_NODE_IDS` | `NUM_RNF`, zeros | `NUM_DVM` and every Requester's NodeID |
+| | `RN_NUM_LP`, `NUM_LP` | 1 each, `NUM_REQUESTERS` | top `RN_NUM_LP`, `TOTAL_LP` |
+| | `SN_DMT_CAP`, `SN_DWT_CAP` | 1 | `SNF_DMT_CAP`, `SNF_DWT_CAP` of its SN-F |
+| | `RNF_DCT_CAP` | all 1 | top `RNF_DCT_CAP` |
+| | `VICTIM_DEPTH` | 2 | default (2) |
+| | `EO_TICKET_W` | 8 | `EO_TICKET_W` |
+| `chi_pos` | `DEPTH` | `posEntries` | `posEntries` (HN-F), `hniEntries` (HN-I) |
+| `chi_hazard` | `DEPTH`, `NUM_VB` | `posEntries`, 1 | `posEntries`, 2 |
+| `chi_snoop_filter` | `ENTRIES`, `WAYS`, `NUM_RNF` | `snpFilterEntries`, `snpFilterWays`, `numRnf` | default |
+| `chi_slc` | `WAYS`, `SETS`, `NUM_LOCKS` | `slcWays`, `slcSizePerHnf / (64 * slcWays)`, 1 | default, default, `posEntries + 2` |
+| `chi_snp_gen` | `NUM_OWNERS`, `NUM_RNF`, `MAX_OUTSTANDING` | 1 | `posEntries + 2`, `numRnf`, `maxOutstandingSnoops` |
+| `chi_sn_tracker` | `NUM_OWNERS`, `NUM_SUB`, `SUB_NODE_IDS` | 1, 1, zeros | HN-F: owners plus the walker, 1, its SN-F; HN-I: `hniEntries`, the SN-Is |
+| `chi_retry` | `NUM_REQUESTERS`, `REQUESTER_NODE_IDS` | 1, zeros | the Home's Requester list |
+| | `CREDIT_TYPES` | 4 | 4 at the HN-F and HN-I (`CHI_CREDIT_TYPES`); 2 at the MN |
+| `chi_excl_mon` | `NUM_REQUESTERS`, `RN_NUM_LP`, `NUM_LP` | 1 | the Home's Requester list and LPs |
+| `chi_stash_ctrl` | `NUM_RNF`, `RNF_NODE_IDS` | `numRnf`, zeros | the RN-F list |
+| `chi_gpc` | `NUM_HOMES`, `NUM_HNF` | 1 | `NUM_HOMES_E`, `NUM_HNF_E` |
+| | `RESET_GPI`, `RESET_ENABLE` | `1111` (all access), 0 | default |
+| `chi_hni_top` | `HN_NODE_ID`, `CFG_MMIO_BASE` | 0, the last 4 KiB | its NodeID, top `CFG_MMIO_BASE` |
+| | `REGION_*` | zeros | whole-space regions targeting SN-I `i mod numSni` |
+| | `NUM_SNI`, `SNI_NODE_IDS` | 1, zeros | the SN-I list |
+| | `NUM_HNF_IDS`, `HNF_IDS`, `NUM_HNI_IDS`, `HNI_IDS`, `HNF_PRESENT`, `HNI_PRESENT` | 1, zeros, 1 | the Homes a region may target, for the commit check |
+| `chi_mn_dvm` | `MN_NODE_ID` | 0 | its NodeID |
+| | `NUM_DVM_NODES`, `DVM_NODE_IDS` | 1, zeros | `NUM_DVM_TGT_E` and the RN-F and RN-D NodeIDs |
+| | `NUM_REQUESTERS`, `REQUESTER_NODE_IDS` | 1, zeros | `NUM_DVM` and the Requester list |
+| `chi_eo_order` | `NUM_HNF`, `NUM_REQ`, `NUM_SNF`, `HNF_SNF`, `TICKET_W` | 1, 1, 1, zeros, 8 | `NUM_HNF_E`, `NUM_DVM`, `NUM_SNF_E`, the SN-F index of each HN-F, `EO_TICKET_W` |
+| `chi_sysco` | `NUM_COH` | 1 | `NUM_DVM_TGT_E` |
+| `chi_cfg_slave` | `NUM_REGIONS`, `REGION_*` | 4, zeros | the effective region table |
+| | `NUM_HNF_IDS`, `HNF_IDS`, `NUM_HNI_IDS`, `HNI_IDS`, `HNF_PRESENT`, `HNI_PRESENT` | 1, zeros, 1 | the Homes a region may target |
+| `chi_hnf_policy_regs` | `NUM_HNF`, `RESET_POLICY` | `numHnf`, every policy bit on | `NUM_HNF_E`, default |
+| `chi_obs_regs` | `NUM_HNF`, `NUM_REC`, `NUM_XP` | `numHnf`, `NUM_HNF`, 1 | `NUM_HNF_E`, `NUM_REC`, `NUM_XP_E` |
+| `chi_qos_regs` | `NUM_PORTS` | 1 | `NUM_REQ_E` |
+
+: Table 15.4 Parameters of the Homes, MN and top-level services
+
+## 15.5 Which blocks read each configuration field
+
+Every block receives the whole record, but each reads only some fields.
+The table lists the fields that change hardware and the blocks that read
+them. A field read only by `chi_cfg_check` and by the packing functions of
+`chi_pkg` changes flit widths and elaboration checks, not block behaviour.
+
+| Field | Read by |
+|-------|---------|
+| `numRnf` | `chi_hnf_top`, `chi_snoop_filter`, `chi_stash_ctrl` (vector widths); the top |
+| `numRnd`, `numRni`, `numSni`, `numHni`, `numMn` | the top: ordinals, placement, generate loops |
+| `numSnf` | `chi_prefetch_map`; the top |
+| `numHnf` | `chi_sam`, `chi_hn_hash`, `chi_hnf_policy_regs`, `chi_obs_regs`; the top |
+| `dataW` | `chi_hnf_top`, `chi_hni_top` (packets per line, Poison bits); `chi_pkg` (DAT width) |
+| `addrW` | every block that compares addresses or keys: `chi_sam`, `chi_hn_hash`, `chi_prefetch_map`, `chi_pos`, `chi_hazard`, `chi_snoop_filter`, `chi_slc`, `chi_excl_mon`, `chi_gpc`, `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm`, `chi_cfg_slave` |
+| `nodeIdW`, `rsvdcW`, `mpamW`, `mpamEn`, `mecEn`, `pbhaEn`, `cdaEn`, `gdiEn` | `chi_pkg` (flit layout); `gdiEn` also the legal PASs |
+| `txnIdW` | `chi_link_port`, `chi_link_tx`, `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm` |
+| `lpidW` | `chi_excl_mon` |
+| `replChannels` | `chi_link_tx` |
+| `topology`, `meshX`, `meshY`, `numXp`, `numDevPortsPerXp` | `chi_noc_top`, the wrappers, `chi_xp`, `chi_router`, `chi_route_compute`; `chi_pkg` (NodeID layout) |
+| `lcrdDepth`, `parityEn` | `chi_link_port`, `chi_link_rx`, `chi_link_tx` |
+| `interleaveGranule`, `hnHashShift` | `chi_sam`, `chi_hn_hash`, `chi_prefetch_map` |
+| `posEntries` | `chi_pos`, `chi_hazard`, `chi_hnf_top`; the top (`EO_TICKET_W`) |
+| `hniEntries` | `chi_hni_top` |
+| `retryCredits` | `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm` |
+| `snpFilterEntries`, `snpFilterWays` | `chi_snoop_filter`, `chi_hnf_top` |
+| `maxOutstandingSnoops` | `chi_hnf_top` (to `chi_snp_gen`) |
+| `slcEn` | `chi_hnf_top`, `chi_hnf_policy_regs` |
+| `slcSizePerHnf`, `slcWays`, `slcReplPolicy`, `slcEccEn` | `chi_slc` |
+| `slcInclusion`, `slcAllocPolicy`, `slcFillOnDmtMiss` | `chi_hnf_top` |
+| `gpcMode` | `chi_gpc`, `chi_hnf_top`, `chi_hni_top`; the top |
+| `gpcTableGranules`, `gpcCacheEntries` | `chi_gpc` |
+| `gpcSlcAlloc`, `eoAcrossHnf` | `chi_hnf_top` |
+| `dctEn`, `dmtEn`, `dmtSepEn`, `dwtEn`, `mteEn` | `chi_hnf_top` |
+| `dataCheckEn`, `poisonEn` | `chi_hnf_top`, `chi_hni_top`; `chi_pkg` (DAT layout) |
+| `exclEn` | `chi_hnf_top`, `chi_hni_top` |
+| `exclAddrCheck`, `exclMonMode`, `exclMonitors` | `chi_excl_mon` |
+| `stashEn` | `chi_stash_ctrl` |
+| `dvmEn`, `dvmMaxOps` | `chi_mn_dvm` |
+| `syscoEn` | `chi_sysco` |
+| `rasEn` | `chi_snoop_filter`, `chi_slc`, `chi_gpc`, `chi_hnf_top`, `chi_obs_regs` |
+| `pmuEn` | `chi_obs_regs` |
+| `qosRegEn` | `chi_qos_reg`; the top (block 4) |
+| `qosRegRate`, `qosRegBurst` | `chi_qos_regs` (reset values); `chi_qos_reg` (initial bucket); the top without APB |
+| `rmeEn` | the legal PASs (`chi_pkg`), `chi_hni_top`, and every APB block's write rule |
+| `apbRootWrites` | `chi_cfg_slave`, `chi_hnf_policy_regs`, `chi_obs_regs`, `chi_qos_regs` |
+| `cfgAccess` | `chi_cfg_slave`, `chi_hni_top`; the top |
+| `hnfSnfMap` | the top and `chi_pkg` (`snfIndexOfHnf`) |
+| `atomicEn`, `numIfPerNode`, `ccidW`, `groupIdW`, `slcLineBytes`, `slcTagPipelineDepth` | `chi_cfg_check` only: legality checks, no block behaviour (Section 3.2.4) |
+| `multiReqEn` | no block: MultiReq is carried only (Section 1.3) |
+
+: Table 15.5 Configuration fields and the blocks that read them
+
+# 16 Open issues, known limitations and decisions
+
+## 16.1 Known limitations
 
 1. Exactly one interface per node and one channel replica are accepted. There
    is no top-level interface or channel replication.
@@ -2909,8 +4615,22 @@ the cross-references in the prose stay correct in every output format.
     until something drives the design. The changes on
     `feature/chi-fabric-upgrade` have not even been linted or elaborated yet
     (Section 12.6).
+17. Flit parity is generated and checked as even parity: each check bit is
+    the XOR of its byte. B9.3.1 requires odd parity. The interconnect's own
+    links agree with themselves, but with `parityEn` a compliant node would
+    see a parity error on every flit the interconnect sends, and would cause
+    one on every flit it sends.
+18. Each HN-I's own SAM, whose regions are elaborated to send every address
+    to its SN-I, also receives the global region updates (Section 13.8). A
+    commit to region `k` overwrites the HN-I's region `k` with a
+    Requester-side region whose target is a Home, not an SN-I. The HN-I's
+    lookup is first match and its other regions cover the whole space, so
+    this matters when the overwritten region is the first one: after a
+    commit to region 0, HN-I accesses in region 0's new range find no SN-I
+    and complete with NDERR. On `main` the same wiring sent them to the
+    wrong node.
 
-## 13.2 Implementation-defined decision log
+## 16.2 Implementation-defined decision log
 
 | Decision | Current choice | Consequence |
 |------------------------|--------------------------------|--------------------------------------------|
@@ -2951,4 +4671,4 @@ the cross-references in the prose stay correct in every output format.
 | Bound assertion array ports | Packed two-dimensional, never unpacked | `bind` elaborates portably across simulators. |
 | Loop bounds in helper functions | Computed once into a local, never a call in the loop condition | The bound is not recomputed per iteration, and the design simulates. |
 
-: Table 13.1 Implementation-defined decisions and their consequences
+: Table 16.1 Implementation-defined decisions and their consequences

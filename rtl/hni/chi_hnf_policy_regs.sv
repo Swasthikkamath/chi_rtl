@@ -9,8 +9,9 @@
 //
 // The register map and the security rule are implementation defined; CHI
 // defines no register interface. Writes need a Root access with RME
-// (PNSE == 1, PPROT[1] == 0) and a Secure access without it, the same rule as
-// the region editor in chi_cfg_slave. Reads are unrestricted.
+// (PNSE == 1, PPROT[1] == 0), or a Secure one as well when apbRootWrites is
+// 0, and a Secure access without RME: the same rule as the region editor in
+// chi_cfg_slave. Reads are unrestricted.
 //
 //   0x00 SELECT  RW  HN-F index the next two registers refer to
 //   0x04 STAGED  RW  staged policy of the selected HN-F (chi_hnf_policy_t)
