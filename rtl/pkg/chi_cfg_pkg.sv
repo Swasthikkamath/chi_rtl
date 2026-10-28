@@ -95,6 +95,12 @@ package chi_cfg_pkg;
     GPC_WALK  = 2'd2
   } chi_gpc_mode_e;
 
+  // How a Home organizes its exclusive monitors' address comparison.
+  typedef enum logic {
+    EXCL_PER_LP = 1'b0,  // one address monitor per exclusive-capable LP
+    EXCL_POOL   = 1'b1   // exclMonitors address monitors shared by LRU
+  } chi_excl_mon_mode_e;
+
   // SAM region attributes: [0] valid, [1] reserved (it was the secure-only
   // bit), [3:2] chi_sam_region_kind_e, [11:4] the PASs allowed to access the
   // region, bit 4+p for PAS encoding p (IHI 0050H Table B13.47).
@@ -195,6 +201,10 @@ package chi_cfg_pkg;
     int unsigned        gpcCacheEntries;    // GPT cache entries of the walker
     // DVM transactions one MN runs at once; one is kept for a Non-sync.
     int unsigned        dvmMaxOps;
+    // Exclusive monitors: compare {line, PAS} as well as the per-LP bit, and
+    // how the address monitors are organized.
+    logic               exclAddrCheck;
+    chi_excl_mon_mode_e exclMonMode;
     int unsigned        lcrdDepth;
     int unsigned        exclMonitors;
     int unsigned        interleaveGranule;
@@ -237,7 +247,7 @@ package chi_cfg_pkg;
     slcReplPolicy: SLC_REPL_PLRU, slcInclusion: SLC_NON_INCLUSIVE,
     slcAllocPolicy: SLC_ALLOC_HINT, slcEccEn: 1'b0, slcTagPipelineDepth: 1,
     gpcMode: GPC_NONE, gpcTableGranules: 4096, gpcCacheEntries: 16,
-    dvmMaxOps: 4,
+    dvmMaxOps: 4, exclAddrCheck: 1'b1, exclMonMode: EXCL_PER_LP,
     lcrdDepth: 8, exclMonitors: 32,
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,

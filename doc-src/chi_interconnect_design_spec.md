@@ -119,7 +119,7 @@ packed flit field by itself is carriage, not implementation.
 | Request Retry, `RetryAck` and `PCrdGrant` | B2.5.5, B2.10 | Implemented | HN-F and HN-I. `chi_retry` counts the grants it owes per Requester and credit type, so a Home can always answer with `RetryAck` and its REQ input is never held. One of four P-Credit types is used; `PCrdGrant` names the Requester, carries no `TxnID` and no `DBID`, and goes to the highest recorded QoS, then round-robin. Every granted credit holds a transaction entry in reserve, so a request re-sent on it is always accepted. |
 | Deadlock freedom across REQ, RSP, SNP and DAT | B2.10, B4.11, B2.7.5.3 | Implemented | Every Home accepts RSP and DAT unconditionally into storage reserved before the message was invited and answers REQ with an entry or `RetryAck`, so no channel waits on another in a cycle. The argument is in Section 9.7; `chi_home_liveness_sva` states its environment assumptions and the entry-completion property for a formal tool, with per-entry bounded-completion covers in every build. |
 | P-Credit return | B2.5.6, B2.10.1 | Implemented | A granted credit leaves the accounting either when a request arrives with `AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`, which the Home accepts and discards. |
-| Exclusives | B6 | Partial | Checked when the entry starts, after same-location ordering. Exclusive loads register, `CleanUnique` and `WriteNoSnp` with `Excl` are checked; a failing `CleanUnique` sends no snoop and completes Shared, a failing `WriteNoSnp` writes nothing. The monitor is keyed by SrcID and `{line, PAS}` without LPID and does not re-register on failure (Stage 7). |
+| Exclusives | B6.2, B6.3 | Implemented | HN-F PoC and System monitor, HN-I System monitor. An LP is a Requester ordinal and an LPID below `RN_NUM_LP`. Every LP has the single bit B6.2.2 requires; with `exclAddrCheck` it also has an address monitor on `{line, PAS}`, per LP or in an LRU pool. One commit per start after same-location ordering: loads register, stores pass on the bit or a matching address monitor and otherwise fail and register again, a pass resets other LPs' bits and their monitors on that location, and another LP's write to a Non-snoopable location resets the monitors there (B6.2.4). Failed `CleanUnique` and `MakeReadUnique` upgrade nothing (Shared state); a failed `WriteNoSnp` writes nothing. Section 9.13. |
 | Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | System Level Cache | B2.8.3, B4.2.2.1, B7.4.2 | Implemented | One slice per HN-F when `slcEn`: set-associative, `{line, PAS}` tags, clean and dirty lines, PLRU, RRIP or random replacement, SECDED data with `slcEccEn`. Looked up with the directory when an entry starts; hits are read through a one-line port, fills and dirty data are written when the entry retires, dirty evictions are written back by victim entries that hold the location. Only Cacheable, non-Device lines are kept; CMOs, Combined writes, `ReadOnce*Invalid` and Device or Non-cacheable accesses take the line out first. `slcTagPipelineDepth` other than 1 is rejected. Section 9.10. |
@@ -577,7 +577,9 @@ it is a parameter at all and what choosing it wrong costs.
 | `gpcTableGranules` | 4096 | positive with TABLE | Granules the on-chip GPI array covers. |
 | `gpcCacheEntries` | 16 | positive with WALK | Entries of the shared GPT cache. |
 | `lcrdDepth` | 8 | 2 or greater | L-Credits advertised per channel and receive-buffer depth. |
-| `exclMonitors` | 32 | positive | Exclusive monitor entries. |
+| `exclMonitors` | 32 | positive | Address monitors in `EXCL_POOL` mode. |
+| `exclAddrCheck` | 1 | 0 or 1 | Address monitors on `{line, PAS}` in addition to the per-LP bit. |
+| `exclMonMode` | `EXCL_PER_LP` | PER_LP, POOL | One address monitor per LP, or `exclMonitors` shared by LRU. |
 | `interleaveGranule` | 64 | power of two, at least 64 | HN hash stripe bytes. |
 | `hnHashShift` | 6 | no range check | XOR fold distance. A shift at or above `addrW` collapses the folded term to zero. |
 | `dataCheckEn` | 1 | 0 or 1 | Adds `dataW/8` DAT DataCheck bits. |
@@ -733,7 +735,7 @@ open, not because interoperability demands it.
 | `gpc*` | Where the completer-side GPC is made, and how, is system design (B10.7.3.1 only requires one). | Table area against the latency of walks; cache size against walk traffic. |
 | `maxOutstandingSnoops` | CHI bounds snoops only per location and Snoopee (B4.11.2); how many a Home has in flight is its choice. | Snoop latency overlap against the snoop traffic a Home can inject at once. |
 | `lcrdDepth` | CHI fixes the credit protocol, not the pool size. | Receive-buffer area against sustainable throughput. See Section 3.2.3. |
-| `exclMonitors` | Monitor count is unspecified; the architecture permits spurious failure. | Monitor area against the spurious exclusive-failure rate. |
+| `exclMonitors`, `exclAddrCheck`, `exclMonMode` | B6.2.2 leaves address comparison to the implementation. | Monitor area against failures caused by another LP's store to a different location. |
 | `interleaveGranule`, `hnHashShift` | Address-to-Home mapping is part of the SAM, so it is implementation defined. | Stripe size against locality and hot-spotting. |
 | `txnIdW` | The flit slot is a fixed 12 bits; how many a node uses is its own business. | Outstanding transactions per Requester against tracking area. |
 | `lpidW`, `ccidW`, `groupIdW` | These occupy fixed flit slots. The parameter sets how many bits are significant. | Only internal comparator and storage width. Flit length is unaffected. |
@@ -824,6 +826,7 @@ reserved for later work, not features.
 | `NUM_REGIONS` | 4; positive | SAM table depth and select width. |
 | `NUM_NODES` | sum of all node counts; must equal that sum | Fabric endpoint count and the index space for the link status outputs. |
 | `NODE_IDS` | all-ones sentinel derives the default; effective IDs must be unique | Endpoint identities and routing targets. |
+| `RN_NUM_LP` | each at most `2**lpidW` | Exclusive-capable LPs of each Requester, in ordinal order; their sum sizes the per-LP monitors. |
 | `USE_DEFAULT_PLACEMENTS` | 1 | 1 places any population automatically (Section 5.3); 0 uses `PLACEMENTS`. |
 | `PLACEMENTS` | each valid, correct class and index, in range, collision-free | Custom placement. For RING and CROSSBAR, `meshX` is the crosspoint index and `meshY` must be 0. |
 | `XBAR_MAX_XP` | 8; a CROSSBAR may not exceed it | Bounds the square-law link count of a crossbar. |
@@ -1921,6 +1924,62 @@ the Granule Protection Check: by PA (`PA[51:12]` from the payload) when AddrV
 is set and the invalidation size is one granule, otherwise the whole cache.
 It still goes to every Request Node.
 
+## 9.13 Exclusive monitors
+
+Both Homes have a `chi_excl_mon`. The HN-F's is the PoC monitor for Snoopable
+locations and the System monitor for its Non-snoopable ones; the HN-I's is
+the System monitor of the HN-I range (B6.2.1, B6.2.4). Excl is not passed on
+to a Subordinate: the monitor is at the Home, and the Home gives `EXOK`.
+
+**Logical Processors.** An LP is a Requester ordinal, from the SrcID, with an
+LPID below that Requester's `RN_NUM_LP`. An exclusive access from an LPID
+outside that range is from an unidentifiable LP: its store fails and it
+registers nothing (B6.2.1), and `EXCL_LPID_IN_RANGE` flags it.
+
+**State.** Every LP has one bit, the minimum monitor B6.2.2 requires of any
+implementation, so forward progress never depends on anything else. With
+`exclAddrCheck` each LP also has an address monitor holding the `{line, PAS}`
+of its sequence: one per LP in `EXCL_PER_LP`, or `exclMonitors` of them
+shared in least-recently-used order in `EXCL_POOL`, where losing one only
+takes the enhancement away from that LP. Without `exclAddrCheck` no address
+is stored.
+
+**Commit.** The monitor is consulted once, when the entry starts, after
+`chi_hazard` has ordered it behind every older transaction to its location;
+the check, the decision, the resets and the registration happen in that one
+cycle, one commit per cycle.
+
+| Event | Effect |
+|-------|--------|
+| Exclusive Load (`ReadClean`, `ReadNotSharedDirty`, `ReadShared`, `ReadPreferUnique`, `ReadNoSnp`) | The LP registers: bit set, address monitor on the location. `EXOK` in the data, except for `ReadPreferUnique` (B6.3.1). |
+| Exclusive Store (`CleanUnique`, `MakeReadUnique`, `WriteNoSnp`) | Passes if the LP's bit is set or its address monitor holds the location. A pass resets every other LP's bit and every other address monitor on the location; the passing LP stays registered (B6.2.1, B6.2.2). A fail registers the LP, so the retry can pass. |
+| Write by another LP to a Non-snoopable location | The System monitors of the location are reset (B6.2.4): address monitors on it, and the bits of LPs whose location is that one or is unknown. Without `exclAddrCheck` every other LP's bit is reset. |
+| Write to a Snoopable location | No effect on the PoC monitor; the RN-F's LP monitor is reset by the invalidating snoop (B6.2.1). |
+
+: Table 9.5 Exclusive monitor commits
+
+While a passing Exclusive Store waits for its `CompAck`, no other LP registers
+(B6.2.1): its load or failed store is answered as not registered.
+
+**This differs from the address-only rule in one respect.** An address-checking
+monitor that failed a store whose LP had not been reset by any other LP's
+pass would break the forward-progress guarantee of B6.2.2. So a store passes
+on the per-LP bit as well as on a matching address monitor, and a pass resets
+other LPs' bits whatever their location.
+
+**Responses.** A failing `CleanUnique` sends no snoop and returns `Comp` in
+SC. A failing `MakeReadUnique` invalidates nothing and returns SC: `Comp_SC`
+if the Requester still holds the line, otherwise `CompData_SC` after a
+non-invalidating snoop of a possible owner; a pass returns Unique, and
+`EXOK` is never used for it (B6.3.1.1). A failing `WriteNoSnp` writes nothing
+and completes with `Comp` without `EXOK`.
+
+**Direct transfers and the SLC.** An Exclusive Load that does not fail must
+not use DMT or DCT, and a `WriteNoSnp(Excl)` must not use DWT when the check
+fails (B6.3.1); since the check is made at the Home before any direct
+transfer is chosen (Stage 8), the Home returns `EXOK` in every case. The SLC
+does not affect monitor state.
+
 # 10 RN-F boundary cache-state model
 
 These tables are the required architectural model for an RN-F cache
@@ -2016,6 +2075,7 @@ or performance guarantees are supplied.
 | `chi_pas_sva.sv` | `SAM_PAS_REFUSAL_KEEPS_REGION`, `SAM_ACCEPTED_PAS_ALLOWED`, `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED`, `SF_ONE_WAY_PER_LOCATION` | `SAM_PAS_REFUSED`, `PAS_ALIAS_EVICTED`, `POPA_FORWARDED`, `REFUSED_REQUEST_ALLOCATED` |
 | `chi_slc_sva.sv` | `SLC_ONE_WAY_PER_LOCATION`, `SLC_DIRTY_NEVER_DROPPED`, `SLC_NO_DEVICE_ALLOCATION`, `SLC_DISCARD_ONLY_AFTER_WRITEBACK` | `SLC_HIT`, `SLC_MISS_FILL`, `SLC_DIRTY_EVICTION`, `SLC_EVICTION_HOLDS_REQUEST`, `SLC_CMO_HITS_DIRTY`, `SLC_MAINTENANCE` |
 | `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
+| `chi_excl_sva.sv` | `EXCL_SECOND_PASS_NEEDS_REGISTRATION`, `EXCL_PASS_CLEARS_SAME_LOCATION`, `EXCL_PASS_KEEPS_OTHER_LOCATIONS`, `EXCL_FAIL_REREGISTERS`, `EXCL_ONE_MONITOR_PER_LP`, `EXCL_LPID_IN_RANGE` | `EXCL_PASS`, `EXCL_FAIL_REGISTERS`, `EXCL_FAIL_THEN_PASS`, `EXCL_TWO_LPS_ONE_LOCATION`, `EXCL_TWO_LPS_TWO_LOCATIONS_PASS`, `EXCL_ADDRESS_MISMATCH_FAIL` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
 | `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
@@ -2141,6 +2201,7 @@ rtl/sva/chi_home_liveness_sva.sv
 rtl/sva/chi_pas_sva.sv
 rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_gpc_sva.sv
+rtl/sva/chi_excl_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```

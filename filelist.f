@@ -56,5 +56,6 @@ rtl/sva/chi_home_liveness_sva.sv
 rtl/sva/chi_pas_sva.sv
 rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_gpc_sva.sv
+rtl/sva/chi_excl_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv

@@ -45,10 +45,13 @@ module chi_hnf_top #(
   parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     RNF_NODE_IDS [NUM_RNF] = '{default:'0},
-  // Every Requester that may send to this Home, for Request Retry.
+  // Every Requester that may send to this Home, for Request Retry and the
+  // exclusive monitor, with its exclusive-capable LPs and their sum.
   parameter int unsigned NUM_REQUESTERS = NUM_RNF,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     REQUESTER_NODE_IDS [NUM_REQUESTERS] = '{default:'0},
+  parameter int unsigned RN_NUM_LP [NUM_REQUESTERS] = '{default:1},
+  parameter int unsigned NUM_LP = NUM_REQUESTERS,
   // Capabilities of the SN-F this Home is striped to and of every RN-F as a
   // DCT forwarder (IHI 0050H B16.1.3, B16.1.5).
   parameter bit SN_DMT_CAP = 1'b1,
@@ -515,11 +518,16 @@ module chi_hnf_top #(
   logic [POS_DEPTH-1:0] eAllPas;
 
   // Exclusive monitor.
-  logic exclReserveValid;
-  logic exclReserveReady;
-  logic exclCheckValid;
-  logic exclOkay;
-  logic exclConflictValid;
+  logic exclCommitValid;
+  logic exclCommitLoad;
+  logic exclCommitStore;
+  logic exclCommitUpdate;
+  logic exclRegisterBlocked;
+  logic exclPass;
+  logic exclRegistered;
+  logic exclLpKnown;
+  logic [clog2Min1(NUM_LP)-1:0] exclLpIndex;
+  logic [POS_DEPTH-1:0] eMruFail;
 
   // Stash decode of the starting entry.
   logic stashIsStash;
@@ -874,45 +882,60 @@ module chi_hnf_top #(
     slcStartIsCmo = entry[startIndex].kind == HNF_KIND_CMO;
   end
 
-  // The monitor is consulted when an entry starts, after chi_hazard has
-  // ordered it behind every older transaction to the same location.
+  // The monitor commits once per start, after chi_hazard has ordered the
+  // entry behind every older transaction to its location (IHI 0050H B6.2).
+  // Exclusive Loads register, Exclusive Stores are checked, and a write to a
+  // Non-snoopable location by another LP resets the System monitors of the
+  // location (B6.2.4). Excl is the SnoopMe bit in an atomic.
   always_comb begin
     entry_t starting;
-    logic exclRequest;
+    logic excl;
+    logic noSnpWrite;
     starting = entry[startIndex];
-    exclRequest = startValid && starting.req.exclOrSnoopMeOrCah
-                  && (starting.err == HNF_ERR_NONE) && CFG.exclEn;
-    exclReserveValid = exclRequest
-                       && (starting.req.opcode inside {
-                             REQ_READ_SHARED, REQ_READ_CLEAN,
-                             REQ_READ_NOT_SHARED_DIRTY, REQ_READ_PREFER_UNIQUE,
-                             REQ_READ_NO_SNP});
-    exclCheckValid = exclRequest
+    excl = starting.req.exclOrSnoopMeOrCah && (starting.kind != HNF_KIND_ATOMIC);
+    noSnpWrite = ((starting.kind == HNF_KIND_WRITE)
+                  && !isWriteUnique(starting.req.opcode))
+                 || (starting.req.opcode inside {REQ_WRITE_NO_SNP_ZERO,
+                                                 REQ_WRITE_NO_SNP_DEF})
+                 || ((starting.kind == HNF_KIND_ATOMIC)
+                     && !starting.req.snpAttrOrDoDwt);
+    exclCommitLoad = excl
                      && (starting.req.opcode inside {
-                           REQ_CLEAN_UNIQUE, REQ_WRITE_NO_SNP_FULL,
-                           REQ_WRITE_NO_SNP_PTL});
-    exclConflictValid = startValid && (starting.err == HNF_ERR_NONE)
-                        && !starting.req.exclOrSnoopMeOrCah
-                        && ((starting.kind == HNF_KIND_WRITE)
-                            || (starting.kind == HNF_KIND_WRITE_ZERO)
-                            || (starting.kind == HNF_KIND_COPYBACK)
-                            || (starting.kind == HNF_KIND_ATOMIC));
+                           REQ_READ_SHARED, REQ_READ_CLEAN,
+                           REQ_READ_NOT_SHARED_DIRTY, REQ_READ_PREFER_UNIQUE,
+                           REQ_READ_NO_SNP});
+    exclCommitStore = excl
+                      && (starting.req.opcode inside {
+                            REQ_CLEAN_UNIQUE, REQ_MAKE_READ_UNIQUE,
+                            REQ_WRITE_NO_SNP_FULL, REQ_WRITE_NO_SNP_PTL});
+    exclCommitUpdate = !excl && noSnpWrite;
+    exclCommitValid = startValid && (starting.err == HNF_ERR_NONE) && CFG.exclEn
+                      && (exclCommitLoad || exclCommitStore || exclCommitUpdate);
+    // While a passing Exclusive Store from another LP waits for CompAck, no
+    // other LP registers (B6.2.1).
+    exclRegisterBlocked = 1'b0;
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      if (posActive[i] && entry[i].exclStore && entry[i].exclPass
+          && entry[i].compAckOwed
+          && !((entry[i].req.srcId == starting.req.srcId)
+               && (entry[i].req.groupIdOrLpid == starting.req.groupIdOrLpid)))
+        exclRegisterBlocked = 1'b1;
   end
 
   chi_excl_mon #(
-    .CFG(CFG), .MONITORS((CFG.exclMonitors > 0) ? CFG.exclMonitors : 1),
-    .ADDR_W(KEY_W)
+    .CFG(CFG), .NUM_REQUESTERS(NUM_REQUESTERS),
+    .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS), .RN_NUM_LP(RN_NUM_LP),
+    .NUM_LP(NUM_LP), .ADDR_W(KEY_W)
   ) exclusive_monitor (
     .clk, .resetn,
-    .reserveValid(exclReserveValid), .reserveReady(exclReserveReady),
-    .reserveLineAddr(posKey[startIndex]),
-    .reserveRequester(entry[startIndex].req.srcId),
-    .exclusiveCheckValid(exclCheckValid),
-    .exclusiveLineAddr(posKey[startIndex]),
-    .exclusiveRequester(entry[startIndex].req.srcId),
-    .exclusiveOkay(exclOkay),
-    .conflictValid(exclConflictValid), .conflictIsWriteOrSnoop(1'b1),
-    .conflictLineAddr(posKey[startIndex])
+    .commitValid(exclCommitValid), .commitLoad(exclCommitLoad),
+    .commitStore(exclCommitStore), .commitUpdate(exclCommitUpdate),
+    .commitSrcId(entry[startIndex].req.srcId),
+    .commitLpid(entry[startIndex].req.groupIdOrLpid),
+    .commitKey(posKey[startIndex]),
+    .registerBlocked(exclRegisterBlocked),
+    .pass(exclPass), .registered(exclRegistered),
+    .lpKnown(exclLpKnown), .lpIndex(exclLpIndex)
   );
 
   chi_stash_ctrl #(
@@ -1140,15 +1163,25 @@ module chi_hnf_top #(
     e.sfOwner = sfLookupOwner;
     e.snpOpcode = snoopForRequest(e.req.opcode, CFG.mteEn);
     e.snpRetToSrc = 1'b0;
-    e.exclLoad = exclReserveValid && exclReserveReady;
-    e.exclStore = exclCheckValid;
-    e.exclPass = exclCheckValid && exclOkay;
+    e.exclLoad = exclCommitValid && exclCommitLoad && exclRegistered;
+    e.exclStore = exclCommitValid && exclCommitStore;
+    e.exclPass = exclCommitValid && exclCommitStore && exclPass;
     targets = '0;
 
     if (e.err == HNF_ERR_NONE) begin
       case (e.kind)
         HNF_KIND_READ: begin
-          if ((e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
+          if ((e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.exclStore
+              && !e.exclPass) begin
+            // A failing MakeReadUnique(Excl) upgrades nothing and
+            // invalidates nothing: Comp_SC if the Requester still holds the
+            // line, otherwise its data in SC got with a non-invalidating
+            // snoop of a possible owner (IHI 0050H B6.3.1.1).
+            targets = (e.reqIsRnf && sfLookupHit && sfLookupSharers[e.reqRnf])
+                      ? '0 : (ownerElsewhere ? ownerBit : '0);
+            e.snpOpcode = SNP_SHARED;
+            e.snpRetToSrc = 1'b1;
+          end else if ((e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
               && sfLookupHit && sfLookupSharers[e.reqRnf]) begin
             // The Requester still holds the line, so the other copies are
             // invalidated and a Comp without data upgrades it
@@ -1395,6 +1428,8 @@ module chi_hnf_top #(
                        || (e.snpKeep != '0);
       eMruHold[i] = (e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
                     && e.sfHit && e.sfSharers[e.reqRnf];
+      eMruFail[i] = (e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.exclStore
+                    && !e.exclPass;
       // The Home supplies read data unless a Snoopee forwarded it.
       eDataPath[i] = (e.err == HNF_ERR_NONE) && !e.snpFwded
                      && (((e.kind == HNF_KIND_READ) && !eMruHold[i])
@@ -1403,10 +1438,12 @@ module chi_hnf_top #(
       // A forwarding Snoopee chose the Requester's state and settled the
       // Dirty responsibility with it (FwdState[2]); Dirty data it returned
       // to the Home is the Home's to write back.
-      takesDirty = !e.snpFwded && readTakesDirty(e.req.opcode, eOthersKeep[i]);
+      takesDirty = !e.snpFwded && !eMruFail[i]
+                   && readTakesDirty(e.req.opcode, eOthersKeep[i]);
       eGrant[i] = e.snpFwded ? e.snpFwdState
-                             : readCompResp(e.req.opcode, eOthersKeep[i],
-                                            e.snpDirty && takesDirty);
+                  : (eMruFail[i] ? RESP_SC
+                                 : readCompResp(e.req.opcode, eOthersKeep[i],
+                                                e.snpDirty && takesDirty));
 
       // Memory is read when the snoops did not bring a whole line: for a
       // read, for the initial value of an atomic, and for the line a Data
@@ -2085,7 +2122,9 @@ module chi_hnf_top #(
                             : ((e.exclStore && !e.exclPass) ? RESP_SC
                                                             : RESP_UC_UD);
           HNF_KIND_READ:
-            response.resp = RESP_UC_UD;
+            // MakeReadUnique: Unique on a pass, Shared on an exclusive fail
+            // (IHI 0050H B6.3.1.1).
+            response.resp = eMruFail[rspEntry] ? RESP_SC : RESP_UC_UD;
           default:
             response.resp = RESP_I;
         endcase
@@ -2286,8 +2325,9 @@ module chi_hnf_top #(
       HNF_KIND_READ: begin
         if (eMruHold[sfUpdateEntry] || (eGrant[sfUpdateEntry] != RESP_I)) begin
           sharers = sharers | reqBit;
-          if (eMruHold[sfUpdateEntry]
-              || (eGrant[sfUpdateEntry] != RESP_SC)) begin
+          if ((eMruHold[sfUpdateEntry] && !eMruFail[sfUpdateEntry])
+              || ((eGrant[sfUpdateEntry] != RESP_SC)
+                  && !eMruHold[sfUpdateEntry])) begin
             ownerValid = e.reqIsRnf;
             owner = e.reqRnf;
           end

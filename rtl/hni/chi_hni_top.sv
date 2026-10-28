@@ -31,8 +31,10 @@
 // coherent allocating reads, CopyBacks, CleanUnique, MakeUnique, a DVMOp,
 // ReadNoSnpSep from a Requester (IHI 0050H B1.6) — and addresses no SN-I
 // serves complete with NDERR, after any data the Requester owes
-// (IHI 0050H B9.1.1). Until the HN-I exclusive monitor exists (Stage 7),
-// Excl is passed to the Subordinate and its EXOK is passed back.
+// (IHI 0050H B9.1.1). Exclusives use the HN-I's own System monitor
+// (B6.2.4, chi_excl_mon): ReadNoSnp(Excl) registers, WriteNoSnp(Excl) is
+// checked and writes nothing when it fails, and a write by another LP resets
+// the monitors of its location; Excl is not sent on to the SN-I.
 //
 // Every RSP and DAT input is accepted unconditionally into storage reserved
 // before the message was invited, and a request that finds no entry is
@@ -55,10 +57,13 @@ module chi_hni_top #(
   parameter int unsigned NUM_SNI = 1,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     SNI_NODE_IDS [NUM_SNI] = '{default:'0},
-  // Every Requester that may send to this Home, for Request Retry.
+  // Every Requester that may send to this Home, for Request Retry and the
+  // exclusive monitor, with its exclusive-capable LPs and their sum.
   parameter int unsigned NUM_REQUESTERS = 1,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
-    REQUESTER_NODE_IDS [NUM_REQUESTERS] = '{default:'0}
+    REQUESTER_NODE_IDS [NUM_REQUESTERS] = '{default:'0},
+  parameter int unsigned RN_NUM_LP [NUM_REQUESTERS] = '{default:1},
+  parameter int unsigned NUM_LP = NUM_REQUESTERS
 ) (
   input  logic clk,
   input  logic resetn,
@@ -179,6 +184,10 @@ module chi_hni_top #(
     logic               dnCmoDone;    // forwarded CMO done
     logic               dnAccepted;   // the SN-I has accepted the first request
     logic               gpcPending;   // granule protection not yet answered
+    // Exclusive result, decided when the entry starts.
+    logic               exclLoad;     // a ReadNoSnp(Excl) the monitor registered
+    logic               exclStore;    // a WriteNoSnp(Excl)
+    logic               exclPass;     // which passed
     chi_resp_e          dnResp;       // Resp of the SN-I's CompData or Comp
     chi_resp_err_e      dnErr;        // RespErr the SN-I reported
   } hni_entry_t;
@@ -295,6 +304,17 @@ module chi_hni_top #(
   logic retryGrantsOwed;
   hni_entry_t allocEntry;
   hni_entry_t allocEntryChecked;
+  logic [DEPTH-1:0] eExclNeeds;
+  logic exclCommitValid;
+  logic [IDX_W-1:0] exclCommitEntry;
+  logic exclCommitLoad;
+  logic exclCommitStore;
+  logic exclCommitUpdate;
+  logic exclRegisterBlocked;
+  logic exclPass;
+  logic exclRegistered;
+  logic exclLpKnown;
+  logic [clog2Min1(NUM_LP)-1:0] exclLpIndex;
   logic gpcAllocCheck;
   logic gpcRecheckValid;
   logic [IDX_W-1:0] gpcRecheckEntry;
@@ -636,11 +656,22 @@ module chi_hni_top #(
                      && !e.gpcPending;
       eEndpointClear[i] = (e.req.order != ORDER_ENDPOINT) || !olderOrderedPending;
 
-      // What still has to go downstream.
+      // The monitor sees Exclusive accesses and every write (B6.2.4).
+      eExclNeeds[i] = CFG.exclEn && !e.err
+                      && ((e.req.exclOrSnoopMeOrCah
+                           && (e.req.opcode inside {REQ_READ_NO_SNP,
+                                                    REQ_WRITE_NO_SNP_FULL,
+                                                    REQ_WRITE_NO_SNP_PTL}))
+                          || (e.kind inside {HNI_K_WRITE, HNI_K_WRITE_ZERO,
+                                             HNI_K_ATOMIC}));
+
+      // What still has to go downstream. A failing exclusive write sends
+      // nothing (IHI 0050H B6.2.4, Table B6.2).
       eNoDownstream[i] = e.err
                          || !(e.kind inside {HNI_K_READ, HNI_K_WRITE,
                                              HNI_K_WRITE_ZERO, HNI_K_ATOMIC})
-                         || ((e.kind == HNI_K_WRITE) && e.wrCancel);
+                         || ((e.kind == HNI_K_WRITE)
+                             && (e.wrCancel || (e.exclStore && !e.exclPass)));
       eMainNeeded[i] = posStarted[i] && !e.err && !e.dnMainDone
                        && (e.kind inside {HNI_K_READ, HNI_K_WRITE,
                                           HNI_K_WRITE_ZERO, HNI_K_ATOMIC});
@@ -652,7 +683,7 @@ module chi_hni_top #(
       // A cancelled write sends nothing (IHI 0050H B2.3.2.1); a Combined
       // write still performs its CMO.
       eSkipWrite[i] = eMainNeeded[i] && (e.kind == HNI_K_WRITE)
-                      && !e.wrOwed && e.wrCancel;
+                      && !e.wrOwed && (e.wrCancel || (e.exclStore && !e.exclPass));
 
       // Configuration writes take effect in arrival order per line, once
       // their data is complete.
@@ -711,10 +742,56 @@ module chi_hni_top #(
     end
   end
 
+  // One monitor commit per cycle: of the entries starting that need it, the
+  // lowest starts now and the others next.
   always_comb begin
-    posStartMask = eMayStart;
+    exclCommitValid = 1'b0;
+    exclCommitEntry = '0;
+    for (int unsigned i = 0; i < DEPTH; i++)
+      if (!exclCommitValid && eMayStart[i] && eExclNeeds[i]) begin
+        exclCommitValid = 1'b1;
+        exclCommitEntry = IDX_W'(i);
+      end
+    posStartMask = eMayStart & ~(eExclNeeds & ~(exclCommitValid
+                                                 ? (DEPTH'(1) << exclCommitEntry)
+                                                 : '0));
     posFreeMask = eAllDone;
   end
+
+  always_comb begin
+    hni_entry_t c;
+    c = entry[exclCommitEntry];
+    exclCommitLoad = c.req.exclOrSnoopMeOrCah && (c.req.opcode == REQ_READ_NO_SNP);
+    exclCommitStore = c.req.exclOrSnoopMeOrCah
+                      && (c.req.opcode inside {REQ_WRITE_NO_SNP_FULL,
+                                               REQ_WRITE_NO_SNP_PTL});
+    exclCommitUpdate = !exclCommitLoad && !exclCommitStore;
+    // While a passing exclusive write from another LP waits for CompAck,
+    // no other LP registers (B6.2.1).
+    exclRegisterBlocked = 1'b0;
+    for (int unsigned i = 0; i < DEPTH; i++)
+      if (posActive[i] && entry[i].exclStore && entry[i].exclPass
+          && entry[i].compAckOwed
+          && !((entry[i].req.srcId == c.req.srcId)
+               && (entry[i].req.groupIdOrLpid == c.req.groupIdOrLpid)))
+        exclRegisterBlocked = 1'b1;
+  end
+
+  chi_excl_mon #(
+    .CFG(CFG), .NUM_REQUESTERS(NUM_REQUESTERS),
+    .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS), .RN_NUM_LP(RN_NUM_LP),
+    .NUM_LP(NUM_LP), .ADDR_W(KEY_W)
+  ) exclusive_monitor (
+    .clk, .resetn,
+    .commitValid(exclCommitValid), .commitLoad(exclCommitLoad),
+    .commitStore(exclCommitStore), .commitUpdate(exclCommitUpdate),
+    .commitSrcId(entry[exclCommitEntry].req.srcId),
+    .commitLpid(entry[exclCommitEntry].req.groupIdOrLpid),
+    .commitKey(posKey[exclCommitEntry]),
+    .registerBlocked(exclRegisterBlocked),
+    .pass(exclPass), .registered(exclRegistered),
+    .lpKnown(exclLpKnown), .lpIndex(exclLpIndex)
+  );
 
   // ---------------------------------------------------------------------
   // Downstream operations: the read, write or atomic first, then the CMO of
@@ -811,6 +888,8 @@ module chi_hni_top #(
     request.numReq = '0;
     request.tagOp = chi_tag_op_e'('0);
     request.order = e.ordered ? e.req.order : ORDER_NONE;
+    // The monitor is here; the SN-I sees an ordinary access.
+    request.exclOrSnoopMeOrCah = 1'b0;
     case (e.dnKind)
       HNF_DN_READ: begin
         request.opcode = REQ_READ_NO_SNP;
@@ -992,7 +1071,8 @@ module chi_hni_top #(
       response.tgtId = e.req.srcId;
       response.txnId = e.req.txnId;
       response.dbIdOrGroupId = CHI_RSP_DBID_SLOT_W'(rspEntry);
-      response.respErr = e.err ? RESP_ERR_NDERR : e.dnErr;
+      response.respErr = e.err ? RESP_ERR_NDERR
+                         : ((e.exclStore && e.exclPass) ? RESP_ERR_EXOK : e.dnErr);
       if (e.receiptOwed) begin
         response.opcode = RSP_READ_RECEIPT;
         response.respErr = RESP_ERR_OK;
@@ -1072,7 +1152,9 @@ module chi_hni_top #(
     data.dataId = datEntryDataId;
     data.ccId = e.req.addr[5:4];
     data.resp = RESP_I;
-    data.respErr = e.err ? RESP_ERR_NDERR : e.dnErr;
+    data.respErr = e.err ? RESP_ERR_NDERR
+                   : ((e.dnErr != RESP_ERR_OK) ? e.dnErr
+                      : (e.exclLoad ? RESP_ERR_EXOK : RESP_ERR_OK));
     line = bufRsp[datEntry];
     if (e.kind == HNI_K_CFG_READ) begin
       line = '0;
@@ -1194,6 +1276,16 @@ module chi_hni_top #(
       if (posAllocValid && posAllocReady)
         entry[posAllocIndex] <= allocEntryChecked;
 
+      // The monitor's answer, recorded as the entry starts. A failing
+      // exclusive write then sends nothing.
+      if (exclCommitValid) begin
+        entry[exclCommitEntry].exclLoad <= exclCommitLoad && exclRegistered;
+        entry[exclCommitEntry].exclStore <= exclCommitStore;
+        entry[exclCommitEntry].exclPass <= exclCommitStore && exclPass;
+        if (exclCommitStore && !exclPass)
+          entry[exclCommitEntry].dnAccepted <= 1'b1;
+      end
+
       if (gpcRecheckValid && gpcCheckDone) begin
         entry[gpcRecheckEntry].gpcPending <= 1'b0;
         if (gpcCheckFail)
@@ -1205,7 +1297,7 @@ module chi_hni_top #(
       for (int unsigned i = 0; i < DEPTH; i++) begin
         // Start: an entry with nothing to send downstream counts as
         // accepted, so it never holds back an Endpoint-ordered request.
-        if (posStartMask[i] && eNoDownstream[i])
+        if (posStartMask[i] && eNoDownstream[i] && !eExclNeeds[i])
           entry[i].dnAccepted <= 1'b1;
         if (eSkipWrite[i]) begin
           entry[i].dnMainDone <= 1'b1;

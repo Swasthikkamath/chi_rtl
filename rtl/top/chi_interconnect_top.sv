@@ -25,6 +25,11 @@ module chi_interconnect_top #(
   parameter logic [(CFG.numSnf > 0 ? CFG.numSnf : 1)-1:0] SNF_DMT_CAP = '1,
   parameter logic [(CFG.numSnf > 0 ? CFG.numSnf : 1)-1:0] SNF_DWT_CAP = '1,
   parameter logic [(CFG.numRnf > 0 ? CFG.numRnf : 1)-1:0] RNF_DCT_CAP = '1,
+  // Exclusive-capable Logical Processors of each Requester (RN-F, RN-D, RN-I
+  // in ordinal order), each at most 2**lpidW (IHI 0050H B6.2).
+  parameter int unsigned
+    RN_NUM_LP [((CFG.numRnf + CFG.numRnd + CFG.numRni) > 0)
+               ? (CFG.numRnf + CFG.numRnd + CFG.numRni) : 1] = '{default:4},
   parameter logic [CFG.addrW-1:0] CFG_MMIO_BASE =
     {CFG.addrW{1'b1}} - CFG.addrW'(12'hfff),
   parameter bit USE_DEFAULT_REGIONS = 1'b1,
@@ -309,6 +314,15 @@ module chi_interconnect_top #(
   localparam requester_id_array_t REQUESTER_NODE_IDS =
     makeRequesterIds(EFFECTIVE_NODE_IDS);
   localparam dvm_target_array_t DVM_TARGET_IDS = makeDvmTargets(EFFECTIVE_NODE_IDS);
+
+  function automatic int unsigned totalLps();
+    int unsigned total;
+    total = 0;
+    for (int unsigned r = 0; r < NUM_DVM; r++)
+      total += RN_NUM_LP[r];
+    return (total > 0) ? total : 1;
+  endfunction
+  localparam int unsigned TOTAL_LP = totalLps();
   localparam region_addr_array_t EFFECTIVE_REGION_BASE = makeRegionBase();
   localparam region_addr_array_t EFFECTIVE_REGION_LIMIT = makeRegionLimit();
   localparam region_target_array_t EFFECTIVE_REGION_TARGET =
@@ -1048,6 +1062,7 @@ module chi_interconnect_top #(
       .NUM_RNF((CFG.numRnf > 0) ? CFG.numRnf : 1),
       .RNF_NODE_IDS(RNF_NODE_IDS),
       .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS),
+      .RN_NUM_LP(RN_NUM_LP), .NUM_LP(TOTAL_LP),
       .SN_DMT_CAP(SNF_DMT_CAP[SNF_INDEX]),
       .SN_DWT_CAP(SNF_DWT_CAP[SNF_INDEX]),
       .RNF_DCT_CAP(RNF_DCT_CAP)
@@ -1088,7 +1103,8 @@ module chi_interconnect_top #(
       .REGION_ATTRIBUTES('{default:samAttributes(SAM_REGION_DIRECT,
                                                  pasLegalMask(CFG), 1'b1)}),
       .NUM_SNI(NUM_SNI_E), .SNI_NODE_IDS(SNI_NODE_IDS),
-      .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS)
+      .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS),
+      .RN_NUM_LP(RN_NUM_LP), .NUM_LP(TOTAL_LP)
     ) hni (
       .clk, .resetn, .reqInValid(reqOutValid[OFF_HNI+i]),
       .reqInReady(reqOutReady[OFF_HNI+i]), .reqInFlit(reqOutFlit[OFF_HNI+i]),
