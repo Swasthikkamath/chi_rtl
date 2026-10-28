@@ -83,6 +83,7 @@ module chi_noc_compile #(
     .PLACEMENTS(PLACEMENTS)
   ) noc (
     .*,
+    .fabricBusy(),
     .xpInjected(),
     .xpEjected()
   );

@@ -26,7 +26,19 @@
 //       that has left system coherency.
 // chi_qos_sva (chi_qos_reg):
 //   QOS_INJECTION_TAKES_A_TOKEN  a regulated port injects only with a token.
-//   QOS_TOKENS_BOUNDED  a bucket never holds more than qosRegBurst.
+//   QOS_TOKENS_BOUNDED  a bucket holds no more than its burst, once the burst
+//       has been stable for a cycle.
+// chi_hnf_eo_sva (chi_hnf_top):
+//   EO_STARTS_ON_ITS_TICKET  an Endpoint-ordered request starts only when its
+//       ticket is the one served for its Requester and SN-F (Section 9.5).
+// chi_hnf_gpt_slc_sva (chi_hnf_top):
+//   GPT_FILL_ONLY_WHILE_LINE_FREE  a GPT line goes into the SLC only while no
+//       transaction or eviction holds the line, in any PAS.
+// chi_cfg_slave_sva (chi_cfg_slave):
+//   REGION_COMMIT_LEGAL  a committed region is legal (chi_pkg::samRegionLegal).
+// chi_quiescence_sva (chi_interconnect_top):
+//   REGION_UPDATE_WHEN_QUIESCENT  an APB region commit lands only when the
+//       fabric was empty and every Home and MN idle.
 // chi_obs_sva (chi_obs_regs):
 //   RAS_UNCORRECTED_RAISES_IRQ  an uncorrected error leaves its record's
 //       interrupt HIGH.
@@ -36,7 +48,9 @@
 // Covers: a connect and a disconnect, a disconnect waiting to drain, a
 // snoop dropped at disconnect, a directory and SLC tag error corrected and
 // uncorrectable, a directory lookup of a set with a dead way, a regulated
-// port held back, an interrupt raised and cleared.
+// port held back, an interrupt raised and cleared, an Endpoint-ordered
+// request waiting on another Home, a GPT read hitting in the SLC and a GPT
+// line filled, a region commit refused.
 module chi_sysco_sva #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned NUM_COH = 1
@@ -199,19 +213,19 @@ module chi_qos_sva #(
   input logic resetn,
   input logic [NUM_PORTS-1:0] inValid,
   input logic [NUM_PORTS-1:0] outValid,
-  input logic [NUM_PORTS-1:0][7:0] tokens
+  input logic [NUM_PORTS-1:0][7:0] tokens,
+  input logic [NUM_PORTS-1:0][7:0] burst
 );
-  localparam logic [7:0] BURST = (CFG.qosRegBurst > 255) ? 8'd255
-                                 : ((CFG.qosRegBurst == 0) ? 8'd1 : 8'(CFG.qosRegBurst));
   for (genvar p = 0; p < NUM_PORTS; p++) begin : per_port
     if (CFG.qosRegEn) begin : regulated
       QOS_INJECTION_TAKES_A_TOKEN: assert property (
         @(posedge clk) disable iff (!resetn)
         outValid[p] |-> (tokens[p] != 8'd0));
 
+      // A lowered burst cuts the bucket the next cycle.
       QOS_TOKENS_BOUNDED: assert property (
         @(posedge clk) disable iff (!resetn)
-        tokens[p] <= BURST);
+        $stable(burst[p]) |-> (tokens[p] <= burst[p]));
 
       QOS_PORT_HELD: cover property (
         @(posedge clk) disable iff (!resetn)
@@ -245,6 +259,127 @@ module chi_obs_sva #(
       $rose(rasIrq[r]) ##[1:$] $fell(rasIrq[r]));
   end
 endmodule
+
+module chi_hnf_eo_sva #(
+  parameter int unsigned POS_DEPTH = 1,
+  parameter int unsigned POS_W = 1,
+  parameter int unsigned NUM_REQUESTERS = 1,
+  parameter int unsigned EO_REQ_W = 1,
+  parameter int unsigned EO_TICKET_W = 1
+) (
+  input logic clk,
+  input logic resetn,
+  input logic startValid,
+  input logic startTracked,
+  input logic [EO_REQ_W-1:0] startReq,
+  input logic [EO_TICKET_W-1:0] startTicket,
+  input logic [NUM_REQUESTERS-1:0][EO_TICKET_W-1:0] eoServing,
+  input logic [POS_DEPTH-1:0] eoBlocked,
+  input logic [POS_DEPTH-1:0] posActive
+);
+  EO_STARTS_ON_ITS_TICKET: assert property (
+    @(posedge clk) disable iff (!resetn)
+    startValid && startTracked |-> (startTicket == eoServing[startReq]));
+
+  EO_WAITS_ON_ANOTHER_REQUEST: cover property (
+    @(posedge clk) disable iff (!resetn)
+    (eoBlocked & posActive) != '0);
+endmodule
+
+module chi_hnf_gpt_slc_sva (
+  input logic clk,
+  input logic resetn,
+  input logic slcUpdateValid,
+  input logic slcUpdateReady,
+  input logic slcUpdateForGpt,
+  input logic gptLineHeld,
+  input logic gptSlcRead,
+  input logic slcReadHit,
+  input logic gptErr
+);
+  GPT_FILL_ONLY_WHILE_LINE_FREE: assert property (
+    @(posedge clk) disable iff (!resetn)
+    slcUpdateValid && slcUpdateForGpt |-> !gptLineHeld);
+
+  // A line read with an error or poison never goes into the SLC.
+  GPT_FILL_ONLY_GOOD_DATA: assert property (
+    @(posedge clk) disable iff (!resetn)
+    slcUpdateValid && slcUpdateForGpt |-> !gptErr);
+
+  GPT_READ_SLC_HIT: cover property (
+    @(posedge clk) disable iff (!resetn)
+    gptSlcRead && slcReadHit);
+
+  GPT_LINE_FILLED: cover property (
+    @(posedge clk) disable iff (!resetn)
+    slcUpdateValid && slcUpdateReady && slcUpdateForGpt);
+endmodule
+
+module chi_cfg_slave_sva #(
+  parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT
+) (
+  input logic clk,
+  input logic resetn,
+  input logic regionUpdate,
+  input logic [CFG.addrW-1:0] regionUpdateBase,
+  input logic [CFG.addrW-1:0] regionUpdateLimit,
+  input logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] regionUpdateAttributes,
+  input logic commitRefused
+);
+  REGION_COMMIT_LEGAL: assert property (
+    @(posedge clk) disable iff (!resetn)
+    regionUpdate |-> chi_pkg::samRegionLegal(
+                       CFG, chi_pkg::CHI_MAX_ADDR_W'(regionUpdateBase),
+                       chi_pkg::CHI_MAX_ADDR_W'(regionUpdateLimit),
+                       regionUpdateAttributes));
+
+  REGION_COMMIT_REFUSED: cover property (
+    @(posedge clk) disable iff (!resetn)
+    commitRefused);
+endmodule
+
+module chi_quiescence_sva (
+  input logic clk,
+  input logic resetn,
+  input logic apbRegionUpdate,
+  input logic trafficQuiescent
+);
+  REGION_UPDATE_WHEN_QUIESCENT: assert property (
+    @(posedge clk) disable iff (!resetn)
+    apbRegionUpdate |-> $past(trafficQuiescent));
+endmodule
+
+bind chi_hnf_top chi_hnf_eo_sva #(
+  .POS_DEPTH(POS_DEPTH), .POS_W(POS_W), .NUM_REQUESTERS(NUM_REQUESTERS),
+  .EO_REQ_W(EO_REQ_W), .EO_TICKET_W(EO_TICKET_W)
+) chi_hnf_eo_assertions (
+  .clk(clk), .resetn(resetn), .startValid(startValid),
+  .startTracked(entry[startIndex].eoTracked), .startReq(entry[startIndex].eoReq),
+  .startTicket(entry[startIndex].eoTicket), .eoServing(eoServing),
+  .eoBlocked(eoBlocked), .posActive(posActive)
+);
+
+bind chi_hnf_top chi_hnf_gpt_slc_sva chi_hnf_gpt_slc_assertions (
+  .clk(clk), .resetn(resetn), .slcUpdateValid(slcUpdateValid),
+  .slcUpdateReady(slcUpdateReady), .slcUpdateForGpt(slcUpdateForGpt),
+  .gptLineHeld(gptLineHeld), .gptSlcRead(gptSlcRead), .slcReadHit(slcReadHit),
+  .gptErr(gptErr)
+);
+
+bind chi_cfg_slave chi_cfg_slave_sva #(
+  .CFG(CFG)
+) chi_cfg_slave_assertions (
+  .clk(PCLK), .resetn(PRESETn), .regionUpdate(regionUpdate),
+  .regionUpdateBase(regionUpdateBase), .regionUpdateLimit(regionUpdateLimit),
+  .regionUpdateAttributes(regionUpdateAttributes),
+  .commitRefused(transfer && PWRITE && (PADDR == ADDR_COMMIT) && PSTRB[0]
+                 && !commitLegal)
+);
+
+bind chi_interconnect_top chi_quiescence_sva chi_quiescence_assertions (
+  .clk(clk), .resetn(resetn), .apbRegionUpdate(apbRegionUpdate),
+  .trafficQuiescent(trafficQuiescent)
+);
 
 bind chi_sysco chi_sysco_sva #(
   .CFG(CFG), .NUM_COH(NUM_COH)
@@ -292,7 +427,7 @@ bind chi_qos_reg chi_qos_sva #(
   .CFG(CFG), .NUM_PORTS(NUM_PORTS)
 ) chi_qos_assertions (
   .clk(clk), .resetn(resetn), .inValid(inValid), .outValid(outValid),
-  .tokens(tokens)
+  .tokens(tokens), .burst(burst)
 );
 
 bind chi_obs_regs chi_obs_sva #(

@@ -63,7 +63,9 @@ module chi_hnf_top #(
   parameter bit SN_DWT_CAP = 1'b1,
   parameter logic [NUM_RNF-1:0] RNF_DCT_CAP = '1,
   // Victim-buffer entries for directory evictions.
-  parameter int unsigned VICTIM_DEPTH = 2
+  parameter int unsigned VICTIM_DEPTH = 2,
+  // Width of an Endpoint Order ticket (chi_eo_order).
+  parameter int unsigned EO_TICKET_W = 8
 ) (
   input  logic clk,
   input  logic resetn,
@@ -125,7 +127,16 @@ module chi_hnf_top #(
   output logic [chi_pkg::CHI_MAX_ADDR_W-1:0] rasAddr,
   output chi_pkg::chi_pas_e rasPas,
   // PMU: this cycle's count of each event (chi_hnf_pkg::PMU_*).
-  output logic [chi_hnf_pkg::HNF_PMU_EVENTS-1:0][7:0] pmuCount
+  output logic [chi_hnf_pkg::HNF_PMU_EVENTS-1:0][7:0] pmuCount,
+  // Endpoint Order across HN-Fs (chi_eo_order, Section 9.5): the ticket an
+  // Endpoint-ordered request takes when it is allocated, the Requesters whose
+  // Endpoint-ordered request retires, and the ticket each Requester's stream
+  // to this HN-F's SN-F is serving.
+  output logic eoAllocValid,
+  output logic [chi_pkg::clog2Min1(NUM_REQUESTERS)-1:0] eoAllocReq,
+  input  logic [EO_TICKET_W-1:0] eoAllocTicket,
+  output logic [NUM_REQUESTERS-1:0] eoRetire,
+  input  logic [NUM_REQUESTERS-1:0][EO_TICKET_W-1:0] eoServing
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -151,9 +162,12 @@ module chi_hnf_top #(
   // part of every key the Home compares, stores or snoops with.
   localparam int unsigned LINE_W = CFG.addrW - 6;
   localparam int unsigned KEY_W = LINE_W + CHI_PAS_W;
-  localparam int unsigned RETRY_RECORDS =
-    (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
+  localparam int unsigned RETRY_CREDITS =
+    (CFG.retryCredits > 0) ? CFG.retryCredits : 1;
   localparam int unsigned RESERVE_W = 16;
+  localparam int unsigned EO_REQ_W = clog2Min1(NUM_REQUESTERS);
+  // GPT walker reads through the SLC (gpcSlcAlloc, Section 9.11).
+  localparam bit GPT_SLC = (CFG.gpcMode == GPC_WALK) && CFG.gpcSlcAlloc && CFG.slcEn;
   localparam int unsigned DAT_BYTES = CFG.dataW / 8;
   localparam int unsigned STEP = datIdStep(CFG);
   localparam int unsigned POISON_PER_BEAT = CFG.dataW / 64;
@@ -269,6 +283,10 @@ module chi_hnf_top #(
     logic               dmtUsed;     // memory returns the data to the Requester
     logic               dmtSep;      // by ReadNoSnpSep; the Home owes RespSepData
     logic               dwtUsed;     // write data goes straight to the SN-F
+    // Endpoint Order across HN-Fs: the ticket this request starts on.
+    logic               eoTracked;
+    logic [EO_REQ_W-1:0] eoReq;
+    logic [EO_TICKET_W-1:0] eoTicket;
   } entry_t;
 
   // Victim-buffer entry. The key holds the evicted location, PAS included.
@@ -716,6 +734,24 @@ module chi_hnf_top #(
   logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gptAddr;
   logic [511:0] gptBuf;
   logic gptErr;
+  // Endpoint Order across HN-Fs.
+  logic eoReqKnown;
+  logic [EO_REQ_W-1:0] eoReqIndex;
+  logic [POS_DEPTH-1:0] eoBlocked;
+  // GPT walker reads through the SLC: a new read looks in the SLC first
+  // (gptSlcRead), a miss reads memory (gptSlcMissed), a hit is delivered the
+  // next cycle (gptSlcDone), and a line read from memory goes into the SLC
+  // (gptFillOwed) unless the line was touched meanwhile (gptFillOk).
+  logic gptSlcWant;
+  logic gptSlcRead;
+  logic gptSlcMissed;
+  logic gptSlcDone;
+  logic gptFillOk;
+  logic gptFillOwed;
+  logic gptLineTouched;
+  logic gptNewLineTouched;
+  logic gptLineHeld;
+  logic slcUpdateForGpt;
   logic gptDatValid;
   // Granule Protection Check port.
   logic gpcAllocCheck;
@@ -892,7 +928,8 @@ module chi_hnf_top #(
       .clk, .resetn,
       .lookupKey(posKey[startIndex]),
       .lookupHit(slcLookupHit), .lookupDirty(slcLookupDirty),
-      .readValid(slcReadValid || slcReadForVictim), .readKey(slcReadKey),
+      .readValid(slcReadValid || slcReadForVictim || gptSlcRead),
+      .readKey(slcReadKey),
       .readData(slcReadData), .readPoison(slcReadPoison),
       .readCorrected(slcReadCorrected), .readHit(slcReadHit),
       .updateValid(slcUpdateValid), .updateKey(slcUpdateKey),
@@ -954,16 +991,21 @@ module chi_hnf_top #(
         slcReadForVictim = 1'b1;
         slcReadVictim = VB_W'(v);
       end
+    // A GPT read comes next: it holds back every request the walker checks.
+    gptSlcWant = GPT_SLC && gptReadValid && !gptReadDone && !gptSlcMissed
+                 && !gptFillOwed && !dnBusy[GPT_IDX];
+    gptSlcRead = gptSlcWant && !slcReadForVictim;
     slcReadValid = 1'b0;
     slcReadEntry = '0;
-    if (!slcReadForVictim)
+    if (!slcReadForVictim && !gptSlcRead)
       for (int unsigned i = 0; i < POS_DEPTH; i++)
         if (!slcReadValid && eNeedSlcRead[i]) begin
           slcReadValid = 1'b1;
           slcReadEntry = POS_W'(i);
         end
     slcReadKey = slcReadForVictim ? victim[slcReadVictim].key
-                                  : posKey[slcReadEntry];
+                 : (gptSlcRead ? locationKey(gptReadAddr, PAS_ROOT)
+                               : posKey[slcReadEntry]);
   end
 
   // SLC update port: a start candidate the SLC must give its line up for
@@ -995,22 +1037,31 @@ module chi_hnf_top #(
         slcUpdateForVictim = 1'b1;
         slcUpdateVictim = VB_W'(v);
       end
+    // A GPT line read from memory is filled clean, while nothing holds it.
+    slcUpdateForGpt = GPT_SLC && !slcFlushWant && !slcUpdateForVictim
+                      && gptFillOwed && gptFillOk && !gptLineHeld;
     e = entry[slcUpdateEntry];
-    slcUpdateFromRetire = found && !slcFlushWant && !slcUpdateForVictim;
-    slcUpdateValid = slcFlushWant || slcUpdateForVictim || found;
+    slcUpdateFromRetire = found && !slcFlushWant && !slcUpdateForVictim
+                          && !slcUpdateForGpt;
+    slcUpdateValid = slcFlushWant || slcUpdateForVictim || slcUpdateForGpt
+                     || found;
     slcUpdateKey = slcFlushWant ? posKey[startIndex]
                    : (slcUpdateForVictim ? victim[slcUpdateVictim].key
-                                         : posKey[slcUpdateEntry]);
+                      : (slcUpdateForGpt ? locationKey(gptAddr, PAS_ROOT)
+                                         : posKey[slcUpdateEntry]));
     // A flush writes the SLC's own line back; a retiring entry that removes
     // the line has already written the latest data to memory itself; a
-    // directory eviction rewrites, Dirty, the line it found in the SLC.
-    slcUpdateRemove = slcFlushWant || (!slcUpdateForVictim && e.slcRemove);
-    slcUpdateDiscard = !slcFlushWant && !slcUpdateForVictim && e.slcRemove;
-    slcUpdateDirty = slcUpdateForVictim || e.slcKeepDirty;
+    // directory eviction rewrites, Dirty, the line it found in the SLC; a
+    // GPT fill writes the line memory returned, clean.
+    slcUpdateRemove = slcFlushWant
+                      || (!slcUpdateForVictim && !slcUpdateForGpt && e.slcRemove);
+    slcUpdateDiscard = !slcFlushWant && !slcUpdateForVictim && !slcUpdateForGpt
+                       && e.slcRemove;
+    slcUpdateDirty = slcUpdateForVictim || (!slcUpdateForGpt && e.slcKeepDirty);
     slcUpdateData = slcUpdateForVictim ? bufData[POS_DEPTH + slcUpdateVictim]
-                                       : bufData[slcUpdateEntry];
+                    : (slcUpdateForGpt ? gptBuf : bufData[slcUpdateEntry]);
     slcUpdatePoison = slcUpdateForVictim ? bufPoison[POS_DEPTH + slcUpdateVictim]
-                                         : bufPoison[slcUpdateEntry];
+                      : (slcUpdateForGpt ? '0 : bufPoison[slcUpdateEntry]);
     slcVictimReady = victimFree && !(sfVictimValid && sfUpdateValid && sfUpdateReady);
     slcUpdateCacheable = slcCacheable(e.req);
     slcUpdateWroteBack = e.dnWriteDone || !e.slcKeepDirty;
@@ -1204,16 +1255,43 @@ module chi_hnf_top #(
       ((kind == HNF_KIND_READ_NOSNP) || (kind == HNF_KIND_READ_ONCE))
       && ((incomingReq.order == ORDER_REQUEST_ORDER)
           || (incomingReq.order == ORDER_ENDPOINT));
+    allocEntry.eoTracked = CFG.eoAcrossHnf && (incomingReq.order == ORDER_ENDPOINT)
+                           && eoReqKnown;
+    allocEntry.eoReq = eoReqIndex;
+    allocEntry.eoTicket = eoAllocTicket;
+  end
+
+  // Endpoint Order across HN-Fs: an Endpoint-ordered request takes a ticket
+  // when it is allocated and starts only when its ticket is served; its
+  // retirement serves the next (chi_eo_order).
+  always_comb begin
+    eoReqKnown = 1'b0;
+    eoReqIndex = '0;
+    for (int unsigned q = 0; q < NUM_REQUESTERS; q++)
+      if (incomingReq.srcId == CHI_NODEID_SLOT_W'(REQUESTER_NODE_IDS[q])) begin
+        eoReqKnown = 1'b1;
+        eoReqIndex = EO_REQ_W'(q);
+      end
+    eoAllocValid = CFG.eoAcrossHnf && posAllocValid && posAllocReady
+                   && (incomingReq.order == ORDER_ENDPOINT) && eoReqKnown;
+    eoAllocReq = eoReqIndex;
+    eoRetire = '0;
+    for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      eoBlocked[i] = entry[i].eoTracked
+                     && (entry[i].eoTicket != eoServing[entry[i].eoReq]);
+      if (posFreeMask[i] && entry[i].eoTracked)
+        eoRetire[entry[i].eoReq] = 1'b1;
+    end
   end
 
   // A grant reserves an entry for the request it invites. It needs an
   // unreserved free entry beyond any an uncredited request takes this cycle,
-  // and the Home keeps at most retryRecords credits outstanding.
+  // and the Home keeps at most retryCredits credits outstanding.
   always_comb begin
     retryGrantAllowed =
       (int'(posUnreservedCount)
        > ((posAllocValid && incomingReq.allowRetry) ? 1 : 0))
-      && (int'(retryCreditsOutstanding) < RETRY_RECORDS);
+      && (int'(retryCreditsOutstanding) < RETRY_CREDITS);
   end
 
   chi_retry #(
@@ -1252,7 +1330,7 @@ module chi_hnf_top #(
       if (candidate >= POS_DEPTH)
         candidate = candidate - POS_DEPTH;
       if (!found && (entry[candidate].phase == PH_WAIT) && mayStart[candidate]
-          && !entry[candidate].gpcPending) begin
+          && !entry[candidate].gpcPending && !eoBlocked[candidate]) begin
         found = 1'b1;
         startIndex = POS_W'(candidate);
       end
@@ -2048,6 +2126,8 @@ module chi_hnf_top #(
       else if (memDatValid)
         datInKept[b] = !bufWrBe[memDatOwner][int'(incomingDat.dataId)*16 + b]
                        && !bufSnpBe[memDatOwner][int'(incomingDat.dataId)*16 + b];
+      else if (gptDatValid)
+        datInKept[b] = 1'b1;
     end
     dcWords = CFG.dataCheckEn
               ? dataCheckWords(incomingDat.data, incomingDat.dataCheck, datInKept)
@@ -2167,7 +2247,8 @@ module chi_hnf_top #(
     end
     // The walker's read: one at a time, never while one is completing.
     if (GPT_READS) begin
-      dnStartValid[GPT_IDX] = gptReadValid && !dnBusy[GPT_IDX] && !gptReadDone;
+      dnStartValid[GPT_IDX] = gptReadValid && !dnBusy[GPT_IDX] && !gptReadDone
+                              && !gptFillOwed && (!GPT_SLC || gptSlcMissed);
       dnStartKind[GPT_IDX] = HNF_DN_READ;
       dnStartGranules[GPT_IDX] = 4'hf;
       dnStartNoData[GPT_IDX] = 1'b0;
@@ -2805,34 +2886,102 @@ module chi_hnf_top #(
   always_comb begin
     idle = (posActive == '0) && (reqFifoCount == '0) && (rspFifoCount == '0)
            && (snpFifoCount == '0) && (datFifoCount == '0)
-           && (dnBusy == '0) && !slcMaintWalking;
+           && (dnBusy == '0) && !slcMaintWalking && !gptFillOwed;
     for (int unsigned v = 0; v < NUM_VB; v++)
       if (victim[v].valid)
         idle = 1'b0;
   end
 
-  // The walker's GPT line, delivered whole when its read completes.
+  // The walker's GPT line, delivered whole when its read completes. A
+  // poisoned word or a data error fails the read. With gpcSlcAlloc the SLC
+  // is looked in first: a hit is delivered from it; a miss reads memory, and
+  // the line then goes into the SLC clean, but only if nothing touched or
+  // held the line, in any PAS, from the lookup to the fill: memory's copy
+  // could otherwise be older than the line's latest data, and the fill would
+  // overwrite it.
   if (GPT_READS) begin : gpt_reads
+    always_comb begin
+      logic [LINE_W-1:0] line;
+      logic [LINE_W-1:0] newLine;
+      // The line of the read under way, and the line a lookup starts on.
+      line = keyLine(locationKey(gptAddr, PAS_ROOT));
+      newLine = keyLine(locationKey(gptReadAddr, PAS_ROOT));
+      // Touched: a transaction allocated, a victim taken from the directory
+      // or the SLC, or an SLC update other than the fill.
+      gptLineTouched = 1'b0;
+      gptNewLineTouched = 1'b0;
+      if (posAllocValid && posAllocReady) begin
+        gptLineTouched |= keyLine(incomingKey) == line;
+        gptNewLineTouched |= keyLine(incomingKey) == newLine;
+      end
+      if (sfVictimValid && sfUpdateValid && sfUpdateReady) begin
+        gptLineTouched |= keyLine(sfVictimKey) == line;
+        gptNewLineTouched |= keyLine(sfVictimKey) == newLine;
+      end
+      if (slcVictimValid && slcVictimReady) begin
+        gptLineTouched |= keyLine(slcVictimKey) == line;
+        gptNewLineTouched |= keyLine(slcVictimKey) == newLine;
+      end
+      if (slcUpdateValid && slcUpdateReady && !slcUpdateForGpt) begin
+        gptLineTouched |= keyLine(slcUpdateKey) == line;
+        gptNewLineTouched |= keyLine(slcUpdateKey) == newLine;
+      end
+      // Held: a transaction or victim has the line.
+      gptLineHeld = 1'b0;
+      for (int unsigned l = 0; l < NUM_LOCKS; l++)
+        if (slcLockValid[l] && (keyLine(slcLockKey[l]) == line))
+          gptLineHeld = 1'b1;
+    end
+
     always_ff @(posedge clk) begin
       if (!resetn) begin
         gptAddr <= '0;
         gptBuf <= '0;
         gptErr <= 1'b0;
+        gptSlcMissed <= 1'b0;
+        gptSlcDone <= 1'b0;
+        gptFillOk <= 1'b0;
+        gptFillOwed <= 1'b0;
       end else begin
+        gptSlcDone <= 1'b0;
+        // The fill stays allowed from the lookup only while the line is
+        // neither touched nor held.
+        if (gptSlcRead) begin
+          gptAddr <= gptReadAddr;
+          gptFillOk <= !gptNewLineTouched;
+          if (slcReadHit) begin
+            gptBuf <= slcReadData;
+            gptErr <= slcReadPoison != '0;
+            gptSlcDone <= 1'b1;
+          end else begin
+            gptSlcMissed <= 1'b1;
+          end
+        end else if (gptLineTouched || gptLineHeld) begin
+          gptFillOk <= 1'b0;
+        end
         if (dnStartValid[GPT_IDX]) begin
           gptAddr <= gptReadAddr;
           gptErr <= 1'b0;
+          gptSlcMissed <= 1'b0;
         end
         if (gptDatValid) begin
           gptBuf[int'(incomingDat.dataId)*128 +: CFG.dataW] <=
             incomingDat.data[CFG.dataW-1:0];
-          if (incomingDat.respErr != RESP_ERR_OK)
+          if ((incomingDat.respErr != RESP_ERR_OK) || dcDerr
+              || ((incomingDat.poison[POISON_PER_BEAT-1:0]
+                   | dcPoison[POISON_PER_BEAT-1:0]) != '0))
             gptErr <= 1'b1;
         end
+        if (GPT_SLC && dnDone[GPT_IDX] && !gptErr)
+          gptFillOwed <= 1'b1;
+        if (gptFillOwed
+            && ((slcUpdateValid && slcUpdateReady && slcUpdateForGpt)
+                || !gptFillOk || gptLineHeld))
+          gptFillOwed <= 1'b0;
       end
     end
     always_comb begin
-      gptReadDone = dnDone[GPT_IDX];
+      gptReadDone = dnDone[GPT_IDX] || gptSlcDone;
       gptReadData = gptBuf;
       gptReadError = gptErr;
     end
@@ -2844,6 +2993,13 @@ module chi_hnf_top #(
       gptReadDone = 1'b0;
       gptReadData = '0;
       gptReadError = 1'b0;
+      gptSlcMissed = 1'b0;
+      gptSlcDone = 1'b0;
+      gptFillOk = 1'b0;
+      gptFillOwed = 1'b0;
+      gptLineTouched = 1'b0;
+      gptNewLineTouched = 1'b0;
+      gptLineHeld = 1'b0;
     end
   end
 

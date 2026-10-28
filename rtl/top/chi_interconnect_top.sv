@@ -195,6 +195,23 @@ module chi_interconnect_top #(
     return values;
   endfunction
 
+  // The Homes a SAM region may target, for the commit checks of the region
+  // editor and the CHI MMIO window.
+  typedef logic [CHI_NODEID_SLOT_W-1:0] hnf_slot_array_t [NUM_HNF_E];
+  typedef logic [CHI_NODEID_SLOT_W-1:0] hni_slot_array_t [NUM_HNI_E];
+  function automatic hnf_slot_array_t makeHnfSlots(input node_id_array_t ids);
+    hnf_slot_array_t values;
+    for (int unsigned i = 0; i < NUM_HNF_E; i++)
+      values[i] = (i < CFG.numHnf) ? CHI_NODEID_SLOT_W'(ids[OFF_HNF+i]) : '0;
+    return values;
+  endfunction
+  function automatic hni_slot_array_t makeHniSlots(input node_id_array_t ids);
+    hni_slot_array_t values;
+    for (int unsigned i = 0; i < NUM_HNI_E; i++)
+      values[i] = (i < CFG.numHni) ? CHI_NODEID_SLOT_W'(ids[OFF_HNI+i]) : '0;
+    return values;
+  endfunction
+
   function automatic dvm_target_array_t makeDvmTargets(input node_id_array_t ids);
     dvm_target_array_t values;
     for (int unsigned i = 0; i < NUM_DVM_TGT_E; i++)
@@ -318,6 +335,8 @@ module chi_interconnect_top #(
   localparam requester_id_array_t REQUESTER_NODE_IDS =
     makeRequesterIds(EFFECTIVE_NODE_IDS);
   localparam dvm_target_array_t DVM_TARGET_IDS = makeDvmTargets(EFFECTIVE_NODE_IDS);
+  localparam hnf_slot_array_t HNF_SLOT_IDS = makeHnfSlots(EFFECTIVE_NODE_IDS);
+  localparam hni_slot_array_t HNI_SLOT_IDS = makeHniSlots(EFFECTIVE_NODE_IDS);
 
   function automatic int unsigned totalLps();
     int unsigned total;
@@ -440,6 +459,7 @@ module chi_interconnect_top #(
   logic apbRegionError;
   logic apbPolicyError;
   logic fabricRouteError;
+  logic fabricBusy;
   // System coherency (IHI 0050H B15): the RN-F and RN-D ports, RN-Fs first,
   // as Requester ordinals.
   localparam int unsigned NUM_COH = CFG.numRnf + CFG.numRnd;
@@ -458,6 +478,13 @@ module chi_interconnect_top #(
   logic [NUM_REQ_E-1:0] qosReqValid;
   logic [NUM_REQ_E-1:0] qosReqReady;
   logic [NUM_REQ_E-1:0][7:0] qosTokens;
+  logic [NUM_REQ_E-1:0][8:0] qosRate;
+  logic [NUM_REQ_E-1:0][7:0] qosBurst;
+  // APB block 4: the QoS regulator's rate and burst per port.
+  logic apbQosSelect;
+  logic [31:0] apbQosRdata;
+  logic apbQosReady;
+  logic apbQosError;
   // RAS records: every HN-F, then the GPC's GPT cache when it walks.
   localparam int unsigned NUM_REC = NUM_HNF_E + ((CFG.gpcMode == GPC_WALK) ? 1 : 0);
   logic [NUM_HNF_E-1:0] hnfRasCorrected;
@@ -484,6 +511,23 @@ module chi_interconnect_top #(
   logic [31:0] apbObsRdata;
   logic apbObsReady;
   logic apbObsError;
+  // Endpoint Order across HN-Fs (design specification, 9.5): tickets per
+  // {Requester, SN-F}, wide enough for every POS entry that can hold one.
+  localparam int unsigned EO_TICKET_W =
+    clog2Min1(NUM_HNF_E * ((CFG.posEntries > 0) ? CFG.posEntries : 1) + 1) + 1;
+  typedef int unsigned hnf_snf_index_t [NUM_HNF_E];
+  function automatic hnf_snf_index_t makeHnfSnfIndex();
+    hnf_snf_index_t values;
+    for (int unsigned i = 0; i < NUM_HNF_E; i++)
+      values[i] = (i < CFG.numHnf) ? snfIndexOfHnf(CFG, HNF_SNF_TABLE, i) : 0;
+    return values;
+  endfunction
+  localparam hnf_snf_index_t HNF_SNF_INDEX = makeHnfSnfIndex();
+  logic [NUM_HNF_E-1:0] eoAllocValid;
+  logic [NUM_HNF_E-1:0][clog2Min1(NUM_DVM)-1:0] eoAllocReq;
+  logic [NUM_HNF_E-1:0][EO_TICKET_W-1:0] eoAllocTicket;
+  logic [NUM_HNF_E-1:0][NUM_DVM-1:0] eoRetire;
+  logic [NUM_HNF_E-1:0][NUM_DVM-1:0][EO_TICKET_W-1:0] eoServing;
 
   generate
     begin : chi_cfg_check
@@ -615,6 +659,8 @@ module chi_interconnect_top #(
           $fatal(1, "qosRegBurst is %0d but must be 1 to 255 tokens", CFG.qosRegBurst);
         if (CFG.qosRegEn && (NUM_REQ == 0))
           $fatal(1, "qosRegEn needs a Request Node port to regulate");
+        if (CFG.gpcSlcAlloc && !(CFG.slcEn && (CFG.gpcMode == GPC_WALK)))
+          $fatal(1, "gpcSlcAlloc needs slcEn and gpcMode WALK: it lets the GPT walker read and fill the SLC");
         if (CFG.stashEn && ((CFG.numRnf == 0) || (CFG.numHnf == 0)))
           $fatal(1, "Stash requires RN-F and HN-F endpoints");
         if (CFG.dvmEn && ((CFG.numMn == 0) || (NUM_REQ == 0)))
@@ -741,8 +787,10 @@ module chi_interconnect_top #(
         selectedRegionUpdateAttributes = mmioRegionUpdateAttributes[i];
       end
     end
+    // Quiescent: nothing entering the fabric, nothing inside it, and every
+    // Home and MN idle.
     trafficQuiescent = !(|reqInValid) && !(|rspInValid)
-                       && !(|snpInValid) && !(|datInValid);
+                       && !(|snpInValid) && !(|datInValid) && !fabricBusy;
     for (int unsigned i = 0; i < CFG.numHni; i++)
       trafficQuiescent &= hniIdle[i];
     for (int unsigned i = 0; i < CFG.numHnf; i++)
@@ -751,9 +799,14 @@ module chi_interconnect_top #(
       trafficQuiescent &= mnIdle[i];
   end
 
+  // A CHI MMIO commit at an HN-I needs the same quiescence apart from its own
+  // transaction, whose flits have all been delivered by the time its data is
+  // applied: nothing entering or inside the fabric, every other Home and the
+  // MNs idle.
   always_comb begin
     for (int unsigned i = 0; i < NUM_HNI_E; i++) begin
-      hniOthersQuiescent[i] = 1'b1;
+      hniOthersQuiescent[i] = !(|reqInValid) && !(|rspInValid)
+                              && !(|snpInValid) && !(|datInValid) && !fabricBusy;
       for (int unsigned j = 0; j < CFG.numHni; j++)
         if (j != i)
           hniOthersQuiescent[i] &= hniIdle[j];
@@ -770,6 +823,7 @@ module chi_interconnect_top #(
       apbPolicySelect = PSEL && (PADDR[11:8] == 4'h1);
       apbGpcSelect = PSEL && (PADDR[11:8] == 4'h2) && (CFG.gpcMode != GPC_NONE);
       apbObsSelect = PSEL && (PADDR[11:8] == 4'h3) && (CFG.rasEn || CFG.pmuEn);
+      apbQosSelect = PSEL && (PADDR[11:8] == 4'h4) && CFG.qosRegEn;
     end
 
     chi_cfg_slave #(
@@ -777,7 +831,10 @@ module chi_interconnect_top #(
       .REGION_BASE(EFFECTIVE_REGION_BASE),
       .REGION_LIMIT(EFFECTIVE_REGION_LIMIT),
       .REGION_TARGET(EFFECTIVE_REGION_TARGET),
-      .REGION_ATTRIBUTES(EFFECTIVE_REGION_ATTRIBUTES)
+      .REGION_ATTRIBUTES(EFFECTIVE_REGION_ATTRIBUTES),
+      .NUM_HNF_IDS(NUM_HNF_E), .HNF_IDS(HNF_SLOT_IDS),
+      .NUM_HNI_IDS(NUM_HNI_E), .HNI_IDS(HNI_SLOT_IDS),
+      .HNF_PRESENT(CFG.numHnf > 0), .HNI_PRESENT(CFG.numHni > 0)
     ) cfg_slave (
       .PCLK(clk), .PRESETn(resetn), .PADDR, .PSEL(apbRegionSelect), .PENABLE,
       .PWRITE, .PWDATA, .PSTRB, .PPROT, .PNSE, .PRDATA(apbRegionRdata),
@@ -822,6 +879,27 @@ module chi_interconnect_top #(
       end
     end
 
+    if (CFG.qosRegEn) begin : qos_registers
+      chi_qos_regs #(
+        .CFG(CFG), .NUM_PORTS(NUM_REQ_E)
+      ) qos_regs (
+        .PCLK(clk), .PRESETn(resetn), .PADDR(PADDR[7:0]), .PSEL(apbQosSelect),
+        .PENABLE, .PWRITE, .PWDATA, .PSTRB, .PPROT, .PNSE,
+        .PRDATA(apbQosRdata), .PREADY(apbQosReady), .PSLVERR(apbQosError),
+        .tokens(qosTokens), .rate(qosRate), .burst(qosBurst)
+      );
+    end else begin : no_qos_registers
+      always_comb begin
+        apbQosRdata = '0;
+        apbQosReady = 1'b1;
+        apbQosError = 1'b1;
+        for (int unsigned k = 0; k < NUM_REQ_E; k++) begin
+          qosRate[k] = 9'(CFG.qosRegRate);
+          qosBurst[k] = 8'(CFG.qosRegBurst);
+        end
+      end
+    end
+
     always_comb begin
       PRDATA = '0;
       PREADY = 1'b1;
@@ -842,6 +920,10 @@ module chi_interconnect_top #(
         PRDATA = apbObsRdata;
         PREADY = apbObsReady;
         PSLVERR = apbObsError;
+      end else if (apbQosSelect) begin
+        PRDATA = apbQosRdata;
+        PREADY = apbQosReady;
+        PSLVERR = apbQosError;
       end
     end
   end else begin : no_apb_cfg
@@ -869,6 +951,15 @@ module chi_interconnect_top #(
       apbObsReady = 1'b1;
       apbObsError = 1'b1;
       recIrq = '0;
+      // Without APB the regulator runs at the configured rate and burst.
+      apbQosSelect = 1'b0;
+      apbQosRdata = '0;
+      apbQosReady = 1'b1;
+      apbQosError = 1'b1;
+      for (int unsigned k = 0; k < NUM_REQ_E; k++) begin
+        qosRate[k] = 9'(CFG.qosRegRate);
+        qosBurst[k] = 8'(CFG.qosRegBurst);
+      end
     end
     for (genvar i = 0; i < NUM_HNF_E; i++) begin : reset_policy
       assign hnfPolicy[i] = CHI_HNF_POLICY_DEFAULT;
@@ -1078,7 +1169,8 @@ module chi_interconnect_top #(
     .CFG(CFG), .NUM_PORTS(NUM_REQ_E)
   ) qos_regulator (
     .clk, .resetn, .inValid(reqPortValid), .inReady(reqPortReady),
-    .outValid(qosReqValid), .outReady(qosReqReady), .tokens(qosTokens)
+    .outValid(qosReqValid), .outReady(qosReqReady), .rate(qosRate),
+    .burst(qosBurst), .tokens(qosTokens)
   );
   for (genvar k = 0; k < NUM_REQ; k++) begin : requester_injection
     assign reqInValid[k] = qosReqValid[k];
@@ -1089,6 +1181,14 @@ module chi_interconnect_top #(
     assign reqCoReq[k] = 1'b0;
     assign qosReqReady[k] = 1'b0;
   end
+
+  chi_eo_order #(
+    .NUM_HNF(NUM_HNF_E), .NUM_REQ(NUM_DVM), .NUM_SNF(NUM_SNF_E),
+    .HNF_SNF(HNF_SNF_INDEX), .TICKET_W(EO_TICKET_W)
+  ) endpoint_order (
+    .clk, .resetn, .allocValid(eoAllocValid), .allocReq(eoAllocReq),
+    .allocTicket(eoAllocTicket), .retire(eoRetire), .serving(eoServing)
+  );
 
   // System coherency: RN-F and RN-D ports handshake in chi_sysco; an RN-I
   // has no snoop channel, so its SYSCOACK echoes SYSCOREQ. A node is
@@ -1219,6 +1319,9 @@ module chi_interconnect_top #(
     assign hnfRasAddr[i] = '0;
     assign hnfRasPas[i] = '0;
     assign hnfPmuCount[i] = '0;
+    assign eoAllocValid[i] = 1'b0;
+    assign eoAllocReq[i] = '0;
+    assign eoRetire[i] = '0;
   end
   for (genvar i = CFG.numHnf + CFG.numHni; i < NUM_HOMES_E; i++) begin : no_home_check
     assign gpcCheckValid[i] = 1'b0;
@@ -1240,7 +1343,7 @@ module chi_interconnect_top #(
       .RN_NUM_LP(RN_NUM_LP), .NUM_LP(TOTAL_LP),
       .SN_DMT_CAP(SNF_DMT_CAP[SNF_INDEX]),
       .SN_DWT_CAP(SNF_DWT_CAP[SNF_INDEX]),
-      .RNF_DCT_CAP(RNF_DCT_CAP)
+      .RNF_DCT_CAP(RNF_DCT_CAP), .EO_TICKET_W(EO_TICKET_W)
     ) hnf (
       .clk, .resetn, .policy(hnfPolicy[i]), .reqInValid(reqOutValid[OFF_HNF+i]),
       .reqInReady(reqOutReady[OFF_HNF+i]), .reqInFlit(reqOutFlit[OFF_HNF+i]),
@@ -1269,7 +1372,10 @@ module chi_interconnect_top #(
       .rnfSnoopable(cohSnoopable[RNF_E-1:0]), .rnfIdle(hnfRnfIdle[i]),
       .rasCorrected(hnfRasCorrected[i]), .rasUncorrected(hnfRasUncorrected[i]),
       .rasSource(hnfRasSource[i]), .rasAddr(hnfRasAddr[i]),
-      .rasPas(rasPasOut), .pmuCount(hnfPmuCount[i])
+      .rasPas(rasPasOut), .pmuCount(hnfPmuCount[i]),
+      .eoAllocValid(eoAllocValid[i]), .eoAllocReq(eoAllocReq[i]),
+      .eoAllocTicket(eoAllocTicket[i]), .eoRetire(eoRetire[i]),
+      .eoServing(eoServing[i])
     );
     assign hnfRasPas[i] = rasPasOut;
   end
@@ -1284,7 +1390,10 @@ module chi_interconnect_top #(
                                                  pasLegalMask(CFG), 1'b1)}),
       .NUM_SNI(NUM_SNI_E), .SNI_NODE_IDS(SNI_NODE_IDS),
       .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS),
-      .RN_NUM_LP(RN_NUM_LP), .NUM_LP(TOTAL_LP)
+      .RN_NUM_LP(RN_NUM_LP), .NUM_LP(TOTAL_LP),
+      .NUM_HNF_IDS(NUM_HNF_E), .HNF_IDS(HNF_SLOT_IDS),
+      .NUM_HNI_IDS(NUM_HNI_E), .HNI_IDS(HNI_SLOT_IDS),
+      .HNF_PRESENT(CFG.numHnf > 0), .HNI_PRESENT(CFG.numHni > 0)
     ) hni (
       .clk, .resetn, .reqInValid(reqOutValid[OFF_HNI+i]),
       .reqInReady(reqOutReady[OFF_HNI+i]), .reqInFlit(reqOutFlit[OFF_HNI+i]),
@@ -1365,7 +1474,7 @@ module chi_interconnect_top #(
     .snpOutValid, .snpOutReady, .snpOutFlit,
     .datInValid, .datInReady, .datInFlit,
     .datOutValid, .datOutReady, .datOutFlit,
-    .routeError(fabricRouteError),
+    .routeError(fabricRouteError), .fabricBusy(fabricBusy),
     .xpInjected(xpInjected), .xpEjected(xpEjected)
   );
 endmodule

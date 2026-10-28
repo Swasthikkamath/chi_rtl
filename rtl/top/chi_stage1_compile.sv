@@ -145,7 +145,7 @@ module chi_stage1_compile #(
         initial $fatal(1, "CHI RSVDC_W must be 0, 4, 8, 12, 16, 24, or 32");
       end
       if ((CFG.numIfPerNode == 0) || (CFG.replChannels == 0)
-          || (CFG.posEntries == 0) || (CFG.retryRecords == 0)
+          || (CFG.posEntries == 0) || (CFG.retryCredits == 0)
           || (CFG.lcrdDepth < 2)) begin : check_positive_counts
         initial $fatal(1, "Interface, replication, POS and retry-record counts must be positive, with at least two L-Credits per channel");
       end

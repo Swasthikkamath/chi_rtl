@@ -25,7 +25,9 @@ module chi_ring #(
   output logic [NUM_XP-1:0][3:0][NUM_DEV_PORTS-1:0]      devOutValid,
   input  logic [NUM_XP-1:0][3:0][NUM_DEV_PORTS-1:0]      devOutReady,
   output chi_pkg::chi_noc_flit_t                         devOutFlit [NUM_XP-1:0][3:0][NUM_DEV_PORTS-1:0],
-  output logic                                           routeError
+  output logic                                           routeError,
+  // A flit is held in some crosspoint output FIFO.
+  output logic                                           busy
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -107,6 +109,7 @@ module chi_ring #(
   end
 
   assign routeError = |xpRouteError;
+  assign busy = xpOutCount != '0;
 
   for (genvar xpIndex = 0; xpIndex < NUM_XP; xpIndex++) begin : xps
     chi_xp #(

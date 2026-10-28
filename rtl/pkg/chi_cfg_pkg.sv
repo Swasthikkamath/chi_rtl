@@ -180,7 +180,11 @@ package chi_cfg_pkg;
     int unsigned        snpFilterEntries;
     int unsigned        snpFilterWays;
     int unsigned        posEntries;
-    int unsigned        retryRecords;
+    // P-Credits a Home or MN may have granted and not yet seen used or
+    // returned; each holds a transaction entry in reserve (IHI 0050H B2.10).
+    // It replaces retryRecords, the depth of a retry record table this design
+    // no longer has.
+    int unsigned        retryCredits;
     // Snoops one HN-F may have in flight across all its transactions.
     int unsigned        maxOutstandingSnoops;
     // Transactions one HN-I runs at once.
@@ -250,6 +254,15 @@ package chi_cfg_pkg;
     logic               qosRegEn;
     int unsigned        qosRegRate;  // tokens per 256 cycles, 1 to 256
     int unsigned        qosRegBurst; // bucket size, 1 to 255
+    // Endpoint Order kept across HN-Fs that share an SN-F, the endpoint
+    // (IHI 0050H B2.7.5).
+    logic               eoAcrossHnf;
+    // GPT walker reads look up the SLC and fill it on a miss; 0 reads memory
+    // and leaves the SLC alone.
+    logic               gpcSlcAlloc;
+    // With RME, configuration writes need the Root PAS (PNSE = 1); 0 also
+    // accepts Secure writes as without RME. The GPC registers stay Root-only.
+    logic               apbRootWrites;
     chi_cfg_access_e    cfgAccess;
     chi_hnf_snf_map_e   hnfSnfMap;
   } chi_cfg_t;
@@ -262,7 +275,7 @@ package chi_cfg_pkg;
     numIfPerNode: 1, replChannels: 1,
     topology: MESH_2D, meshX: 3, meshY: 3, numXp: 4, numDevPortsPerXp: 2,
     snpFilterEntries: 1024, snpFilterWays: 4,
-    posEntries: 32, retryRecords: 16, maxOutstandingSnoops: 16,
+    posEntries: 32, retryCredits: 16, maxOutstandingSnoops: 16,
     hniEntries: 8,
     slcEn: 1'b0, slcSizePerHnf: 65536, slcWays: 8, slcLineBytes: 64,
     slcReplPolicy: SLC_REPL_PLRU, slcInclusion: SLC_NON_INCLUSIVE,
@@ -279,6 +292,7 @@ package chi_cfg_pkg;
     atomicEn: 1'b1, dvmEn: 1'b1, stashEn: 1'b1, exclEn: 1'b1,
     syscoEn: 1'b1, rasEn: 1'b0, pmuEn: 1'b0,
     qosRegEn: 1'b0, qosRegRate: 256, qosRegBurst: 8,
+    eoAcrossHnf: 1'b1, gpcSlcAlloc: 1'b0, apbRootWrites: 1'b1,
     cfgAccess: CFG_PARAM_ONLY, hnfSnfMap: HNF_SNF_MAP_MODULO
   };
 

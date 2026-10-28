@@ -1,3 +1,13 @@
+// Region editor, APB4 block 0: stages a SAM region and commits it.
+//
+// SELECT names a region; BASE, LIMIT, TARGET and ATTRIBUTES stage its fields;
+// COMMIT copies the staged region into the SAM. A commit is taken only while
+// traffic is quiescent and only for a legal region: whole 64-byte lines with
+// base at or below limit, a defined kind, only PASs the configuration
+// defines, and for a DIRECT or MMIO region a Home that exists (an HN-I for
+// MMIO). A refused commit returns PSLVERR and changes nothing. Writes need
+// the Root PAS with RME (Secure as well when apbRootWrites is 0) and the
+// Secure PAS without it; reads are unrestricted.
 module chi_cfg_slave #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned NUM_REGIONS = 4,
@@ -8,7 +18,17 @@ module chi_cfg_slave #(
   parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0]
-    REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0}
+    REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0},
+  // The Homes a region may target: a DIRECT region any of them, an MMIO
+  // region an HN-I.
+  parameter int unsigned NUM_HNF_IDS = 1,
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
+    HNF_IDS [NUM_HNF_IDS] = '{default:'0},
+  parameter int unsigned NUM_HNI_IDS = 1,
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
+    HNI_IDS [NUM_HNI_IDS] = '{default:'0},
+  parameter bit HNF_PRESENT = 1'b1,
+  parameter bit HNI_PRESENT = 1'b1
 ) (
   input  logic PCLK,
   input  logic PRESETn,
@@ -53,6 +73,32 @@ module chi_cfg_slave #(
   logic transfer;
   logic addressImplemented;
   logic [31:0] strobedData;
+  logic commitLegal;
+
+  // A region is committed only when it is legal (chi_pkg::samRegionLegal) and
+  // a DIRECT or MMIO region names a Home that exists.
+  function automatic logic targetLegal(
+    input logic [CHI_SAM_ATTR_W-1:0] attributes,
+    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] target
+  );
+    logic isHnf;
+    logic isHni;
+    isHnf = 1'b0;
+    isHni = 1'b0;
+    for (int unsigned i = 0; i < NUM_HNF_IDS; i++)
+      if (HNF_PRESENT && (target == HNF_IDS[i]))
+        isHnf = 1'b1;
+    for (int unsigned i = 0; i < NUM_HNI_IDS; i++)
+      if (HNI_PRESENT && (target == HNI_IDS[i]))
+        isHni = 1'b1;
+    if (!attributes[0])
+      return 1'b1;
+    case (attributes[3:2])
+      SAM_REGION_DIRECT: return isHnf || isHni;
+      SAM_REGION_MMIO:   return isHni;
+      default:           return 1'b1;
+    endcase
+  endfunction
 
   function automatic logic [31:0] mergeStrobes(
     input logic [31:0] oldValue,
@@ -96,6 +142,11 @@ module chi_cfg_slave #(
     endcase
 
     strobedData = mergeStrobes(PRDATA, PWDATA, PSTRB);
+    commitLegal = samRegionLegal(CFG, CHI_MAX_ADDR_W'(stagedBase[selectedRegion]),
+                                 CHI_MAX_ADDR_W'(stagedLimit[selectedRegion]),
+                                 stagedAttributes[selectedRegion])
+                  && targetLegal(stagedAttributes[selectedRegion],
+                                 stagedTarget[selectedRegion]);
     PSLVERR = 1'b0;
     if (transfer) begin
       if (CFG.cfgAccess != CFG_APB)
@@ -104,13 +155,13 @@ module chi_cfg_slave #(
         PSLVERR = 1'b1;
       // Configuration writes are Root control with RME and Secure control
       // without it, the same qualification the CHI MMIO window applies.
-      else if (PWRITE && (PPROT[1] || (CFG.rmeEn && !PNSE)))
+      else if (PWRITE && (PPROT[1] || (CFG.rmeEn && CFG.apbRootWrites && !PNSE)))
         PSLVERR = 1'b1;
       else if (PWRITE && (PADDR == ADDR_SELECT)
                && (strobedData >= NUM_REGIONS))
         PSLVERR = 1'b1;
       else if (PWRITE && (PADDR == ADDR_COMMIT) && PSTRB[0]
-               && !trafficQuiescent)
+               && (!trafficQuiescent || !commitLegal))
         PSLVERR = 1'b1;
     end
   end

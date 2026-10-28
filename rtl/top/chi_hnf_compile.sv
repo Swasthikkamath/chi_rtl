@@ -53,7 +53,9 @@ module chi_hnf_compile (
     .gptReadError(),
     .rnfSnoopable('1), .rnfIdle(),
     .rasCorrected(), .rasUncorrected(), .rasSource(), .rasAddr(), .rasPas(),
-    .pmuCount()
+    .pmuCount(),
+    .eoAllocValid(), .eoAllocReq(), .eoAllocTicket('0), .eoRetire(),
+    .eoServing('0)
   );
 
   generate

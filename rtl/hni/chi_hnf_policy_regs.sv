@@ -97,7 +97,7 @@ module chi_hnf_policy_regs #(
     if (transfer) begin
       if ((PADDR[1:0] != 2'b00) || !addressImplemented)
         PSLVERR = 1'b1;
-      else if (PWRITE && (PPROT[1] || (CFG.rmeEn && !PNSE)))
+      else if (PWRITE && (PPROT[1] || (CFG.rmeEn && CFG.apbRootWrites && !PNSE)))
         PSLVERR = 1'b1;
       else if (PWRITE && (PADDR == ADDR_ACTIVE))
         PSLVERR = 1'b1;

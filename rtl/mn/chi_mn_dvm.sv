@@ -81,8 +81,8 @@ module chi_mn_dvm #(
   localparam int unsigned IDX_W = clog2Min1(DEPTH);
   localparam int unsigned TGT_W = clog2Min1(NUM_DVM_NODES);
   localparam int unsigned RESERVE_W = 16;
-  localparam int unsigned RETRY_RECORDS =
-    (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
+  localparam int unsigned RETRY_CREDITS =
+    (CFG.retryCredits > 0) ? CFG.retryCredits : 1;
   localparam int unsigned SNP_ADDR_W = CFG.addrW - 3;
 
   generate
@@ -217,7 +217,7 @@ module chi_mn_dvm #(
     needed = ((retryGrantClass == 4'd1) ? 2 : 1)
              + ((allocValid && incomingReq.allowRetry) ? 1 : 0);
     retryGrantAllowed = (int'(unreservedCount) >= needed)
-                        && (int'(retryCreditsOutstanding) < RETRY_RECORDS);
+                        && (int'(retryCreditsOutstanding) < RETRY_CREDITS);
   end
 
   chi_retry #(

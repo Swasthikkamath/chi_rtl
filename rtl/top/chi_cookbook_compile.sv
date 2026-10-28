@@ -31,7 +31,7 @@ module chi_cookbook_compile (
     cfg.numMn = 1;
     cfg.dataW = 128;
     cfg.posEntries = 16;
-    cfg.retryRecords = 8;
+    cfg.retryCredits = 8;
     cfg.maxOutstandingSnoops = 8;
     cfg.snpFilterEntries = 512;
     cfg.snpFilterWays = 4;
@@ -54,7 +54,7 @@ module chi_cookbook_compile (
     cfg.numSni = 1;
     cfg.numMn = 1;
     cfg.posEntries = 32;
-    cfg.retryRecords = 16;
+    cfg.retryCredits = 16;
     cfg.snpFilterEntries = 1024;
     cfg.snpFilterWays = 4;
     cfg.cfgAccess = CFG_APB;
@@ -81,7 +81,7 @@ module chi_cookbook_compile (
     cfg.numSni = 1;
     cfg.numMn = 1;
     cfg.posEntries = 64;
-    cfg.retryRecords = 32;
+    cfg.retryCredits = 32;
     cfg.maxOutstandingSnoops = 32;
     cfg.snpFilterEntries = 4096;
     cfg.snpFilterWays = 8;

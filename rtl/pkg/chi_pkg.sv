@@ -1300,4 +1300,21 @@ package chi_pkg;
 `undef CHI_UNPACK_FIELD
 `undef CHI_PACK_BIT
 `undef CHI_UNPACK_BIT
+  // Whether a SAM region may be committed, apart from its target: a valid
+  // region spans whole 64-byte lines with base at or below limit, has a
+  // defined kind and the reserved bit clear, and allows only PASs the
+  // configuration defines (IHI 0050H Table B13.47). An invalid region is
+  // always acceptable: it matches nothing.
+  function automatic logic samRegionLegal(
+    input chi_cfg_pkg::chi_cfg_t cfg,
+    input logic [CHI_MAX_ADDR_W-1:0] base,
+    input logic [CHI_MAX_ADDR_W-1:0] limit,
+    input logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] attributes
+  );
+    if (!attributes[0])
+      return 1'b1;
+    return (base <= limit) && (base[5:0] == 6'h00) && (limit[5:0] == 6'h3f)
+           && !attributes[1] && (attributes[3:2] != 2'b11)
+           && ((chi_cfg_pkg::samAllowedPas(attributes) & ~pasLegalMask(cfg)) == '0);
+  endfunction
 endpackage

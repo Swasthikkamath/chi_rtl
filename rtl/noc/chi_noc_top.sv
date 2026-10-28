@@ -52,6 +52,9 @@ module chi_noc_top #(
   // A flit named a NodeID with no attached node and was dropped at its first
   // crosspoint rather than blocking the channel.
   output logic                                      routeError,
+  // A flit is inside the fabric, held in a crosspoint FIFO; with no device
+  // input valid as well, the fabric is empty.
+  output logic                                      fabricBusy,
   // Flits each crosspoint took from and gave to its device ports this
   // cycle, per channel (REQ, RSP, SNP, DAT), for the PMU.
   output logic [NUM_XP_OUT-1:0][3:0][3:0]           xpInjected,
@@ -195,7 +198,8 @@ module chi_noc_top #(
       .NUM_XP(NUM_XP), .NUM_DEV_PORTS(NUM_DEV_PORTS), .POPULATED(POPULATED)
     ) noc (
       .clk, .resetn, .devInValid, .devInReady, .devInFlit,
-      .devOutValid, .devOutReady, .devOutFlit, .routeError
+      .devOutValid, .devOutReady, .devOutFlit, .routeError,
+      .busy(fabricBusy)
     );
   end else if (CFG.topology == RING) begin : ringTopology
     chi_ring #(
@@ -203,7 +207,8 @@ module chi_noc_top #(
       .NUM_XP(NUM_XP), .NUM_DEV_PORTS(NUM_DEV_PORTS), .POPULATED(POPULATED)
     ) noc (
       .clk, .resetn, .devInValid, .devInReady, .devInFlit,
-      .devOutValid, .devOutReady, .devOutFlit, .routeError
+      .devOutValid, .devOutReady, .devOutFlit, .routeError,
+      .busy(fabricBusy)
     );
   end else begin : meshTopology
     chi_mesh #(
@@ -211,7 +216,8 @@ module chi_noc_top #(
       .NUM_XP(NUM_XP), .NUM_DEV_PORTS(NUM_DEV_PORTS), .POPULATED(POPULATED)
     ) noc (
       .clk, .resetn, .devInValid, .devInReady, .devInFlit,
-      .devOutValid, .devOutReady, .devOutFlit, .routeError
+      .devOutValid, .devOutReady, .devOutFlit, .routeError,
+      .busy(fabricBusy)
     );
   end
 endmodule

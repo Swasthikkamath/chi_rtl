@@ -1,8 +1,10 @@
 // REQ injection regulator of the Request Node ports.
 //
-// Each port has its own token bucket: qosRegRate tokens are added every 256
-// cycles, up to qosRegBurst, and a REQ flit enters the fabric only by taking
-// a token. A port with no token holds its REQ in the link receiver, which
+// Each port has its own token bucket: rate tokens are added every 256
+// cycles, up to burst, and a REQ flit enters the fabric only by taking a
+// token. rate and burst come from the QoS registers (chi_qos_regs) or, without
+// them, from qosRegRate and qosRegBurst; a bucket above a lowered burst is cut
+// to it. A port with no token holds its REQ in the link receiver, which
 // back-pressures the Requester through L-Credits; holding a request never
 // blocks a response, so the regulator cannot deadlock the fabric. A port
 // starts with a full bucket. With qosRegEn 0 every flit passes.
@@ -19,10 +21,13 @@ module chi_qos_reg #(
   output logic [NUM_PORTS-1:0] inReady,
   output logic [NUM_PORTS-1:0] outValid,
   input  logic [NUM_PORTS-1:0] outReady,
+  // Tokens per 256 cycles (1 to 256) and bucket size (1 to 255) per port.
+  input  logic [NUM_PORTS-1:0][8:0] rate,
+  input  logic [NUM_PORTS-1:0][7:0] burst,
   // For the bound assertions and the counters.
   output logic [NUM_PORTS-1:0][7:0] tokens
 );
-  localparam logic [8:0] RATE = (CFG.qosRegRate > 256) ? 9'd256 : 9'(CFG.qosRegRate);
+  // A bucket starts full at the configured burst.
   localparam logic [7:0] BURST = (CFG.qosRegBurst > 255) ? 8'd255
                                  : ((CFG.qosRegBurst == 0) ? 8'd1 : 8'(CFG.qosRegBurst));
 
@@ -53,11 +58,11 @@ module chi_qos_reg #(
       for (int unsigned p = 0; p < NUM_PORTS; p++) begin
         logic [8:0] sum;
         logic [8:0] level;
-        sum = {1'b0, fraction[p]} + RATE;
+        sum = {1'b0, fraction[p]} + rate[p];
         level = {1'b0, tokens[p]} + {8'd0, sum[8]}
                 - {8'd0, (outValid[p] && outReady[p])};
         fraction[p] <= sum[7:0];
-        tokens[p] <= (level > {1'b0, BURST}) ? BURST : level[7:0];
+        tokens[p] <= (level > {1'b0, burst[p]}) ? burst[p] : level[7:0];
       end
     end
   end

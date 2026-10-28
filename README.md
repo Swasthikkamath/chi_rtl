@@ -159,10 +159,10 @@ simulator would check that this flow cannot.
 | `rtl/noc/` | One parameterized crosspoint (`chi_xp`: router, route compute, arbitration) and the mesh, ring and crossbar wiring around it |
 | `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
 | `rtl/hnf/` | HN-F per-entry transactions: POS and hazards, directory and victim buffer, snoops, downstream trackers, retry credits, stash, atomics, exclusives, the SLC and GPC; DCT, DMT and DWT are chosen per entry inside `chi_hnf_top` |
-| `rtl/hni/` | HN-I transactions to SN-Is, the CHI MMIO configuration window, the APB HN-F policy registers, and the APB RAS and performance-counter block |
+| `rtl/hni/` | HN-I transactions to SN-Is, the CHI MMIO configuration window, and the APB blocks: region editor, HN-F policy, RAS and performance counters, QoS |
 | `rtl/mn/` | DVM operations at the MN: payload decode, concurrent `SnpDVMOp` distribution with Sync ordering, GPT invalidation |
 | `rtl/sva/` | Bound local safety, stability and protocol-field assertions with covers |
-| `rtl/top/` | Product top, the system coherency handshake, the QoS regulator, and the compile and elaboration harnesses |
+| `rtl/top/` | Product top, the system coherency handshake, Endpoint Order across HN-Fs, the QoS regulator, and the compile and elaboration harnesses |
 | `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |
 | `DV/` | UVM verification environment, its documentation and the Xcelium run area |
 | `doc-src/` | Design specification source, Graphviz figure sources, Word template |

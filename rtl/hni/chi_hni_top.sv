@@ -63,7 +63,17 @@ module chi_hni_top #(
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     REQUESTER_NODE_IDS [NUM_REQUESTERS] = '{default:'0},
   parameter int unsigned RN_NUM_LP [NUM_REQUESTERS] = '{default:1},
-  parameter int unsigned NUM_LP = NUM_REQUESTERS
+  parameter int unsigned NUM_LP = NUM_REQUESTERS,
+  // The Homes a SAM region may target, for the CHI MMIO commit check (as in
+  // chi_cfg_slave): a DIRECT region any of them, an MMIO region an HN-I.
+  parameter int unsigned NUM_HNF_IDS = 1,
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
+    HNF_IDS [NUM_HNF_IDS] = '{default:'0},
+  parameter int unsigned NUM_HNI_IDS = 1,
+  parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
+    HNI_IDS [NUM_HNI_IDS] = '{default:'0},
+  parameter bit HNF_PRESENT = 1'b1,
+  parameter bit HNI_PRESENT = 1'b1
 ) (
   input  logic clk,
   input  logic resetn,
@@ -122,8 +132,8 @@ module chi_hni_top #(
   localparam int unsigned STEP = datIdStep(CFG);
   localparam int unsigned POISON_PER_BEAT = CFG.dataW / 64;
   localparam int unsigned RESERVE_W = 16;
-  localparam int unsigned RETRY_RECORDS =
-    (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
+  localparam int unsigned RETRY_CREDITS =
+    (CFG.retryCredits > 0) ? CFG.retryCredits : 1;
   localparam logic [63:0] ALL_BYTES = '1;
 
   generate
@@ -203,6 +213,7 @@ module chi_hni_top #(
   logic samError;
   logic samPasError;
   logic configPasOk;
+  logic configOffsetOk;
   logic configAccess;
   logic sniKnown;
   logic [SUB_W-1:0] sniIndex;
@@ -240,6 +251,9 @@ module chi_hni_top #(
     // The configuration window answers only the Root PAS with RME and only
     // the Secure PAS without it.
     configPasOk = incomingReq.pas == (CFG.rmeEn ? PAS_ROOT : PAS_SECURE);
+    // The window holds six 8-byte registers; an access must name one of
+    // them and stay inside it.
+    configOffsetOk = (incomingReq.addr[11:0] < 12'h030) && (incomingReq.size <= 3'd3);
     // PCrdReturn carries no transaction and PrefetchTgt has no response, so
     // both are accepted and discarded (IHI 0050H B2.5.6, B4.2.6.2).
     dropRequest = (incomingReq.opcode == REQ_PCRD_RETURN)
@@ -426,6 +440,32 @@ module chi_hni_top #(
     return value;
   endfunction
 
+  // A staged region may be committed only when it is legal
+  // (chi_pkg::samRegionLegal) and a DIRECT or MMIO region names a Home that
+  // exists, the rule chi_cfg_slave applies to APB commits.
+  function automatic logic targetLegal(
+    input logic [CHI_SAM_ATTR_W-1:0] attributes,
+    input logic [CHI_NODEID_SLOT_W-1:0] target
+  );
+    logic isHnf;
+    logic isHni;
+    isHnf = 1'b0;
+    isHni = 1'b0;
+    for (int unsigned i = 0; i < NUM_HNF_IDS; i++)
+      if (HNF_PRESENT && (target == HNF_IDS[i]))
+        isHnf = 1'b1;
+    for (int unsigned i = 0; i < NUM_HNI_IDS; i++)
+      if (HNI_PRESENT && (target == HNI_IDS[i]))
+        isHni = 1'b1;
+    if (!attributes[0])
+      return 1'b1;
+    case (attributes[3:2])
+      SAM_REGION_DIRECT: return isHnf || isHni;
+      SAM_REGION_MMIO:   return isHni;
+      default:           return 1'b1;
+    endcase
+  endfunction
+
   function automatic logic [3:0] requestGranules(input chi_req_flit_t req);
     return messageGranules(CFG, req.addr, req.size);
   endfunction
@@ -477,7 +517,7 @@ module chi_hni_top #(
     retryGrantAllowed =
       (int'(posUnreservedCount)
        > ((posAllocValid && incomingReq.allowRetry) ? 1 : 0))
-      && (int'(retryCreditsOutstanding) < RETRY_RECORDS);
+      && (int'(retryCreditsOutstanding) < RETRY_CREDITS);
   end
 
   chi_retry #(
@@ -561,7 +601,8 @@ module chi_hni_top #(
     // the Requester-side SAM refused carries that refusal here
     // (IHI 0050H B9.1.1).
     if (configAccess) begin
-      if (!(kind inside {HNI_K_CFG_READ, HNI_K_CFG_WRITE}) || !configPasOk)
+      if (!(kind inside {HNI_K_CFG_READ, HNI_K_CFG_WRITE}) || !configPasOk
+          || !configOffsetOk)
         err = 1'b1;
     end else if (samError || samPasError || !sniKnown) begin
       err = 1'b1;
@@ -1397,13 +1438,21 @@ module chi_hni_top #(
       if (cfgApplyValid) begin
         logic [7:0] offset;
         logic [63:0] value;
+        logic [7:0] enables;
+        logic [63:0] keep;
         offset = entry[cfgApplyEntry].req.addr[7:0];
-        value = bufReq[cfgApplyEntry][int'(entry[cfgApplyEntry].req.addr[5:3])*64 +: 64];
+        // Only the enabled bytes are written (IHI 0050H B2.9.3).
+        enables = bufReqBe[cfgApplyEntry][int'(entry[cfgApplyEntry].req.addr[5:3])*8 +: 8];
+        for (int unsigned b = 0; b < 8; b++)
+          keep[b*8 +: 8] = {8{!enables[b]}};
+        value = (configValue(offset) & keep)
+                | (bufReq[cfgApplyEntry][int'(entry[cfgApplyEntry].req.addr[5:3])*64 +: 64]
+                   & ~keep);
         entry[cfgApplyEntry].dnMainDone <= 1'b1;
         // A commit takes effect only on a quiescent fabric: every other Home
         // idle and nothing else at this HN-I. Otherwise it changes nothing
         // and completes with NDERR.
-        if (((offset & 8'hf8) == 8'h28) && !cfgCommitAllowed)
+        if (((offset & 8'hf8) == 8'h28) && (enables != '0) && !cfgCommitAllowed)
           entry[cfgApplyEntry].err <= 1'b1;
         else if (!entry[cfgApplyEntry].wrCancel) begin
           case (offset & 8'hf8)
@@ -1411,18 +1460,29 @@ module chi_hni_top #(
               if ((value[63:REG_W] == '0)
                   && ({1'b0, value[REG_W-1:0]} < (REG_W+1)'(NUM_REGIONS)))
                 selectedRegion <= value[REG_W-1:0];
+              else
+                entry[cfgApplyEntry].err <= 1'b1;
             8'h08: stagedBase[selectedRegion] <= value[CFG.addrW-1:0];
             8'h10: stagedLimit[selectedRegion] <= value[CFG.addrW-1:0];
             8'h18: stagedTarget[selectedRegion] <= value[CHI_NODEID_SLOT_W-1:0];
             8'h20: stagedAttributes[selectedRegion] <= value[CHI_SAM_ATTR_W-1:0];
-            8'h28: begin
-              mmioRegionUpdate <= 1'b1;
-              mmioRegionUpdateIndex <= selectedRegion;
-              mmioRegionUpdateBase <= stagedBase[selectedRegion];
-              mmioRegionUpdateLimit <= stagedLimit[selectedRegion];
-              mmioRegionUpdateTarget <= stagedTarget[selectedRegion];
-              mmioRegionUpdateAttributes <= stagedAttributes[selectedRegion];
-            end
+            8'h28:
+              if (enables != '0) begin
+                if (samRegionLegal(CFG, CHI_MAX_ADDR_W'(stagedBase[selectedRegion]),
+                                   CHI_MAX_ADDR_W'(stagedLimit[selectedRegion]),
+                                   stagedAttributes[selectedRegion])
+                    && targetLegal(stagedAttributes[selectedRegion],
+                                   stagedTarget[selectedRegion])) begin
+                  mmioRegionUpdate <= 1'b1;
+                  mmioRegionUpdateIndex <= selectedRegion;
+                  mmioRegionUpdateBase <= stagedBase[selectedRegion];
+                  mmioRegionUpdateLimit <= stagedLimit[selectedRegion];
+                  mmioRegionUpdateTarget <= stagedTarget[selectedRegion];
+                  mmioRegionUpdateAttributes <= stagedAttributes[selectedRegion];
+                end else begin
+                  entry[cfgApplyEntry].err <= 1'b1;
+                end
+              end
             default: begin
             end
           endcase

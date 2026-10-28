@@ -123,18 +123,18 @@ packed flit field by itself is carriage, not implementation.
 | Deadlock freedom across REQ, RSP, SNP and DAT | B2.10, B4.11, B2.7.5.3 | Implemented | Every Home accepts RSP and DAT unconditionally into storage reserved before the message was invited and answers REQ with an entry or `RetryAck`, so no channel waits on another in a cycle. The argument is in Section 9.7; `chi_home_liveness_sva` states its environment assumptions and the entry-completion property for a formal tool, with per-entry bounded-completion covers in every build. |
 | P-Credit return | B2.5.6, B2.10.1 | Implemented | A granted credit leaves the accounting either when a request arrives with `AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`, which the Home accepts and discards. |
 | Exclusives | B6.2, B6.3 | Implemented | HN-F PoC and System monitor, HN-I System monitor. An LP is a Requester ordinal and an LPID below `RN_NUM_LP`. Every LP has the single bit B6.2.2 requires; with `exclAddrCheck` it also has an address monitor on `{line, PAS}`, per LP or in an LRU pool. One commit per start after same-location ordering: loads register, stores pass on the bit or a matching address monitor and otherwise fail and register again, a pass resets other LPs' bits and their monitors on that location, and another LP's write to a Non-snoopable location resets the monitors there (B6.2.4). Failed `CleanUnique` and `MakeReadUnique` upgrade nothing (Shared state); a failed `WriteNoSnp` writes nothing. Section 9.13. |
-| Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. Order 0b10 and 0b11 are never sent to an SN-F (Table B2.9). Endpoint Order is kept per Home (Section 13.1). |
+| Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. Order 0b10 and 0b11 are never sent to an SN-F (Table B2.9). Endpoint Order is kept across HN-Fs that share an SN-F: a Requester's Endpoint-ordered requests to one SN-F start in the order it sent them, whichever HN-F serves each (`eoAcrossHnf`, Section 9.5). |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | System Level Cache | B2.8.3, B4.2.2.1, B7.4.2 | Implemented | One slice per HN-F when `slcEn`: set-associative, `{line, PAS}` tags, clean and dirty lines, PLRU, RRIP or random replacement, SECDED data with `slcEccEn`. Looked up with the directory when an entry starts; hits are read through a one-line port, fills and dirty data are written when the entry retires, dirty evictions are written back by victim entries that hold the location. Only Cacheable, non-Device lines are kept; CMOs, Combined writes, `ReadOnce*Invalid` and Device or Non-cacheable accesses take the line out first. `slcTagPipelineDepth` other than 1 is rejected. Section 9.10. |
-| Granule Protection Check | B9.1.1, B10.7.3.1; Arm ARM RME (GPT format) | Implemented | `gpcMode` TABLE (on-chip GPI array) or WALK (GPT in memory, shared cache and two-level walker). Every request a Home admits is checked before it snoops, looks up the SLC or goes downstream; a failure completes with NDERR and has no other effect, and the first fault is recorded with its address, PAS and SrcID. GPT reads go through a tracker reserved in the HN-F that owns each line. Root-only registers, including cache invalidation by all or by PA. The GPT layout follows the Arm ARM as recalled, not checked against it (Section 9.11). GPT TLBIs from the MN invalidate the cache. |
+| Granule Protection Check | B9.1.1, B10.7.3.1; Arm ARM RME (GPT format) | Implemented | `gpcMode` TABLE (on-chip GPI array) or WALK (GPT in memory, shared cache and two-level walker). Every request a Home admits is checked before it snoops, looks up the SLC or goes downstream; a failure completes with NDERR and has no other effect, and the first fault is recorded with its address, PAS and SrcID. GPT reads go through a tracker reserved in the HN-F that owns each line. Root-only registers, including cache invalidation by all or by PA. The GPT layout follows the Arm ARM as recalled, not checked against it (Section 9.11). GPT TLBIs from the MN invalidate the cache. A walker read that returns poison, fails DataCheck or reports an error fails the walk. Walker reads bypass the SLC; with `gpcSlcAlloc` they look in it first and fill it on a miss. |
 | `DataCheck`, Poison and error responses | B9.1, B9.2 | Implemented | Both Homes check the DataCheck of every DAT packet they keep bytes from. An error on a kept byte poisons its 64-bit word, or marks the data DERR when `poisonEn` is 0 (B9.2.3); every packet they send carries newly generated DataCheck. Poison is replaced where a Requester writes a whole word and accumulated where data merges. A Snoopee the directory recorded as possible owner that answers with an error makes the entry's data DERR. Unmapped, PAS-refused, GPC-failed and unsupported requests complete with NDERR and use no direct transfer (B9.1.1, B9.1.3). Section 9.15. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
 | MTE tag semantics | B12, B13.10 | Not implemented | `Tag`, `TU` and `TagOp` are carried. There is no allocation-tag storage, matching or tag-operation behaviour. |
 | MEC | B10.6, B13.10 | Not implemented | The 16-bit `MECID` and its DAT slot overlay are carried. No MEC access control, translation or consistency checking exists. |
 | MPAM | B11.4 | Partial | The 12-bit or 15-bit bus is carried in REQ and SNP. There is no resource partitioning or monitoring. |
-| APB configuration | Project-defined | Implemented | Secure-write staged region editor with a quiescent commit. Limitations are in Section 7. |
-| CHI MMIO configuration | Project-defined | Partial | The HN-I serves a 4 KiB window to the Root PAS only (Secure without RME), with ordinary read and write flows, and commits only while every other Home is idle; any other access completes with NDERR. Register values are not validated. |
+| APB configuration | Project-defined | Implemented | Staged region editor whose commit takes only a legal region (whole 64-byte lines, base at or below limit, a defined kind, legal PASs, an existing Home as target) on a quiescent fabric: nothing entering it, nothing held in a crosspoint, every Home and MN idle. Writes need the Root PAS with RME (Secure as well with `apbRootWrites` 0). Blocks 1 to 4 hold the HN-F policy, GPC, RAS and counter, and QoS registers. Section 7.1. |
+| CHI MMIO configuration | Project-defined | Implemented | The HN-I serves a 4 KiB window of six 8-byte registers to the Root PAS only (Secure without RME), with ordinary read and write flows. Writes take only the enabled bytes; an access outside the registers, an out-of-range SELECT, or a COMMIT of an illegal region or on a fabric that is not quiescent completes with NDERR and changes nothing. Section 7.2. |
 | SVA | Sections above | Partial | Bound local safety, stability and protocol-field properties with functional covers. There is no full protocol checker and no proof closure. |
 
 : Table 1.1 Feature status against Arm IHI 0050H
@@ -586,7 +586,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `snpFilterEntries` | 1024 | positive, divisible by ways | Total Home directory entries. |
 | `snpFilterWays` | 4 | 1 through entries, exact divisor | Directory associativity. |
 | `posEntries` | 32 | positive | POS entries, each a concurrent transaction. |
-| `retryRecords` | 16 | positive | P-Credits a Home may have granted and not yet seen used or returned; each holds a transaction entry in reserve. |
+| `retryCredits` | 16 | positive | P-Credits a Home may have granted and not yet seen used or returned; each holds a transaction entry in reserve. It replaces `retryRecords`, the depth of a retry record table this design no longer has. |
 | `maxOutstandingSnoops` | 16 | positive when `numHnf > 0` | Snoops one HN-F may have in flight across all its transactions. |
 | `hniEntries` | 8 | positive when `numHni > 0`, and within the TxnID space | Transactions one HN-I runs at once, each with its own buffers. |
 | `dvmMaxOps` | 4 | at least 2 when `numMn > 0` | DVMOps one MN runs at once; one entry is kept for a Non-sync. |
@@ -634,6 +634,9 @@ it is a parameter at all and what choosing it wrong costs.
 | `qosRegEn` | 0 | needs a Request Node | REQ injection token bucket per Request Node port. |
 | `qosRegRate` | 256 | 1 to 256 | Tokens added per 256 cycles; 256 is one flit per cycle. |
 | `qosRegBurst` | 8 | 1 to 255 | Tokens a bucket holds; each port starts full. |
+| `eoAcrossHnf` | 1 | 0 or 1 | Endpoint Order across HN-Fs that share an SN-F (Section 9.5); 0 keeps it per Home only. |
+| `gpcSlcAlloc` | 0 | needs `slcEn` and `gpcMode` WALK | GPT walker reads look in the SLC and fill it on a miss (Section 9.11). |
+| `apbRootWrites` | 1 | 0 or 1 | With RME, configuration writes need the Root PAS; 0 also accepts Secure writes. The GPC registers stay Root-only. |
 | `cfgAccess` | `CFG_PARAM_ONLY` | enum; CHI MMIO also requires HN-I | Selects no runtime writes, APB, or CHI MMIO. |
 | `hnfSnfMap` | `HNF_SNF_MAP_MODULO` | MODULO or TABLE; TABLE entries must name existing SN-Fs | HN-F to SN-F pairing, and the SN-F anchor of automatic placement. |
 
@@ -699,7 +702,7 @@ impossible opcodes far from the cause.
 | `rmeEn`, `gdiEn` | B16.1.16 `RME_Support`, `GDI_Support` (Table B13.47) | A PAS one side may send is refused, or accepted, by the other. |
 | `pbhaEn` | B16.1.19 `PBHA_Support` | REQ length differs. |
 | `multiReqEn` | B16.1.39 `MultiReq_Support` | A multi-request transaction is treated as a single request. |
-| `retryRecords` | B16.1.38 `Retry_Support`, with B16.1.34 `Num_RP_REQ` and B16.1.35 `Shared_Credits_REQ` | The P-Credit pool the Requester believes exists does not match what the Home can track. |
+| `retryCredits` | B16.1.38 `Retry_Support`, with B16.1.34 `Num_RP_REQ` and B16.1.35 `Shared_Credits_REQ` | The P-Credit pool the Requester believes exists does not match what the Home can track. |
 
 : Table 3.2 Configuration fields fixed by a declared CHI interface property
 
@@ -763,7 +766,7 @@ open, not because interoperability demands it.
 | `meshX`, `meshY`, `numXp`, `numDevPortsPerXp` | Fabric shape is microarchitecture. | Hop count against crosspoint count; also consumes NodeID bits. |
 | `snpFilterEntries`, `snpFilterWays` | CHI requires a Home to track sharers but not how. | Directory area against back-invalidation traffic. See Section 3.2.3. |
 | `posEntries` | Transaction tracking depth is unspecified. | Concurrent transactions per Home against entry state and line-buffer area. |
-| `retryRecords` | The Home decides how many P-Credits it has out at once. | Entries idling in reserve for re-sent requests against how quickly retried Requesters are invited back. |
+| `retryCredits` | The Home decides how many P-Credits it has out at once. | Entries idling in reserve for re-sent requests against how quickly retried Requesters are invited back. |
 | `hniEntries` | Transaction tracking depth is unspecified. | Concurrent HN-I transactions against two 64-byte buffers per entry. |
 | `slc*` | An interconnect cache is optional and invisible to the protocol. | Memory traffic and latency against area; the policies trade hit rate against how much RN-F state the SLC duplicates. |
 | `gpc*` | Where the completer-side GPC is made, and how, is system design (B10.7.3.1 only requires one). | Table area against the latency of walks; cache size against walk traffic. |
@@ -818,7 +821,7 @@ round trip. Larger values also let different transactions snoop together.
 The count costs only a small counter; what it limits is the snoop traffic one
 Home can put on the SNP network at once.
 
-**`retryRecords` bounds how many P-Credits a Home has out.** A grant holds an
+**`retryCredits` bounds how many P-Credits a Home has out.** A grant holds an
 entry in reserve until the Requester re-sends its request or returns the
 credit, so a large value can leave many entries idle while Requesters are slow
 to come back, and a small one slows how fast retried Requesters are invited
@@ -917,7 +920,7 @@ harnesses.
 | `numSnf`, `numSni` | 1, 1 | 2, 1 | 4, 1 |
 | `numMn` | 1 | 1 | 1 |
 | `dataW` | 128 | 256 | 256 |
-| `posEntries`, `retryRecords` | 16, 8 | 32, 16 | 64, 32 |
+| `posEntries`, `retryCredits` | 16, 8 | 32, 16 | 64, 32 |
 | `maxOutstandingSnoops` | 8 | 16 | 32 |
 | `snpFilterEntries`, `snpFilterWays` | 512, 4 | 1024, 4 | 4096, 8 |
 | `hniEntries` | 4 | 8 | 8 |
@@ -1257,8 +1260,9 @@ output. A `PCrdReturn` does not use its address field, so decoding it would
 send the credit back to whichever Home owns the region containing address
 zero rather than to the Home that granted it, leaking a P-Credit on every
 return. A replay must reach the Home that issued the `RetryAck` because only
-that Home holds the matching retry record, and a region table edited between
-the `RetryAck` and the replay would otherwise redirect it. `PrefetchTgt` is
+that Home holds an entry in reserve for the P-Credit it granted, and a region
+table edited between the `RetryAck` and the replay would otherwise redirect
+it. `PrefetchTgt` is
 unaffected by the `AllowRetry` rule because B2.10.2.1 requires `AllowRetry`
 to be 1 for it.
 
@@ -1339,14 +1343,30 @@ security policy and commit protocol in this section are
 APB runs on `clk` and `PREADY` is always 1. Addresses are 12-bit and word
 aligned. `PADDR[11:8]` selects a 256-byte block: block 0 is the region editor
 below, block 1 the HN-F policy registers of Table 7.1b, block 2 the GPC
-registers of Table 7.1c when `gpcMode` is not NONE, and block 3 the RAS and
-performance registers of Table 7.1d when `rasEn` or `pmuEn` is set; every other
-block returns `PSLVERR`. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
-A write must be a Root access with `rmeEn` (`PNSE=1`, `PPROT[1]=0`, the AMBA
-APB5 encoding) and a Secure access without it (`PPROT[1]=0`); anything else
-returns `PSLVERR`. Unsupported or
-misaligned accesses, out-of-range SELECT writes and non-quiescent COMMIT
-writes return `PSLVERR`.
+registers of Table 7.1c when `gpcMode` is not NONE, block 3 the RAS and
+performance registers of Table 7.1d when `rasEn` or `pmuEn` is set, and block
+4 the QoS registers of Table 7.1e when `qosRegEn` is set; every other block
+returns `PSLVERR`. Writes merge the bytes selected by `PSTRB`. Reads are
+unrestricted. A write must be a Root access with `rmeEn` (`PNSE=1`,
+`PPROT[1]=0`, the AMBA APB5 encoding) and a Secure access without it
+(`PPROT[1]=0`); `apbRootWrites` = 0 accepts a Secure access with `rmeEn` too,
+for software that does not drive `PNSE`, except at the GPC registers, which
+always need the Root PAS. Anything else returns `PSLVERR`. Unsupported or
+misaligned accesses, out-of-range SELECT writes and out-of-range values
+return `PSLVERR`.
+
+A COMMIT is taken only while traffic is quiescent, meaning nothing is
+entering the fabric, no flit is held in any crosspoint FIFO, and every Home
+and MN is idle, and only for a legal region:
+
+- a disabled region (`ATTRIBUTES[0]` = 0) is always legal;
+- otherwise BASE is 64-byte aligned, LIMIT ends a 64-byte line, and BASE is at
+  or below LIMIT;
+- the reserved attribute bit is 0 and the kind is HNF_HASH, DIRECT or MMIO;
+- the allowed PASs are ones the configuration defines (Table B13.47);
+- a DIRECT region targets an HN-F or HN-I, and an MMIO region an HN-I.
+
+Any other COMMIT returns `PSLVERR` and changes nothing.
 
 | Offset | Name | Access | Reset or read value | Write effect |
 |--------|----------------|----------|----------------------|--------------------------------------------|
@@ -1357,7 +1377,7 @@ writes return `PSLVERR`.
 | `0x010` | LIMIT_HI | RW | upper configured limit bits | Stage bits `addrW-1:32`. |
 | `0x014` | TARGET | RW | `REGION_TARGET[n]` | Stage the target NodeID. |
 | `0x018` | ATTRIBUTES | RW | `REGION_ATTRIBUTES[n]` | Stage the low four bits. |
-| `0x01c` | COMMIT | W, reads zero | 0 | If byte strobe 0 is set and traffic is quiescent, pulse one region update. |
+| `0x01c` | COMMIT | W, reads zero | 0 | If byte strobe 0 is set, traffic is quiescent and the staged region is legal, pulse one region update. |
 
 : Table 7.1 APB4 register map of `chi_cfg_slave` (block 0)
 
@@ -1403,6 +1423,15 @@ writes return `PSLVERR`.
 
 : Table 7.1d RAS and performance registers of `chi_obs_regs` (block 3); RAS registers exist with `rasEn`, counters with `pmuEn`
 
+| Offset | Name | Access | Function |
+|--------|------|--------|----------|
+| `0x400` | SELECT | RW | Request Node port, by ordinal (RN-F, RN-D, RN-I), the next registers refer to. |
+| `0x404` | RATE | RW | Tokens added to its bucket per 256 cycles, 1 to 256; reset `qosRegRate`. |
+| `0x408` | BURST | RW | Tokens its bucket holds, 1 to 255; reset `qosRegBurst`. A bucket above a lowered burst is cut to it. |
+| `0x40c` | TOKENS | RO | Tokens in its bucket now. |
+
+: Table 7.1e QoS regulator registers of `chi_qos_regs` (block 4), present with `qosRegEn`
+
 A policy bit only narrows what the configuration allows: the HN-F ANDs it with
 the global enable in `chi_cfg_t` and with the capability of the node involved.
 
@@ -1421,7 +1450,7 @@ The HN-I recognizes any address in the 4 KiB window at `CFG_MMIO_BASE`.
 | `0x10` | full staged inclusive limit |
 | `0x18` | staged target |
 | `0x20` | staged attributes |
-| `0x28` | a write commits; a read falls through to the selected-region value |
+| `0x28` | a write with any byte enabled commits; a read falls through to the selected-region value |
 
 : Table 7.2 CHI MMIO offsets recognised by the HN-I
 
@@ -1432,13 +1461,13 @@ accesses to the register line are serialized like any other line at the HN-I
 (Section 9.8). The window answers only the Root PAS with `rmeEn` and only the
 Secure PAS without it; the default region table admits only that PAS to the
 window, and the HN-I checks again, so any other access completes with NDERR.
-A COMMIT takes effect only while every other Home is idle and the commit is
-the HN-I's only transaction; otherwise it changes nothing and completes with
-NDERR. The path does not check byte enables, base and limit validity or
-target validity. Unsupported offsets silently read SELECT or ignore the write
-and still complete successfully, and an invalid SELECT payload is silently
-ignored. This is a reference control path, not a hardened management
-interface.
+A COMMIT takes effect only on the quiescent fabric of Section 7.1 apart from
+itself: nothing entering the fabric or held in it, every other Home and the
+MNs idle, and the commit the HN-I's only transaction; otherwise it changes
+nothing and completes with NDERR. A write takes only its enabled bytes (B2.9.3). An access outside the
+six registers, or wider than 8 bytes, completes with NDERR, as do a SELECT
+write beyond the region table and a COMMIT of a region the rules of Section
+7.1 refuse; none of them changes anything.
 
 # 8 Transaction flows
 
@@ -1783,9 +1812,20 @@ back-pressure.
 
 Request Order applies to one address, so the same-location rule keeps it. An
 Endpoint-ordered request waits for every older ordered request from its
-source, because every location this Home serves is behind one Subordinate.
-Unordered requests and requests to different locations never wait for each
-other. `ReadReceipt` for an ordered `ReadNoSnp` or `ReadOnce*` goes out as soon
+source at its Home. Behind the HN-Fs the endpoint is an SN-F, and with address
+interleaving several HN-Fs can share one, so with `eoAcrossHnf` the order is
+also kept across Homes. Each HN-F maps to one SN-F. When an HN-F allocates an
+Endpoint-ordered request, the request takes the next ticket of its
+{Requester, SN-F} pair from `chi_eo_order`; it starts only when its ticket is
+the one served, and its retirement serves the next. The Requester sends its
+next Endpoint-ordered request only after the Home acknowledges the last
+(`ReadReceipt` or `DBIDResp`), so allocation order is the order it sent them,
+and the requests reach the SN-F in that order whichever HN-F serves each. A
+Requester's Endpoint-ordered requests to one SN-F therefore run one at a
+time. A Requester may run several ordered streams, ordered only within each
+(B2.7.5.1); tickets do not tell them apart, so its streams to one SN-F are
+also ordered against each other, which is stronger than required. Unordered
+requests and requests to different locations never wait for each other. `ReadReceipt` for an ordered `ReadNoSnp` or `ReadOnce*` goes out as soon
 as the request is allocated, and always before its `CompData`.
 
 ## 9.6 Downstream requests
@@ -2047,9 +2087,17 @@ WALK mode.
 One walk runs at a time. Each GPT read goes to the HN-F that owns the line,
 which reads it from its SN-F in the Root PAS through a downstream tracker
 reserved for the walker, so a walk never waits for a POS entry and never
-competes with the transactions it is holding up (Section 9.7). Reads bypass
-the SLC: software makes GPT updates visible at the PoPA before invalidating
-GPT caches, so memory holds what the walker must see. A walk's result fills
+competes with the transactions it is holding up (Section 9.7). By default
+reads bypass the SLC: software makes GPT updates visible at the PoPA before
+invalidating GPT caches, so memory holds what the walker must see. With
+`gpcSlcAlloc` a read looks in the SLC first, through its read port. A hit
+returns the SLC's line; a miss reads memory, and the line is then filled
+into the SLC clean. The fill is dropped if, at any time from the lookup to
+the fill, a transaction or victim held the line in any PAS, or a new
+transaction, a directory or SLC eviction, or an SLC update touched it,
+because memory's copy could then be older than the line's latest data. A
+walker read whose data carries poison, fails DataCheck or reports an error
+fails the walk and is never filled. A walk's result fills
 the `gpcCacheEntries`-entry cache, including a fault entry for a malformed
 descriptor or a failed read. Writing CTRL or GPT_BASE, or INVALIDATE,
 invalidates the cache; a walk in flight across an invalidation does not fill
@@ -2372,7 +2420,9 @@ from and gave to its device ports on each channel.
 
 **QoS regulator.** With `qosRegEn`, `chi_qos_reg` gives each Request Node
 port a token bucket: `qosRegRate` tokens arrive every 256 cycles, up to
-`qosRegBurst`, and a REQ flit enters the fabric only by taking one. A held
+`qosRegBurst`, and a REQ flit enters the fabric only by taking one. With APB,
+each port's rate and burst can be changed at run time in block 4 (Table
+7.1e). A held
 REQ waits in the link receiver and back-pressures the Requester through
 L-Credits. Only requests are regulated, so a held request never blocks a
 response and the regulator cannot deadlock the fabric (Section 9.7).
@@ -2474,7 +2524,7 @@ or performance guarantees are supplied.
 | `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
 | `chi_direct_sva.sv` | `DIRECT_DATA_BYPASSES_HOME`, `RESP_SEP_DATA_FOR_DMT_SEP`, `DWT_NO_DATA_REQUEST_FROM_HOME`, per-entry `DMT_AFTER_SNOOPS`, `EXCLUSIVE_NOT_DIRECT`, `DWT_NOT_ON_SLC_LINE` | `FORWARDING_SNOOP_SENT` per forwarding snoop, `DCT_FORWARDED`, `DCT_FALLBACK`, `DMT_COMBINED`, `DMT_SEPARATE`, `DWT_USED`, `DWT_COMP_FROM_SUBORDINATE`, `WRITE_COMP_DBID_RESP`, `WRITE_SEPARATE_DBID_RESP`, `WRITE_SEPARATE_COMP`, `WRITE_DATA_CANCEL_AT_HOME` |
 | `chi_correctness_sva.sv` (HN-F and HN-I) | `READ_DATA_STATE_LEGAL`, `MAKE_READ_UNIQUE_COMP_STATE_LEGAL`, `WRITE_DATA_ZERO_WHERE_DISABLED`, `REQUESTER_BE_IN_WINDOW`, `WRITE_DATA_CANCEL_PERMITTED`, per-word `POISON_KEPT_UNDER_PARTIAL_WRITE` and `DATACHECK_ERROR_KEPT`, per-victim `DIRECTORY_EVICTION_RECONCILES_SLC`; HN-I `WRITE_DATA_ZERO_WHERE_DISABLED` | `READ_SHARED_SD_PD`, `READ_PREFER_UNIQUE_UD_PD`, `MAKE_READ_UNIQUE_COMP_UD_PD`, `PARTIAL_WRITE_OVER_POISON`, `DATACHECK_ERROR_SEEN`, `DIRECTORY_EVICTION_INTO_SLC`; HN-I `DATACHECK_ERROR_SEEN` |
-| `chi_system_sva.sv` (`chi_sysco`, HN-F, MN, directory, SLC, `chi_qos_reg`, `chi_obs_regs`) | `SYSCO_REQ_FOUR_PHASE`, `SYSCO_ACK_FOUR_PHASE`, `SYSCO_CONNECT_AT_ONCE`, `SYSCO_DISCONNECT_DRAINED`, `NO_SNOOP_OUTSIDE_COHERENCY`, `RNF_IDLE_MEANS_DRAINED`, `CACHEABLE_REQUEST_INSIDE_COHERENCY`, `NO_DVM_SNOOP_OUTSIDE_COHERENCY`, `SF_HIDES_NODES_OUTSIDE_COHERENCY`, `QOS_INJECTION_TAKES_A_TOKEN`, `QOS_TOKENS_BOUNDED`, `RAS_UNCORRECTED_RAISES_IRQ`, `RAS_IRQ_HOLDS_UNTIL_CLEARED` | `SYSCO_CONNECT_DISCONNECT`, `SYSCO_DISCONNECT_WAITS`, `SNOOP_DROPPED_AT_DISCONNECT`, `SF_ECC_CORRECTED`, `SF_ECC_UNCORRECTED`, `SF_LOOKUP_OF_DEAD_SET`, `SLC_TAG_CORRECTED`, `SLC_TAG_UNCORRECTED`, `QOS_PORT_HELD`, `RAS_IRQ_RAISED_AND_CLEARED` |
+| `chi_system_sva.sv` (`chi_sysco`, HN-F, MN, directory, SLC, `chi_qos_reg`, `chi_obs_regs`) | `SYSCO_REQ_FOUR_PHASE`, `SYSCO_ACK_FOUR_PHASE`, `SYSCO_CONNECT_AT_ONCE`, `SYSCO_DISCONNECT_DRAINED`, `NO_SNOOP_OUTSIDE_COHERENCY`, `RNF_IDLE_MEANS_DRAINED`, `CACHEABLE_REQUEST_INSIDE_COHERENCY`, `NO_DVM_SNOOP_OUTSIDE_COHERENCY`, `SF_HIDES_NODES_OUTSIDE_COHERENCY`, `QOS_INJECTION_TAKES_A_TOKEN`, `QOS_TOKENS_BOUNDED`, `RAS_UNCORRECTED_RAISES_IRQ`, `RAS_IRQ_HOLDS_UNTIL_CLEARED`, `EO_STARTS_ON_ITS_TICKET`, `GPT_FILL_ONLY_WHILE_LINE_FREE`, `GPT_FILL_ONLY_GOOD_DATA`, `REGION_COMMIT_LEGAL`, `REGION_UPDATE_WHEN_QUIESCENT` | `SYSCO_CONNECT_DISCONNECT`, `SYSCO_DISCONNECT_WAITS`, `SNOOP_DROPPED_AT_DISCONNECT`, `SF_ECC_CORRECTED`, `SF_ECC_UNCORRECTED`, `SF_LOOKUP_OF_DEAD_SET`, `SLC_TAG_CORRECTED`, `SLC_TAG_UNCORRECTED`, `QOS_PORT_HELD`, `RAS_IRQ_RAISED_AND_CLEARED`, `EO_WAITS_ON_ANOTHER_REQUEST`, `GPT_READ_SLC_HIT`, `GPT_LINE_FILLED`, `REGION_COMMIT_REFUSED` |
 | `chi_excl_sva.sv` | `EXCL_SECOND_PASS_NEEDS_REGISTRATION`, `EXCL_PASS_CLEARS_SAME_LOCATION`, `EXCL_PASS_KEEPS_OTHER_LOCATIONS`, `EXCL_FAIL_REREGISTERS`, `EXCL_ONE_MONITOR_PER_LP`, `EXCL_LPID_IN_RANGE` | `EXCL_PASS`, `EXCL_FAIL_REGISTERS`, `EXCL_FAIL_THEN_PASS`, `EXCL_TWO_LPS_ONE_LOCATION`, `EXCL_TWO_LPS_TWO_LOCATIONS_PASS`, `EXCL_ADDRESS_MISMATCH_FAIL` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
@@ -2533,7 +2583,8 @@ in each topology; destination and channel preservation; one-hot grants;
 bounded age service under permanently ready outputs; XY monotonicity; ring
 slot conservation; L-Credit conservation across each link direction; SAM
 first-match determinism; commit atomicity; no duplicate Home line ownership;
-sequential snoop target uniqueness; retry records never double-booked;
+sequential snoop target uniqueness; a reserved entry never backing two
+P-Credits;
 outstanding P-Credits never exceeding the granted resource; completion
 identifiers matching the accepted request; and reset returning all valid
 state to empty. Liveness assumptions must state eventual downstream ready and
@@ -2568,6 +2619,7 @@ rtl/sam/chi_prefetch_map.sv
 rtl/hni/chi_cfg_slave.sv
 rtl/hni/chi_hnf_policy_regs.sv
 rtl/hni/chi_obs_regs.sv
+rtl/hni/chi_qos_regs.sv
 rtl/hni/chi_hni_top.sv
 rtl/mn/chi_mn_dvm.sv
 rtl/hnf/chi_pos.sv
@@ -2583,6 +2635,7 @@ rtl/hnf/chi_slc.sv
 rtl/hnf/chi_gpc.sv
 rtl/hnf/chi_hnf_top.sv
 rtl/top/chi_sysco.sv
+rtl/top/chi_eo_order.sv
 rtl/top/chi_qos_reg.sv
 rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
@@ -2810,11 +2863,10 @@ the cross-references in the prose stay correct in every output format.
    Exclusive, and none at the HN-I.
 8. The `FwdNID` and `VMIDExt` packing of `SnpDVMOp` is not verified against
    Table B8.14 (Section 9.12).
-9. Runtime SAM writes lack complete validation: CHI-MMIO checks the PAS and
-   commits only while traffic is quiescent, but not byte enables, base and
-   limit or target validity (Section 7.2), and
-   quiescent commit, and APB quiescence does not inspect every internal
-   topology slot.
+9. Region commits are checked (Section 7.1) but may overlap, the lowest
+   region index winning, and a commit changes one region at a time, so
+   software moving an address range between regions passes through
+   intermediate maps, each of which must itself be legal.
 10. A flit for an unknown fabric destination is dropped at its first
     crosspoint and flagged on the internal `routeError` signal; it is not
     answered with an error response, so the transaction it belongs to does not
@@ -2828,20 +2880,19 @@ the cross-references in the prose stay correct in every output format.
     claims a P-Credit it was never granted, cannot be retried and is held with
     back-pressure; every request from a well-behaved Requester is allocated,
     dropped or retried (Section 9.4).
-13. Endpoint Order is kept per Home: an HN-F treats its own address set as
-    the endpoint range. Two HN-Fs that share an SN-F do not order
-    Endpoint-ordered requests against each other, so a Requester that needs
-    that across interleaved Homes must wait for completion.
+13. A Requester's Endpoint-ordered requests to one SN-F run one at a time
+    across the HN-Fs, and its separate ordered streams to that SN-F are
+    ordered against each other (Section 9.5): correct, but not pipelined.
+    HN-Is order Endpoint-ordered requests per HN-I.
 14. RAS limits: a dead directory way and a fenced SLC way stay out of use
     until reset; the GPT cache's valid bits are outside its SECDED; a
     corrected SLC way is written back only when the update port next writes
     its set; and the address recorded for an uncorrectable directory or SLC
     tag error is the access that found it, or the stored tag, which may be
-    the corrupted one. The QoS regulator's rate and burst are fixed at
-    elaboration and shared by every port.
-15. DataCheck is not checked on the GPT walker's reads, on atomic operands
-    the HN-F executes, or on DVM payloads at the MN, and a snoop error from a Snoopee the directory did not record as
-    owner is ignored, because a clean copy loses nothing.
+    the corrupted one.
+15. DataCheck is not checked on atomic operands the HN-F executes or on DVM
+    payloads at the MN, and a snoop error from a Snoopee the directory did
+    not record as owner is ignored, because a clean copy loses nothing.
 16. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
     performance characterization. The smoke run in Section 12.7 drives no
@@ -2861,7 +2912,7 @@ the cross-references in the prose stay correct in every output format.
 | Internal flow control | Ready/valid with registered crosspoint outputs | No claim of per-hop CHI L-Credits. |
 | Handshake structure | Valid never depends on its ready; forward and backward directions live in separate blocks | The fabric elaborates with no circular combinational logic. |
 | P-Credit types | 4 of the 16 Issue H values, indexed by request category | Resources are partitioned by category rather than per requester. |
-| Retry state | Owed grants counted per Requester and type; `retryRecords` credits out at once, each holding an entry | `RetryAck` is always possible; a re-sent request is always accepted. |
+| Retry state | Owed grants counted per Requester and type; `retryCredits` credits out at once, each holding an entry | `RetryAck` is always possible; a re-sent request is always accepted. |
 | `PrefetchTgt` target | A separate address-to-SN-F mapper | The hint reaches memory without consuming Home resources. |
 | HN selection | XOR-folded granule modulo `numHnf` | Supports non-power-of-two Home counts. |
 | SAM overlap | The lowest region index wins | A security rejection at the first match does not fall through. |
@@ -2875,6 +2926,9 @@ the cross-references in the prose stay correct in every output format.
 | Home concurrency | One transaction per POS entry, one per location at a time | Throughput scales with `posEntries`; same-location requests queue in arrival order. |
 | Directory eviction | Victim buffer snoops with `SnpCleanInvalid` and writes back, into the SLC's copy when it holds the line | Dirty data is never lost to a capacity eviction, and no stale SLC copy survives one. |
 | DataCheck errors | Converted to Poison on the word, DERR without Poison | Errors survive the buffers, which keep no DataCheck. |
+| Endpoint Order across Homes | A ticket per {Requester, SN-F}; one request of a stream runs at a time | Order holds across interleaved HN-Fs at the cost of pipelining. |
+| GPT walker and the SLC | Bypass by default; with `gpcSlcAlloc`, look up, and fill clean only when nothing touched or held the line from the lookup to the fill | The walker can be served from the SLC without ever leaving a stale line there. |
+| Configuration write rule | Root with RME by default, Secure as well with `apbRootWrites` 0; GPC always Root | RME-compliant by default, with a path for software that does not drive `PNSE`. |
 | Coherency exit | Snoops stop and unsent ones drop when `SYSCOREQ` falls; `SYSCOACK` waits for outstanding snoops and the directory walk | A node is never snooped outside coherency and leaves no directory state behind. |
 | Uncorrectable directory way | The way dies and its set is snooped by broadcast | Coherence is kept at the cost of snoop traffic for that set. |
 | RAS reporting | One record per HN-F and one for the GPC, in APB block 3, with a level interrupt | Software sees the first uncorrected error and the counts. |
