@@ -33,14 +33,14 @@ digraph chiHnf {
     label="Coherence";
     style="rounded"; color="#7799bb"; fontcolor="#224466";
     sf     [label="chi_snoop_filter\nlookup port, update port,\nlocked-way eviction", fillcolor="#dce9f7"];
-    snpgen [label="chi_snp_gen\nsnoop issue, TxnID = owner", fillcolor="#dce9f7"];
+    snpgen [label="chi_snp_gen\nsnoop issue, TxnID = owner\nSnp*Fwd for DCT", fillcolor="#dce9f7"];
     vb     [label="victim buffer\nSnpCleanInvalid + writeback", fillcolor="#dce9f7"];
   }
 
   subgraph cluster_mem {
     label="Memory side";
     style="rounded"; color="#77aa77"; fontcolor="#2f6b2f";
-    tracker [label="chi_sn_tracker\nReadNoSnp, WriteNoSnp, CMO\nRetry, PCrdReturn", fillcolor="#e8f0e0"];
+    tracker [label="chi_sn_tracker\nReadNoSnp(Sep), WriteNoSnp, CMO\nDMT and DWT without data\nRetry, PCrdReturn", fillcolor="#e8f0e0"];
     buf     [label="line buffers\nRequester, snoop, memory bytes", fillcolor="#e8f0e0"];
   }
 

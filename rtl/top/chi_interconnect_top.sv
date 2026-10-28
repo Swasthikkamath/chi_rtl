@@ -555,6 +555,8 @@ module chi_interconnect_top #(
         if ((CFG.dmtEn || CFG.dwtEn)
             && (((CFG.numHnf + CFG.numHni) == 0) || (CFG.numSnf == 0)))
           $fatal(1, "DMT/DWT require a Home Node and SN-F");
+        if (CFG.dmtSepEn && !CFG.dmtEn)
+          $fatal(1, "dmtSepEn selects ReadNoSnpSep for DMT reads, so it needs dmtEn");
         if (CFG.stashEn && ((CFG.numRnf == 0) || (CFG.numHnf == 0)))
           $fatal(1, "Stash requires RN-F and HN-F endpoints");
         if (CFG.dvmEn && ((CFG.numMn == 0) || (NUM_REQ == 0)))

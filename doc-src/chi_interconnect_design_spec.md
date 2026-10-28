@@ -102,12 +102,12 @@ packed flit field by itself is carriage, not implementation.
 | Per-hop L-Credits inside the fabric | B13.11 | Not implemented | Internal topology links use ready/valid with registered crosspoint outputs. CHI L-Credits terminate at the node ports. |
 | Requester SAM, HN striping and HN-I SAM | B3.1--B3.3 | Implemented | Ordered region table, security rejection, XOR-fold hash and runtime update ports. The decode result overwrites the incoming `TgtID`, which B3.3.1 permits. All five B3.3.1 cases are distinguished, including the two that bypass the address mapper; see Section 6.1. |
 | `PrefetchTgt` routing | B3.3.1, B4.2.6.2 | Implemented | `chi_prefetch_map` maps the address to an SN-F independently of the HN hash, the request bypasses the Home, and both the HN-F and HN-I accept and discard it without a response and without a RetryAck. |
-| Coherent read family | B2.3.1, B4.2.1, B4.4, B4.5.1 | Implemented | Every allocating read, `MakeReadUnique` (Comp without data while the Requester still holds the line), the `ReadOnce` family and `ReadNoSnp`. The Home reads memory with its own `ReadNoSnp` only when no snoop returned the whole line, merges partial Dirty data over memory data, and grants `CompData` per Table B4.27 from what the other caches keep; Dirty data a read cannot take is written back. Data always passes through the Home (see the DCT and DMT rows). |
+| Coherent read family | B2.3.1, B4.2.1, B4.4, B4.5.1 | Implemented | Every allocating read, `MakeReadUnique` (Comp without data while the Requester still holds the line), the `ReadOnce` family and `ReadNoSnp`. The Home reads memory with its own `ReadNoSnp` only when no snoop returned the whole line, merges partial Dirty data over memory data, and grants `CompData` per Table B4.27 from what the other caches keep; Dirty data a read cannot take is written back. The data passes through the Home unless DCT or DMT is used (see their rows). |
 | Write family | B2.3.2, B4.2.3, B4.5.1.3 | Implemented | Immediate, Write Zero and CopyBack writes, stash and Combined forms. The Home issues its own `DBIDResp` or `CompDBIDResp` with its entry as DBID, buffers the data, merges a partial write over Dirty snoop data, honours `WriteDataCancel` and `CopyBackWriteData_I`, and writes memory with `WriteNoSnpFull` or `WriteNoSnpPtl`; a `WriteNoSnp` keeps its own address, Size and attributes. `WriteNoSnpDef` is answered OK/Unsupported (B4.5.1.3.1). |
 | CMO and combined write-CMO | B2.3.2.4, B2.3.2.5, B2.3.5, B4.2.2 | Implemented | Every CMO and Combined write including PoPA and the Issue H Storage forms. Dirty copies are snooped out and written back before `Comp`; persist, PoPA and Storage maintenance is forwarded to the SN-F, `CleanSharedPersistSep` with `ReturnNID` naming the Requester so the Persist goes straight to it; `CompCMO` follows the write. PoP, PoPA and PoPS are taken to be at or behind the SN-F. |
-| DCT | B2.3.1.1 alt 5, B4.8.3 | Not implemented | The per-entry Home does not send forwarding snoops yet; all read data passes through the Home. Capability and policy plumbing exists (Stage 1). |
-| DMT, including `ReadNoSnpSep` | B2.3.1.1 alts 3-4, B2.3.9.1 | Not implemented | The Home reads memory into its own buffer; `ReadNoSnpSep` is never issued and is rejected with NDERR from a Requester (B1.6). |
-| DWT | B2.3.2.1 alt 1, B13.10.24 | Not implemented | Write data passes through the Home. DWT is not legal for CopyBack writes (B2.3.2.3, B13.10.24), so it will only ever apply to Immediate and Combined writes. |
+| DCT | B2.3.1.1 alt 5, B2.5.1.3, Table B4.26, Table B2.6 | Implemented | All six forwarding snoops: `SnpSharedFwd`, `SnpCleanFwd`, `SnpNotSharedDirtyFwd`, `SnpUniqueFwd`, `SnpPreferUniqueFwd` for the allocating reads, `SnpOnceFwd` for a whole-line `ReadOnce`. Sent to the owning RN-F when it has `RNF_DCT_CAP`, with FwdNID and FwdTxnID naming the Requester; `SnpRespFwded` and `SnpRespDataFwded` record the state given, Dirty data that comes back is written to memory, and a declined forward falls back to the SLC, DMT, then the Home. Never for Exclusives, stash requests, ordered requests or with `mteEn`. Section 9.14. |
+| DMT | B2.3.1.1 alts 3-4, B2.5.1.1-2, B2.3.9.1, B4.7.1 | Implemented | Once its snoops are done, a read granted UC with nothing buffered at the Home sends `ReadNoSnp` with ReturnNID and ReturnTxnID naming the Requester and Order 0b01, so the SN-F returns `CompData_UC` to the Requester and `ReadReceipt` to the Home. With `dmtSepEn` it sends `ReadNoSnpSep` instead and answers the Requester itself with `RespSepData_UC` after the `ReadReceipt`, so the Requester may acknowledge before the data arrives. `ReadNoSnpSep` from a Requester is still rejected with NDERR (B1.6). Section 9.14. |
+| DWT | B2.3.2.1 alt 1, B13.10.24, Table B13.20 | Implemented for `WriteNoSnpFull` and `WriteNoSnpPtl` | `WriteNoSnp` with DoDWT 1 and ReturnNID and ReturnTxnID naming the Requester: the SN-F sends `DBIDResp` to the Requester, takes the data (or `WriteDataCancel`) from it, and sends `Comp` to the Home, which then sends `Comp`. Not for CopyBacks (B2.3.2.3), Combined writes, `WriteNoSnpDef`, `WriteUnique*`, Exclusives, ordered writes, writes with `ExpCompAck`, or lines the SLC holds or allocates. Section 9.14. |
 | Atomics | B2.3.3, B2.9.6, B4.2.5, B5.4 | Implemented | The Home snoops every other copy (and the Requester with `SnoopMe`), takes the initial value from a Dirty snoop or memory, applies `chi_atomic_alu`, writes the line back when it changed or was Dirty, and returns the original value. `AtomicCompare` takes the compare value at the addressed location and the swap value at the address with bit log2(operand size) inverted (B2.9.6.2). The datapath is 64 bits, so operands wider than 8 bytes are not supported. |
 | Far atomics | B4.2.5 | Partial | Operations are executed at the Home. There is no negotiation that pushes the operation to the Subordinate. |
 | DVM and MN | B8.2, B8.3, B8.4 | Partial | Full DVMOp flow: `DBIDResp`, the 8-byte payload, two-part `SnpDVMOp` to every RN-F and RN-D but the Requester, `SnpResp`, `Comp`. Up to `dvmMaxOps` DVMOps at once with one entry kept for a Non-sync; a Sync snoops only after every older DVMOp has finished; one Sync and one Non-sync `SnpDVMOp` outstanding per Request Node; `RetryAck` and P-Credits. The DVMType is decoded and a GPT TLBI also invalidates the GPC's GPT cache. Partial because the `FwdNID` and `VMIDExt` packing of Table B8.14 is not verified (Section 9.12). |
@@ -429,8 +429,10 @@ byte masks for Requester data, snoop data and memory data, so a partial write
 merges over Dirty snoop data, which merges over memory data, whatever order
 they arrive in.
 
-The Home does not use direct transfers yet: data always passes through it.
-Section 9 describes the transaction model in detail.
+An entry can also hand its data movement to other nodes: a forwarding snoop
+(DCT), a memory read answered to the Requester (DMT) or write data sent
+straight to the SN-F (DWT), chosen per entry (Section 9.14). Section 9
+describes the transaction model in detail.
 
 ## 2.6 Configuration and status plane
 
@@ -573,6 +575,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `slcAllocPolicy` | `SLC_ALLOC_HINT` | HINT, CACHEABLE | Allocate on `MemAttr.Allocate`, or for every Cacheable line. |
 | `slcEccEn` | 0 | 0 or 1 | SECDED on each 64-bit word of the data array. |
 | `slcTagPipelineDepth` | 1 | exactly 1 | Tag lookup stages; the lookup shares the directory's stage. |
+| `slcFillOnDmtMiss` | 1 | 0 or 1 | On an SLC miss of a read the SLC would allocate: 1 reads through the Home and fills the SLC, 0 uses DMT when the read is eligible and skips the fill (Section 9.14). |
 | `gpcMode` | `GPC_NONE` | NONE, TABLE, WALK; needs `rmeEn` and `cfgAccess` APB; WALK needs an HN-F | Granule Protection Check at every Home. |
 | `gpcTableGranules` | 4096 | positive with TABLE | Granules the on-chip GPI array covers. |
 | `gpcCacheEntries` | 16 | positive with WALK | Entries of the shared GPT cache. |
@@ -593,9 +596,10 @@ it is a parameter at all and what choosing it wrong costs.
 | `rmeEn` | 1 | 0 or 1 | RME_Support: the Root and Realm PASs are legal, and configuration writes need the Root PAS. |
 | `gdiEn` | 0 | 0 or 1; needs `rmeEn` | GDI_Support: the System Agent and Non-secure Protected PASs are legal. |
 | `multiReqEn` | 0 | 0 or 1 | Checked metadata. No multi-request behaviour. |
-| `dctEn` | 1 | if 1, RN-F and HN-F must exist | Enables DCT eligibility and forwarding snoops. |
-| `dmtEn` | 1 | if 1, a Home and SN-F must exist | Enables direct memory transfer. |
-| `dwtEn` | 1 | if 1, a Home and SN-F must exist | Enables direct write transfer. |
+| `dctEn` | 1 | if 1, RN-F and HN-F must exist | Enables DCT: forwarding snoops to an owning RN-F (Section 9.14). |
+| `dmtEn` | 1 | if 1, a Home and SN-F must exist | Enables DMT at the HN-F (Section 9.14). |
+| `dmtSepEn` | 0 | needs `dmtEn` | DMT reads use `ReadNoSnpSep` and the Home's `RespSepData` instead of `ReadNoSnp` (B2.3.1.1 alt 4). |
+| `dwtEn` | 1 | if 1, a Home and SN-F must exist | Enables DWT at the HN-F for `WriteNoSnpFull` and `WriteNoSnpPtl` (Section 9.14). |
 | `atomicEn` | 1 | if 1, a Home must exist | Enables the atomic transaction path. |
 | `dvmEn` | 1 | if 1, an MN and a Requester must exist | Enables the MN sequencer. |
 | `stashEn` | 1 | if 1, RN-F and HN-F must exist | Enables stash decode, stash snoops and Data Pull. |
@@ -1321,30 +1325,37 @@ table states what the RTL does.
 | Step | From | To | Message |
 |------|------------|------------|----------------------------------------------------------------------|
 | 1 | Requesting RN-F | HN-F | `ReadShared` |
-| 2 | HN-F | Owning RN-F | `SnpSharedFwd` |
-| 3 | Owning RN-F | Requesting RN-F | `CompData` with the forwarded line |
-| 4 | Owning RN-F | HN-F | `SnpRespFwded` |
-| 5 | HN-F | Requesting RN-F | completion as required |
+| 2 | HN-F | Owning RN-F | `SnpSharedFwd`, FwdNID and FwdTxnID naming the Requester |
+| 3 | Owning RN-F | Requesting RN-F | `CompData` with the forwarded line, DBID = the snoop's TxnID, HomeNID = the HN-F |
+| 4 | Owning RN-F | HN-F | `SnpRespFwded`, or `SnpRespDataFwded` when Dirty data comes back |
+| 5 | Requesting RN-F | HN-F | `CompAck`, TxnID = that DBID |
 
 : Table 8.1 ReadShared served by direct cache transfer
 
-RTL status: Not implemented. The Home snoops the owner with `SnpShared` and
-`RetToSrc` set and returns the line as its own `CompData` (Section 9.1).
+RTL status: Implemented (Section 9.14). The snoop's TxnID is the POS entry,
+so the `CompAck` finds it like any other (B2.5.1.3). The entry keeps the line
+until both the snoop response and the `CompAck` have arrived. If the owner
+declines with `SnpResp` or a snoop response with data, the Home completes the
+read itself.
 
 ## 8.2 ReadUnique with DMT
 
 | Step | From | To | Message |
 |------|------------|------------|----------------------------------------------------------------------|
 | 1 | RN-F | HN-F | `ReadUnique` |
-| 2 | HN-F | RN-F sharers | snoops as required by the directory |
-| 3 | HN-F | SN-F | `ReadNoSnp` with `ReturnNID` and `ReturnTxnID` naming the Requester |
-| 4 | SN-F | RN-F | `CompData` direct to the Requester |
-| 5 | HN-F | RN-F | the response the Home still owes, when one is required |
+| 2 | HN-F | RN-F sharers | snoops as required by the directory, all answered before step 3 |
+| 3 | HN-F | SN-F | `ReadNoSnp`, TxnID = POS entry, `ReturnNID` and `ReturnTxnID` naming the Requester, Order 0b01 |
+| 4 | SN-F | HN-F | `ReadReceipt` |
+| 5 | SN-F | RN-F | `CompData_UC`, DBID = the POS entry, HomeNID = the HN-F |
+| 6 | RN-F | HN-F | `CompAck` |
 
 : Table 8.2 ReadUnique served by direct memory transfer
 
-RTL status: Not implemented. The Home reads memory into its line buffer with
-its own `ReadNoSnp`, under its own TxnID, and returns `CompData` itself.
+RTL status: Implemented (Section 9.14). Steps 4 and 5 may arrive in either
+order. With `dmtSepEn`, step 3 is `ReadNoSnpSep`, the SN-F's data is
+`DataSepResp_UC`, and after step 4 the HN-F sends `RespSepData_UC` with the
+same DBID; the Requester may then send `CompAck` before its data arrives
+(B2.7.4).
 
 ## 8.3 WriteBackFull
 
@@ -1476,6 +1487,24 @@ RTL status: Implemented. Non-sync DVMOps follow the same steps without the
 wait in step 4; their `Comp` also follows their own snoop responses
 (Section 9.12).
 
+## 8.9 WriteNoSnpFull with DWT
+
+| Step | From | To | Message |
+|------|------------|------------|----------------------------------------------------------------------|
+| 1 | Requester | HN-F | `WriteNoSnpFull` |
+| 2 | HN-F | SN-F | `WriteNoSnpFull` with DoDWT 1, `ReturnNID` and `ReturnTxnID` naming the Requester |
+| 3 | SN-F | Requester | `DBIDResp`, TxnID = the Requester's TxnID |
+| 4 | Requester | SN-F | `NonCopyBackWriteData`, or `WriteDataCancel` |
+| 5 | SN-F | HN-F | `Comp` |
+| 6 | HN-F | Requester | `Comp` |
+
+: Table 8.9 WriteNoSnpFull completed by direct write transfer (B2.3.2.1 alt 1)
+
+RTL status: Implemented (Section 9.14). Steps 4 and 5 may come in either
+order. The HN-F waits for step 5 before step 6, which the protocol permits
+but does not require, so its `Comp` always means the Subordinate has the
+write.
+
 # 9 Home Node internals
 
 ## 9.1 Per-entry transactions
@@ -1513,6 +1542,7 @@ The fields of an entry, and who writes them:
 | Responses | `receiptOwed`, `dbidOwed`, `dbidWithComp`, `compOwed`, `compGranSent`, `compCmoOwed`, `compAckOwed`, `sfUpdOwed` | plan, then per message sent or received |
 | SLC | `slcHit`, `slcDirty`, `slcKeep`, `slcRemove`, `slcKeepDirty`, `slcUpdOwed` | plan at start; `slcKeepDirty` and `slcUpdOwed` when the entry finishes |
 | Granule protection | `gpcPending` | at allocation; cleared when the check is answered (Section 9.11) |
+| Direct transfers | `dctPlanned`, `dctOpcode`, `dwtUsed`; `dmtUsed`, `dmtSep` | plan at start; `dmtUsed` and `dmtSep` when the memory read starts (Section 9.14) |
 
 : Table 9.2 POS entry fields
 
@@ -1553,8 +1583,8 @@ whether it still owns the line, and `PassDirty` makes the data the Home's to
 place. A forwarded response, `SnpRespFwded` or `SnpRespDataFwded`, records the
 state the Snoopee gave the Requester (FwdState, B13.10.47) and releases the
 entry from sending data; Dirty data that came back with it is still written to
-memory (B4.5.3). The Home does not send forwarding snoops yet (Section 8.1),
-so this path is reached only once DCT is used.
+memory (B4.5.3). These responses answer the forwarding snoops of DCT
+(Section 9.14).
 
 ## 9.3 Directory
 
@@ -1797,11 +1827,11 @@ waits; victim entries depend only on the Subordinate, so they always drain.
 
 **Feature interactions.**
 
-- DMT: a hit is always returned by the Home. On a miss a read that would use
-  DMT either fills through the Home or bypasses the SLC; that choice
-  (`slcFillOnDmtMiss`) arrives with DMT in Stage 8.
+- DMT: a hit is always returned by the Home. On a miss of a read the SLC
+  would allocate, `slcFillOnDmtMiss` = 1 reads through the Home and fills the
+  SLC; 0 uses DMT and the line is not allocated.
 - DWT: write data must not bypass a line the SLC holds. A line resident or
-  allocating in the SLC is never written with DWT (Stage 8).
+  allocating in the SLC is never written with DWT.
 - DCT: a peer that may hold the line Dirty or Unique is still snooped, because
   its copy may be newer; the SLC supplies the data only where the directory
   shows no such owner.
@@ -1976,9 +2006,94 @@ and completes with `Comp` without `EXOK`.
 
 **Direct transfers and the SLC.** An Exclusive Load that does not fail must
 not use DMT or DCT, and a `WriteNoSnp(Excl)` must not use DWT when the check
-fails (B6.3.1); since the check is made at the Home before any direct
-transfer is chosen (Stage 8), the Home returns `EXOK` in every case. The SLC
-does not affect monitor state.
+fails (B6.3.1). The Home goes further and uses no direct transfer for any
+Exclusive access, pass or fail, including `MakeReadUnique(Excl)`, so the
+response that carries `EXOK` or the exclusive state always comes from the
+Home (Section 9.14). The SLC does not affect monitor state.
+
+## 9.14 Direct transfers
+
+A direct transfer moves a transaction's data between the Requester and
+another node without passing the Home. With DCT a forwarding snoop has the
+owning RN-F send the line. With DMT the SN-F sends the line. With DWT the
+Requester sends its write data to the SN-F. The HN-F chooses per entry. A path is used only
+when its `chi_cfg_t` enable, the active run-time policy of that HN-F
+(`POLICY_ACTIVE`, Table 7.1b), the capability parameter of the node that has to take part, and
+the rules of the transaction all allow it. A transaction that cannot use one
+runs through the Home exactly as Sections 9.1 to 9.6 describe. The HN-I uses
+none of them.
+
+| | DCT | DMT | DWT |
+|------|------|------|------|
+| Request | `ReadShared`, `ReadClean`, `ReadNotSharedDirty`, `ReadUnique`, `ReadPreferUnique` with `ExpCompAck`; `ReadOnce` of 64 bytes | an allocating read with `ExpCompAck`, or `MakeReadUnique` when the Requester no longer holds the line | `WriteNoSnpFull`, `WriteNoSnpPtl` without `ExpCompAck` |
+| Order | 0b00 (Table B2.6) | 0b00 | 0b00 |
+| Directory state | another RN-F may hold the line Unique or Dirty and is a snoop target | any; once the snoops are done the grant is UC (no other copy is kept) and no snoop data is held | no snoops (the location is Non-snoopable) |
+| SLC state | any | miss; a miss the SLC would fill only with `slcFillOnDmtMiss` = 0 | neither resident nor allocating |
+| Capability | `RNF_DCT_CAP` of the owner | `SNF_DMT_CAP` of the HN-F's SN-F | `SNF_DWT_CAP` of the HN-F's SN-F |
+| Enable and policy | `dctEn`, `POLICY_ACTIVE[0]`, and `mteEn` = 0 | `dmtEn`, `POLICY_ACTIVE[1]` | `dwtEn`, `POLICY_ACTIVE[2]` |
+| Never for | Exclusives (B6.3.1), stash requests, a request with an error | Exclusives, a forwarded read, Requester data to merge, a Data Pull, a request with an error | an Exclusive Store, `WriteUnique*`, `WriteNoSnpDef`, Combined writes and CopyBacks (B13.10.24), a request with an error |
+
+: Table 9.6 Direct transfer eligibility at the HN-F, by request, directory state, SLC state, capability and policy
+
+**DCT.** The owner's snoop becomes the forwarding snoop that matches the
+request (Table B4.26), with FwdNID and FwdTxnID set to the Requester's SrcID
+and TxnID and `RetToSrc` 0; other sharers get the snoop they would get
+anyway. The owner sends `CompData` to the Requester with the snoop's TxnID,
+the POS entry, as DBID and the Home as HomeNID, so the Requester's
+`CompAck` reaches the entry like any other (B2.5.1.3). `SnpRespFwded` or
+`SnpRespDataFwded` records the state the Requester was given (FwdState) and
+the owner's own state. The Home then owes no data. Dirty data that comes
+back is written to memory, and the directory is updated with both states
+(Section 9.2). `MakeReadUnique` has no forwarding snoop and never uses DCT. A
+partial `ReadOnce` does not use DCT either, because a forwarding snoop
+carries no size and the owner would send the whole line. If the owner
+declines, answering `SnpResp` or a snoop response with data, the read
+continues as if no forward had been asked for. The SLC supplies the line on
+a hit, DMT is used if the read is now eligible, and otherwise the Home sends
+the data. The entry keeps its location until it has the snoop response and,
+when the request has `ExpCompAck`, the `CompAck`.
+
+**DMT.** The choice is made when the entry is about to read memory, which is
+only after all its snoops have completed (B2.3.1.1). The Subordinate's read
+data is always UC (B4.7.1), so DMT is used only when the read's grant is UC,
+and only when no byte of the line is held at the Home: no snoop data, no
+Requester data, no Data Pull. The downstream `ReadNoSnp` carries the
+Requester's SrcID and TxnID as ReturnNID and ReturnTxnID and Order 0b01. The
+SN-F sends `CompData_UC` to the Requester, with the POS entry as DBID and
+the Home as HomeNID (B2.5.1.1), and a `ReadReceipt` to the Home. The receipt
+proves the Subordinate will not retry the request (B2.7.5.1). The entry then
+owes nothing; it waits for the receipt and the `CompAck`. With `dmtSepEn`
+the request is `ReadNoSnpSep`, the data is `DataSepResp_UC`, and the Home
+sends `RespSepData_UC` once the receipt is in. Its DBID is the POS entry,
+the same value the `DataSepResp` carries (B2.4.3, B2.5.1.2), and its state
+matches the data's (B4.5.1.1). The Requester may acknowledge on
+`RespSepData` alone, so the entry can retire before the data reaches the
+Requester (B2.7.4). On a retry the request is resent with the same ReturnNID
+and ReturnTxnID (B2.10).
+
+**DWT.** The choice is made when the entry starts. The downstream
+`WriteNoSnpFull` or `WriteNoSnpPtl` has the Requester's exact address and
+size, DoDWT 1, and the Requester's SrcID and TxnID as ReturnNID and
+ReturnTxnID. The SN-F sends `DBIDResp` to the Requester (Table B13.20), the
+Requester sends it `NonCopyBackWriteData` or `WriteDataCancel`, and the SN-F
+sends `Comp` to the Home. The Home sends no `DBIDResp` of its own and
+receives no write data. It sends `Comp` once the Subordinate's `Comp` is in
+(B2.3.2.1 alt 1).
+
+**Interaction with progress.** A direct transfer adds no new wait at the
+Home. An entry that has handed off its data waits only for `ReadReceipt`,
+`Comp`, snoop responses and `CompAck`, all on the RSP and DAT inputs the Home
+always accepts (Section 9.7). The data itself now travels on paths the Home
+does not own: Snoopee to Requester, Subordinate to Requester, Requester to
+Subordinate. Every Requester must accept the `CompData`, `DataSepResp` and
+`DBIDResp` it is sent. A Subordinate must accept the write data for a
+`DBIDResp` it sent. Those are obligations of the nodes, not of the fabric.
+
+The bound assertions in `chi_direct_sva.sv` (Section 12.1) check that no
+data of a direct transfer passes the Home's DAT ports, that DMT follows the
+snoops, that `RespSepData` answers only a `ReadNoSnpSep` read, that a DWT
+write gets no data request from the Home, and that no Exclusive and no SLC
+line uses a direct transfer.
 
 # 10 RN-F boundary cache-state model
 
@@ -2075,6 +2190,7 @@ or performance guarantees are supplied.
 | `chi_pas_sva.sv` | `SAM_PAS_REFUSAL_KEEPS_REGION`, `SAM_ACCEPTED_PAS_ALLOWED`, `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED`, `SF_ONE_WAY_PER_LOCATION` | `SAM_PAS_REFUSED`, `PAS_ALIAS_EVICTED`, `POPA_FORWARDED`, `REFUSED_REQUEST_ALLOCATED` |
 | `chi_slc_sva.sv` | `SLC_ONE_WAY_PER_LOCATION`, `SLC_DIRTY_NEVER_DROPPED`, `SLC_NO_DEVICE_ALLOCATION`, `SLC_DISCARD_ONLY_AFTER_WRITEBACK` | `SLC_HIT`, `SLC_MISS_FILL`, `SLC_DIRTY_EVICTION`, `SLC_EVICTION_HOLDS_REQUEST`, `SLC_CMO_HITS_DIRTY`, `SLC_MAINTENANCE` |
 | `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
+| `chi_direct_sva.sv` | `DIRECT_DATA_BYPASSES_HOME`, `RESP_SEP_DATA_FOR_DMT_SEP`, `DWT_NO_DATA_REQUEST_FROM_HOME`, per-entry `DMT_AFTER_SNOOPS`, `EXCLUSIVE_NOT_DIRECT`, `DWT_NOT_ON_SLC_LINE` | `FORWARDING_SNOOP_SENT` per forwarding snoop, `DCT_FORWARDED`, `DCT_FALLBACK`, `DMT_COMBINED`, `DMT_SEPARATE`, `DWT_USED`, `DWT_COMP_FROM_SUBORDINATE`, `WRITE_COMP_DBID_RESP`, `WRITE_SEPARATE_DBID_RESP`, `WRITE_SEPARATE_COMP`, `WRITE_DATA_CANCEL_AT_HOME` |
 | `chi_excl_sva.sv` | `EXCL_SECOND_PASS_NEEDS_REGISTRATION`, `EXCL_PASS_CLEARS_SAME_LOCATION`, `EXCL_PASS_KEEPS_OTHER_LOCATIONS`, `EXCL_FAIL_REREGISTERS`, `EXCL_ONE_MONITOR_PER_LP`, `EXCL_LPID_IN_RANGE` | `EXCL_PASS`, `EXCL_FAIL_REGISTERS`, `EXCL_FAIL_THEN_PASS`, `EXCL_TWO_LPS_ONE_LOCATION`, `EXCL_TWO_LPS_TWO_LOCATIONS_PASS`, `EXCL_ADDRESS_MISMATCH_FAIL` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
@@ -2175,10 +2291,7 @@ rtl/hnf/chi_snoop_filter.sv
 rtl/hnf/chi_snp_gen.sv
 rtl/hnf/chi_retry.sv
 rtl/hnf/chi_sn_tracker.sv
-rtl/hnf/chi_dct_ctrl.sv
 rtl/hnf/chi_atomic_alu.sv
-rtl/hnf/chi_dmt_ctrl.sv
-rtl/hnf/chi_dwt_ctrl.sv
 rtl/hnf/chi_stash_ctrl.sv
 rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_slc.sv
@@ -2202,6 +2315,7 @@ rtl/sva/chi_pas_sva.sv
 rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_excl_sva.sv
+rtl/sva/chi_direct_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```
@@ -2388,9 +2502,11 @@ the cross-references in the prose stay correct in every output format.
 6. MultiReq and `CacheLineID`, PBHA, MTE tag semantics and MEC access control
    are carriage only. MPAM is carried but not enforced.
 7. Atomics are always executed at the Home rather than negotiated to the
-   Subordinate, the atomic datapath is 64 bits so wider operands are
-   unsupported, and DCT, DMT and DWT are not used: all data passes through
-   the Home.
+   Subordinate, and the atomic datapath is 64 bits so wider operands are
+   unsupported. Direct transfers are used only where Section 9.14 allows:
+   DMT only for a UC grant, DWT only for `WriteNoSnpFull` and
+   `WriteNoSnpPtl` without `ExpCompAck`, no direct transfer for any
+   Exclusive, and none at the HN-I.
 8. The `FwdNID` and `VMIDExt` packing of `SnpDVMOp` is not verified against
    Table B8.14 (Section 9.12).
 9. Runtime SAM writes lack complete validation, CHI-MMIO lacks security and

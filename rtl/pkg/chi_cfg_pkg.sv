@@ -195,6 +195,9 @@ package chi_cfg_pkg;
     chi_slc_alloc_e     slcAllocPolicy;
     logic               slcEccEn;           // SECDED on the data array
     int unsigned        slcTagPipelineDepth; // lookup stages; 1 is built
+    // On an SLC miss the SLC would fill: read through the Home and fill (1),
+    // or use DMT and skip the fill (0).
+    logic               slcFillOnDmtMiss;
     // Granule Protection Check.
     chi_gpc_mode_e      gpcMode;
     int unsigned        gpcTableGranules;   // GPI entries of the on-chip table
@@ -224,6 +227,10 @@ package chi_cfg_pkg;
     logic               multiReqEn;
     logic               dctEn;
     logic               dmtEn;
+    // A DMT read uses ReadNoSnpSep: the Home answers with RespSepData and the
+    // SN-F sends DataSepResp (IHI 0050H B2.3.1.1 alt 4). Otherwise ReadNoSnp,
+    // and the SN-F sends CompData (alt 3).
+    logic               dmtSepEn;
     logic               dwtEn;
     logic               atomicEn;
     logic               dvmEn;
@@ -246,6 +253,7 @@ package chi_cfg_pkg;
     slcEn: 1'b0, slcSizePerHnf: 65536, slcWays: 8, slcLineBytes: 64,
     slcReplPolicy: SLC_REPL_PLRU, slcInclusion: SLC_NON_INCLUSIVE,
     slcAllocPolicy: SLC_ALLOC_HINT, slcEccEn: 1'b0, slcTagPipelineDepth: 1,
+    slcFillOnDmtMiss: 1'b1,
     gpcMode: GPC_NONE, gpcTableGranules: 4096, gpcCacheEntries: 16,
     dvmMaxOps: 4, exclAddrCheck: 1'b1, exclMonMode: EXCL_PER_LP,
     lcrdDepth: 8, exclMonitors: 32,
@@ -253,7 +261,7 @@ package chi_cfg_pkg;
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,
     mpamEn: 1'b0, mteEn: 1'b0, mecEn: 1'b0,
     pbhaEn: 1'b0, cdaEn: 1'b0, rmeEn: 1'b1, gdiEn: 1'b0, multiReqEn: 1'b0,
-    dctEn: 1'b1, dmtEn: 1'b1, dwtEn: 1'b1,
+    dctEn: 1'b1, dmtEn: 1'b1, dmtSepEn: 1'b0, dwtEn: 1'b1,
     atomicEn: 1'b1, dvmEn: 1'b1, stashEn: 1'b1, exclEn: 1'b1,
     cfgAccess: CFG_PARAM_ONLY, hnfSnfMap: HNF_SNF_MAP_MODULO
   };

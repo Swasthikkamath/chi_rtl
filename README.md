@@ -17,8 +17,9 @@ transactions, Physical Address Space checks per address region with
 `{line, PAS}` locations in both Homes, an optional System Level Cache slice
 per HN-F, a completer-side Granule Protection Check (on-chip table or GPT
 walk), concurrent DVM operations at the MN with Sync ordering, per-LP exclusive
-monitors with optional address comparison at both Homes, a directory with dirty-safe eviction, atomic transactions, cache
-stashing with Data Pull, and `PrefetchTgt` routing.
+monitors with optional address comparison at both Homes, direct cache, memory and write transfers (DCT with every
+forwarding snoop, DMT by `ReadNoSnp` or `ReadNoSnpSep`, DWT) at the HN-F, a directory with dirty-safe eviction, atomic
+transactions, cache stashing with Data Pull, and `PrefetchTgt` routing.
 
 Behaviour that is deliberately partial or absent includes multiple interfaces
 per node, replicated channels, per-hop L-Credits inside the fabric, an RN-side
@@ -140,9 +141,9 @@ simulator would check that this flow cannot.
 | `rtl/link/` | L-Credit manager, activation FSM, link TX and RX, and the per-port link wrapper |
 | `rtl/noc/` | One parameterized crosspoint (`chi_xp`: router, route compute, arbitration) and the mesh, ring and crossbar wiring around it |
 | `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
-| `rtl/hnf/` | HN-F per-entry transactions: POS and hazards, directory and victim buffer, snoops, downstream trackers, retry credits, stash, atomics, exclusives; DCT, DMT and DWT decision blocks |
+| `rtl/hnf/` | HN-F per-entry transactions: POS and hazards, directory and victim buffer, snoops, downstream trackers, retry credits, stash, atomics, exclusives, the SLC and GPC; DCT, DMT and DWT are chosen per entry inside `chi_hnf_top` |
 | `rtl/hni/` | HN-I transactions to SN-Is, the CHI MMIO configuration window, and the APB HN-F policy registers |
-| `rtl/mn/` | Sequential DVM distribution |
+| `rtl/mn/` | DVM operations at the MN: payload decode, concurrent `SnpDVMOp` distribution with Sync ordering, GPT invalidation |
 | `rtl/sva/` | Bound local safety, stability and protocol-field assertions with covers |
 | `rtl/top/` | Product top and the compile and elaboration harnesses |
 | `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |

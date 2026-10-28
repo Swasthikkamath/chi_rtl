@@ -3,10 +3,11 @@
 //   *_STABLE_UNDER_BACKPRESSURE  a presented flit holds until taken; the
 //       REQ input check is the assumption the Home makes of the fabric.
 //   DOWNSTREAM_OPCODE_LEGAL  every request to the SN-F is one the Home may
-//       send it: ReadNoSnp, WriteNoSnpFull, WriteNoSnpPtl, a forwarded CMO,
-//       or PCrdReturn (IHI 0050H B2.3.9).
-//   DOWNSTREAM_FIELDS_LEGAL  Order is at most Request accepted, SnpAttr and
-//       ExpCompAck are zero (IHI 0050H Table B2.9, B2.8.6).
+//       send it: ReadNoSnp, ReadNoSnpSep, WriteNoSnpFull, WriteNoSnpPtl, a
+//       forwarded CMO, or PCrdReturn (IHI 0050H B2.3.9).
+//   DOWNSTREAM_FIELDS_LEGAL  Order is at most Request accepted, ExpCompAck is
+//       zero, and the SnpAttr/DoDWT bit is set only as DoDWT on a WriteNoSnp
+//       (IHI 0050H Table B2.9, B2.8.6, B13.10.24).
 //   COMPDATA_RESP_LEGAL  CompData carries only I, SC, UC, UD_PD or SD_PD
 //       (IHI 0050H Table B4.27).
 //   WRITE_COMPLETION_RESP_ZERO  Comp and CompDBIDResp carry Resp zero except
@@ -94,7 +95,8 @@ module chi_proto_sva #(
     @(posedge clk) disable iff (!resetn)
     reqOutValid
       |-> downstream.opcode inside {
-            REQ_READ_NO_SNP, REQ_WRITE_NO_SNP_FULL, REQ_WRITE_NO_SNP_PTL,
+            REQ_READ_NO_SNP, REQ_READ_NO_SNP_SEP,
+            REQ_WRITE_NO_SNP_FULL, REQ_WRITE_NO_SNP_PTL,
             REQ_CLEAN_SHARED_PERSIST, REQ_CLEAN_SHARED_PERSIST_SEP,
             REQ_CLEAN_INVALID_POPA, REQ_CLEAN_INVALID_STORAGE,
             REQ_PCRD_RETURN});
@@ -104,7 +106,10 @@ module chi_proto_sva #(
     reqOutValid
       |-> ((downstream.order == ORDER_NONE)
            || (downstream.order == ORDER_REQUEST_ACCEPTED))
-          && !downstream.snpAttrOrDoDwt && !downstream.expCompAck);
+          && (!downstream.snpAttrOrDoDwt
+              || (downstream.opcode inside {REQ_WRITE_NO_SNP_FULL,
+                                            REQ_WRITE_NO_SNP_PTL}))
+          && !downstream.expCompAck);
 
   COMPDATA_RESP_LEGAL: assert property (
     @(posedge clk) disable iff (!resetn)

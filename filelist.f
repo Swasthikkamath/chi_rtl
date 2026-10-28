@@ -30,10 +30,7 @@ rtl/hnf/chi_snoop_filter.sv
 rtl/hnf/chi_snp_gen.sv
 rtl/hnf/chi_retry.sv
 rtl/hnf/chi_sn_tracker.sv
-rtl/hnf/chi_dct_ctrl.sv
 rtl/hnf/chi_atomic_alu.sv
-rtl/hnf/chi_dmt_ctrl.sv
-rtl/hnf/chi_dwt_ctrl.sv
 rtl/hnf/chi_stash_ctrl.sv
 rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_slc.sv
@@ -57,5 +54,6 @@ rtl/sva/chi_pas_sva.sv
 rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_excl_sva.sv
+rtl/sva/chi_direct_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv

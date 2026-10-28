@@ -36,8 +36,13 @@
 // later source never overwrites a more recent one, so a partial write merges
 // over Dirty snoop data, which merges over memory data.
 //
-// Direct transfers (DCT, DMT, DWT) are not used by this engine yet; every
-// transaction moves its data through the Home.
+// Direct transfers (IHI 0050H B2.3.1.1, B2.3.2.1, B2.5.1): DCT sends a
+// forwarding snoop to a DCT-capable owner, DMT has the SN-F return a read's
+// data to the Requester (CompData, or with dmtSepEn DataSepResp after the
+// Home's RespSepData), and DWT has the Requester send write data straight
+// to the SN-F. Each is chosen per transaction from the global enable, the
+// node capability, the run-time policy and the rules of the transaction; see
+// the design specification, Section 9.14.
 module chi_hnf_top #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0] HN_NODE_ID = '0,
@@ -244,6 +249,12 @@ module chi_hnf_top #(
     logic               slcUpdOwed;  // SLC write or removal at retirement
     // Granule Protection Check still to be answered; the entry cannot start.
     logic               gpcPending;
+    // Direct transfers.
+    logic               dctPlanned;  // the owner gets a forwarding snoop
+    chi_snp_opcode_e    dctOpcode;
+    logic               dmtUsed;     // memory returns the data to the Requester
+    logic               dmtSep;      // by ReadNoSnpSep; the Home owes RespSepData
+    logic               dwtUsed;     // write data goes straight to the SN-F
   } entry_t;
 
   // Victim-buffer entry. The key holds the evicted location, PAS included.
@@ -370,6 +381,20 @@ module chi_hnf_top #(
   // Home writes is a whole line.
   function automatic logic dnExactWrite(input entry_t e);
     return (e.kind == HNF_KIND_WRITE) && !isWriteUnique(e.req.opcode);
+  endfunction
+
+  // The forwarding snoop for a read (IHI 0050H B4.4, Table B4.26), or
+  // SNP_SHARED when the read has none.
+  function automatic chi_snp_opcode_e fwdSnoopFor(input chi_req_opcode_e op);
+    case (op)
+      REQ_READ_SHARED:           return SNP_SHARED_FWD;
+      REQ_READ_CLEAN:            return SNP_CLEAN_FWD;
+      REQ_READ_NOT_SHARED_DIRTY: return SNP_NOT_SHARED_DIRTY_FWD;
+      REQ_READ_UNIQUE:           return SNP_UNIQUE_FWD;
+      REQ_READ_PREFER_UNIQUE:    return SNP_PREFER_UNIQUE_FWD;
+      REQ_READ_ONCE:             return SNP_ONCE_FWD;
+      default:                   return SNP_SHARED;
+    endcase
   endfunction
 
   // MemAttr[2] is Cacheable and MemAttr[1] Device (IHI 0050H B2.8.3); only
@@ -528,6 +553,19 @@ module chi_hnf_top #(
   logic exclLpKnown;
   logic [clog2Min1(NUM_LP)-1:0] exclLpIndex;
   logic [POS_DEPTH-1:0] eMruFail;
+  // Direct transfers.
+  logic [POS_DEPTH-1:0] eDmtOk;
+  logic [POS_DEPTH-1:0] eDctFwded;
+  // For the bound direct-transfer assertions.
+  logic [POS_DEPTH-1:0] eDmtUsed;
+  logic [POS_DEPTH-1:0] eDmtSep;
+  logic [POS_DEPTH-1:0] eDnReadDone;
+  logic [POS_DEPTH-1:0] eDwtUsed;
+  logic [POS_DEPTH-1:0] eDnWriting;
+  logic [POS_DEPTH-1:0] eDctPlanned;
+  logic [POS_DEPTH-1:0] eExclLoad;
+  logic [POS_DEPTH-1:0] eExclStore;
+  logic [POS_DEPTH-1:0] eSlcLine;
 
   // Stash decode of the starting entry.
   logic stashIsStash;
@@ -1393,6 +1431,39 @@ module chi_hnf_top #(
       endcase
     end
 
+    // DCT: the owner forwards the line to the Requester (Table B4.26). Not
+    // for an Exclusive Load (B6.3.1), an ordered or partial ReadOnce
+    // (Table B2.6), or an allocating read that sends no CompAck; never with
+    // MTE, whose tags this Home does not carry.
+    e.dctPlanned = 1'b0;
+    e.dctOpcode = SNP_SHARED;
+    if ((e.err == HNF_ERR_NONE) && CFG.dctEn && policy.dctEn && !CFG.mteEn
+        && ownerElsewhere && RNF_DCT_CAP[sfLookupOwner] && !e.exclLoad
+        && !e.exclStore && !e.stashValid
+        && (fwdSnoopFor(e.req.opcode) != SNP_SHARED)
+        && (e.req.order == ORDER_NONE)
+        && (((e.kind == HNF_KIND_READ) && e.req.expCompAck)
+            || ((e.kind == HNF_KIND_READ_ONCE) && (e.req.size == 3'd6)))
+        && targets[sfLookupOwner]) begin
+      e.dctPlanned = 1'b1;
+      e.dctOpcode = fwdSnoopFor(e.req.opcode);
+    end
+
+    // DWT: a WriteNoSnp that no exclusive check, SLC line or ordering keeps
+    // at the Home sends its data straight to the SN-F (B2.3.2.1 alt 1,
+    // B6.3.1). The SN-F asks the Requester for the data; the Home sends Comp.
+    e.dwtUsed = (e.err == HNF_ERR_NONE) && CFG.dwtEn && policy.dwtEn && SN_DWT_CAP
+                && (e.kind == HNF_KIND_WRITE) && !isWriteUnique(e.req.opcode)
+                && (e.cmo == HNF_CMO_NONE) && !e.exclStore && !e.slcHit
+                && !e.slcKeep && (e.req.order == ORDER_NONE)
+                && !e.req.expCompAck && (targets == '0);
+    if (e.dwtUsed) begin
+      e.dbidOwed = 1'b0;
+      e.dbidWithComp = 1'b0;
+      e.compOwed = 1'b1;
+      e.wrOwed = 1'b0;
+    end
+
     e.snpTargets = targets;
     e.snpToSend = targets;
     e.snpPending = '0;
@@ -1444,6 +1515,21 @@ module chi_hnf_top #(
                   : (eMruFail[i] ? RESP_SC
                                  : readCompResp(e.req.opcode, eOthersKeep[i],
                                                 e.snpDirty && takesDirty));
+      eDctFwded[i] = e.dctPlanned && e.snpFwded;
+
+      // DMT: memory's CompData or DataSepResp is always UC (IHI 0050H
+      // B4.7.1, B4.5.1.1), so only a read the Requester may hold Unique uses
+      // it, once its snoops are done, with nothing at the Home to merge, a
+      // CompAck to close it, no Exclusive (B6.3.1; conservatively also no
+      // MakeReadUnique(Excl)), and no SLC copy or fill the policy keeps
+      // (slcFillOnDmtMiss).
+      eDmtOk[i] = (e.err == HNF_ERR_NONE) && CFG.dmtEn && policy.dmtEn && SN_DMT_CAP
+                  && (e.kind == HNF_KIND_READ) && !eMruHold[i] && !eMruFail[i]
+                  && e.req.expCompAck && (e.req.order == ORDER_NONE)
+                  && !e.exclLoad && !e.exclStore && !e.slcHit
+                  && (!e.slcKeep || !CFG.slcFillOnDmtMiss)
+                  && ((bufWrBe[i] | bufSnpBe[i]) == '0) && !e.snpFwded
+                  && !e.pullValid && (eGrant[i] == RESP_UC_UD);
 
       // Memory is read when the snoops did not bring a whole line: for a
       // read, for the initial value of an atomic, and for the line a Data
@@ -1543,7 +1629,7 @@ module chi_hnf_top #(
       // The completion. Nothing completes while a snoop for the location is
       // outstanding (IHI 0050H B4.11.2), and an ordered read's CompData
       // follows its ReadReceipt.
-      eCompIsData[i] = (eDataPath[i]
+      eCompIsData[i] = ((eDataPath[i] && !e.dmtSep)
                         || ((e.kind == HNF_KIND_ATOMIC)
                             && !isAtomicStore(e.req.opcode))
                         || ((e.err != HNF_ERR_NONE)
@@ -1563,7 +1649,12 @@ module chi_hnf_top #(
         end else begin
           case (e.kind)
             HNF_KIND_READ, HNF_KIND_READ_ONCE, HNF_KIND_READ_NOSNP:
-              eCompReady[i] = eSnpDone[i] && (eMruHold[i] || eLineComplete[i]);
+              // A ReadNoSnpSep DMT read: RespSepData once the ReadReceipt
+              // shows the SN-F accepted the request, which the Home may wait
+              // for (IHI 0050H B2.3.1.1 alt 4).
+              eCompReady[i] = e.dmtSep
+                              ? (eSnpDone[i] && e.dnReadDone)
+                              : (eSnpDone[i] && (eMruHold[i] || eLineComplete[i]));
             HNF_KIND_DATALESS, HNF_KIND_STASH_ONCE:
               eCompReady[i] = eSnpDone[i];
             HNF_KIND_CMO:
@@ -1577,9 +1668,11 @@ module chi_hnf_top #(
               // has it (IHI 0050H B2.8.3.1).
               // The Home is the point of coherence, so data the SLC keeps
               // is complete once the Home has it.
-              eCompReady[i] = eSnpDone[i] && !e.wrOwed
-                              && (e.req.memAttr[0] || e.dnWriteDone || e.slcKeep
-                                  || !eNeedWritebackPossible(e, bufWrBe[i]));
+              eCompReady[i] = e.dwtUsed
+                              ? e.dnWriteDone
+                              : (eSnpDone[i] && !e.wrOwed
+                                 && (e.req.memAttr[0] || e.dnWriteDone || e.slcKeep
+                                     || !eNeedWritebackPossible(e, bufWrBe[i])));
             HNF_KIND_ATOMIC:
               eCompReady[i] = e.atomicDone;
             default:
@@ -1742,6 +1835,16 @@ module chi_hnf_top #(
         snoop.fwdTxnIdOrStashLpidOrVmidExt =
           {{(CHI_RTNTXNID_SLOT_W - CHI_MAX_LPID_W - 1){1'b0}},
            entry[posIndex].stashLpidValid, entry[posIndex].stashLpid};
+      end else if (entry[posIndex].dctPlanned
+                   && (snpIssueTarget == entry[posIndex].sfOwner)) begin
+        // The forwarding snoop names the Requester and its TxnID; the
+        // forwarded CompData carries this snoop's TxnID as DBID
+        // (IHI 0050H B2.5.1.3).
+        snoop.opcode = entry[posIndex].dctOpcode;
+        snoop.fwdNidOrPbha = entry[posIndex].req.srcId;
+        snoop.fwdTxnIdOrStashLpidOrVmidExt =
+          CHI_RTNTXNID_SLOT_W'(entry[posIndex].req.txnId);
+        snoop.retToSrc = 1'b0;
       end else begin
         snoop.opcode = entry[posIndex].snpOpcode;
         // RetToSrc goes to one Request Node only, the one the directory says
@@ -1853,12 +1956,18 @@ module chi_hnf_top #(
           dnStartGranules[i] = ((e.kind == HNF_KIND_READ_NOSNP) && !e.slcKeep)
                                ? messageGranules(CFG, e.req.addr, e.req.size)
                                : 4'hf;
+          // With DMT the data goes to the Requester; the ReadReceipt tells
+          // the Home the SN-F will not retry the read (Table B2.6).
+          dnStartNoData[i] = eDmtOk[i];
+          dnStartWantReceipt[i] = eDmtOk[i];
         end else if (eNeedWriteback[i]) begin
           dnStartValid[i] = 1'b1;
           dnStartKind[i] = HNF_DN_WRITE;
           dnStartGranules[i] = dnExactWrite(e)
                                ? messageGranules(CFG, e.req.addr, e.req.size)
                                : 4'hf;
+          // With DWT the data goes from the Requester to the SN-F.
+          dnStartNoData[i] = e.dwtUsed;
         end else if (eNeedCmoFwd[i]) begin
           dnStartValid[i] = 1'b1;
           dnStartKind[i] = HNF_DN_CMO;
@@ -1955,6 +2064,18 @@ module chi_hnf_top #(
             request.addr = e.req.addr;
             request.size = e.req.size;
           end
+          if (e.dmtUsed) begin
+            // DMT: the SN-F returns CompData, or DataSepResp for
+            // ReadNoSnpSep, to the Requester under its TxnID, with this
+            // request's TxnID as DBID and the Home as HomeNID, and confirms
+            // acceptance with ReadReceipt (IHI 0050H B2.5.1.1, B2.5.1.2,
+            // Table B2.6).
+            if (e.dmtSep)
+              request.opcode = REQ_READ_NO_SNP_SEP;
+            request.returnNidOrStashNidOrDataTarget = e.req.srcId;
+            request.returnTxnIdOrStashLpid = CHI_RTNTXNID_SLOT_W'(e.req.txnId);
+            request.order = ORDER_REQUEST_ACCEPTED;
+          end
         end
         HNF_DN_WRITE: begin
           if (dnExactWrite(e)) begin
@@ -1962,6 +2083,14 @@ module chi_hnf_top #(
             request.size = e.req.size;
             request.opcode = isFullLineWrite(e.req.opcode)
                              ? REQ_WRITE_NO_SNP_FULL : REQ_WRITE_NO_SNP_PTL;
+            if (e.dwtUsed) begin
+              // DWT: the SN-F returns DBIDResp to the Requester, which sends
+              // it the data; the SN-F's Comp comes back to the Home
+              // (IHI 0050H B2.3.2.1 alt 1, B13.10.24).
+              request.snpAttrOrDoDwt = 1'b1;
+              request.returnNidOrStashNidOrDataTarget = e.req.srcId;
+              request.returnTxnIdOrStashLpid = CHI_RTNTXNID_SLOT_W'(e.req.txnId);
+            end
           end else begin
             request.opcode = (eWriteBe[posIndex] == ALL_BYTES)
                              ? REQ_WRITE_NO_SNP_FULL : REQ_WRITE_NO_SNP_PTL;
@@ -2122,9 +2251,18 @@ module chi_hnf_top #(
                             : ((e.exclStore && !e.exclPass) ? RESP_SC
                                                             : RESP_UC_UD);
           HNF_KIND_READ:
-            // MakeReadUnique: Unique on a pass, Shared on an exclusive fail
-            // (IHI 0050H B6.3.1.1).
-            response.resp = eMruFail[rspEntry] ? RESP_SC : RESP_UC_UD;
+            if (e.dmtSep) begin
+              // RespSepData carries the state of the SN-F's DataSepResp,
+              // always UC, and as DBID the ReadNoSnpSep's TxnID, which the
+              // DataSepResp carries too (IHI 0050H B4.5.1.1, B4.7.1,
+              // B2.5.1.2).
+              response.opcode = RSP_RESP_SEP_DATA;
+              response.resp = RESP_UC_UD;
+            end else begin
+              // MakeReadUnique: Unique on a pass, Shared on an exclusive
+              // fail (IHI 0050H B6.3.1.1).
+              response.resp = eMruFail[rspEntry] ? RESP_SC : RESP_UC_UD;
+            end
           default:
             response.resp = RESP_I;
         endcase
@@ -2414,6 +2552,16 @@ module chi_hnf_top #(
   always_comb begin
     for (int unsigned i = 0; i < POS_DEPTH; i++) begin
       eGpcFailed[i] = posActive[i] && (entry[i].err == HNF_ERR_GPC);
+      eDmtUsed[i] = posActive[i] && entry[i].dmtUsed;
+      eDmtSep[i] = posActive[i] && entry[i].dmtSep;
+      eDnReadDone[i] = entry[i].dnReadDone;
+      eDwtUsed[i] = posActive[i] && entry[i].dwtUsed;
+      eDnWriting[i] = posActive[i] && entry[i].dnBusy
+                      && (entry[i].dnKind == HNF_DN_WRITE);
+      eDctPlanned[i] = posActive[i] && entry[i].dctPlanned;
+      eExclLoad[i] = entry[i].exclLoad;
+      eExclStore[i] = entry[i].exclStore;
+      eSlcLine[i] = entry[i].slcHit || entry[i].slcKeep;
       eGpcPending[i] = posActive[i] && entry[i].gpcPending;
       liveWaitSnoop[i] = entry[i].snpPending != '0;
       liveWaitDownstream[i] = dnWaiting[i];
@@ -2677,6 +2825,14 @@ module chi_hnf_top #(
         if (dnStartValid[i]) begin
           entry[i].dnBusy <= 1'b1;
           entry[i].dnKind <= dnStartKind[i];
+          // A DMT read owes the Requester only RespSepData, with dmtSepEn,
+          // and the SLC is not filled.
+          if ((dnStartKind[i] == HNF_DN_READ) && eDmtOk[i]) begin
+            entry[i].dmtUsed <= 1'b1;
+            entry[i].dmtSep <= CFG.dmtSepEn;
+            entry[i].compOwed <= CFG.dmtSepEn;
+            entry[i].slcKeep <= 1'b0;
+          end
         end
         if (dnDone[i]) begin
           entry[i].dnBusy <= 1'b0;
