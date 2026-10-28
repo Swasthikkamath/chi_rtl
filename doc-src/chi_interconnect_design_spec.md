@@ -110,7 +110,7 @@ packed flit field by itself is carriage, not implementation.
 | DWT | B2.3.2.1 alt 1, B13.10.24 | Not implemented | Write data passes through the Home. DWT is not legal for CopyBack writes (B2.3.2.3, B13.10.24), so it will only ever apply to Immediate and Combined writes. |
 | Atomics | B2.3.3, B2.9.6, B4.2.5, B5.4 | Implemented | The Home snoops every other copy (and the Requester with `SnoopMe`), takes the initial value from a Dirty snoop or memory, applies `chi_atomic_alu`, writes the line back when it changed or was Dirty, and returns the original value. `AtomicCompare` takes the compare value at the addressed location and the swap value at the address with bit log2(operand size) inverted (B2.9.6.2). The datapath is 64 bits, so operands wider than 8 bytes are not supported. |
 | Far atomics | B4.2.5 | Partial | Operations are executed at the Home. There is no negotiation that pushes the operation to the Subordinate. |
-| DVM and MN | B2.3.7, B8 | Partial | The MN serially unicasts `SnpDVMOp` to configured Requesters and collects responses. The two-part DVM message payload is not decoded, so operation-specific ordering is absent. |
+| DVM and MN | B8.2, B8.3, B8.4 | Partial | Full DVMOp flow: `DBIDResp`, the 8-byte payload, two-part `SnpDVMOp` to every RN-F and RN-D but the Requester, `SnpResp`, `Comp`. Up to `dvmMaxOps` DVMOps at once with one entry kept for a Non-sync; a Sync snoops only after every older DVMOp has finished; one Sync and one Non-sync `SnpDVMOp` outstanding per Request Node; `RetryAck` and P-Credits. The DVMType is decoded and a GPT TLBI also invalidates the GPC's GPT cache. Partial because the `FwdNID` and `VMIDExt` packing of Table B8.14 is not verified (Section 9.12). |
 | Coherent snoops | B4.4, B4.5.3, B4.9, B4.11.2 | Implemented | Each entry snoops the RN-Fs Table B4.26 requires. Its snoops leave back to back and are in flight together, up to `maxOutstandingSnoops` across the Home, and never two to one RN-F for one location. Responses and data are collected per Snoopee: several Snoopees returning data at once, Dirty and partial (`SnpRespDataPtl`) data, and forwarded responses (`SnpRespFwded`, `SnpRespDataFwded`) that release the Home from sending data. `RetToSrc` goes only to the one RN-F that may hold the line Dirty or Unique. |
 | Cache stashing | B2.3.4, B7 | Implemented | Writes with stash hint and `StashOnce*`. A `StashOnce*` stashes only when memory holds the latest copy (and, for a Unique stash, no other copy exists); otherwise it completes without stashing, which B7 permits. A Data Pull is served from the Home's buffer or memory as an Allocating Read and waits for the stash target's `CompAck`. `StashOnceSep*` completes with `CompStashDone`. |
 | RN cache states and transitions | B4.1, B4.6--B4.8 | Not implemented | Out of project scope. State encodings exist in `chi_pkg` and the required model is documented in Section 10, but there is no RN cache controller here. |
@@ -123,7 +123,7 @@ packed flit field by itself is carriage, not implementation.
 | Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | System Level Cache | B2.8.3, B4.2.2.1, B7.4.2 | Implemented | One slice per HN-F when `slcEn`: set-associative, `{line, PAS}` tags, clean and dirty lines, PLRU, RRIP or random replacement, SECDED data with `slcEccEn`. Looked up with the directory when an entry starts; hits are read through a one-line port, fills and dirty data are written when the entry retires, dirty evictions are written back by victim entries that hold the location. Only Cacheable, non-Device lines are kept; CMOs, Combined writes, `ReadOnce*Invalid` and Device or Non-cacheable accesses take the line out first. `slcTagPipelineDepth` other than 1 is rejected. Section 9.10. |
-| Granule Protection Check | B9.1.1, B10.7.3.1; Arm ARM RME (GPT format) | Implemented | `gpcMode` TABLE (on-chip GPI array) or WALK (GPT in memory, shared cache and two-level walker). Every request a Home admits is checked before it snoops, looks up the SLC or goes downstream; a failure completes with NDERR and has no other effect, and the first fault is recorded with its address, PAS and SrcID. GPT reads go through a tracker reserved in the HN-F that owns each line. Root-only registers, including cache invalidation by all or by PA. The GPT layout follows the Arm ARM as recalled, not checked against it (Section 9.11). DVM-driven invalidation arrives with Stage 6. |
+| Granule Protection Check | B9.1.1, B10.7.3.1; Arm ARM RME (GPT format) | Implemented | `gpcMode` TABLE (on-chip GPI array) or WALK (GPT in memory, shared cache and two-level walker). Every request a Home admits is checked before it snoops, looks up the SLC or goes downstream; a failure completes with NDERR and has no other effect, and the first fault is recorded with its address, PAS and SrcID. GPT reads go through a tracker reserved in the HN-F that owns each line. Root-only registers, including cache invalidation by all or by PA. The GPT layout follows the Arm ARM as recalled, not checked against it (Section 9.11). GPT TLBIs from the MN invalidate the cache. |
 | `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
@@ -201,7 +201,7 @@ the fabric, reached over the internal networks, and have no pins.
 | SN-I | `numSni` | `sni[]` | 7 | Subordinate for peripheral space. Same channel set as SN-F; the distinction is which SAM region kind selects it. |
 | HN-F | `numHnf` | internal | 8--11 | Coherent Home. Serialization point, snoop filter, POS, retry credits and the offload engines. Section 2.5 and Section 9. |
 | HN-I | `numHni` | internal | 12 | Non-coherent Home. Runs `hniEntries` transactions to SN-Is through its own SAM and hosts the CHI MMIO configuration window. Section 9.8. |
-| MN | `numMn` | internal | 13 | Misc Node. Sequences DVM operations to the DVM-capable Requesters. |
+| MN | `numMn` | internal | 13 | Misc Node. Runs DVM operations to the RN-Fs and RN-Ds. Section 9.12. |
 
 : Table 2.1 Node classes, their count fields, and their ordinals in the default configuration
 
@@ -395,8 +395,9 @@ becomes state. There are three endpoint types:
   per line and per Endpoint (Section 9.8), and recognises the CHI MMIO
   configuration window described in Section 7.2. It also accepts and discards `PrefetchTgt`
   without responding, for the same reason the HN-F does.
-- `chi_mn_dvm`, the Misc Node, is the DVM sequencer. It unicasts `SnpDVMOp`
-  to each DVM-capable Requester in turn and collects the responses before
+- `chi_mn_dvm`, the Misc Node, runs DVM operations: it takes each DVMOp's
+  payload, sends the two-part `SnpDVMOp` to every RN-F and RN-D, and collects
+  the responses before
   completing the operation.
 
 ## 2.5 Home Node internal architecture
@@ -562,6 +563,7 @@ it is a parameter at all and what choosing it wrong costs.
 | `retryRecords` | 16 | positive | P-Credits a Home may have granted and not yet seen used or returned; each holds a transaction entry in reserve. |
 | `maxOutstandingSnoops` | 16 | positive when `numHnf > 0` | Snoops one HN-F may have in flight across all its transactions. |
 | `hniEntries` | 8 | positive when `numHni > 0`, and within the TxnID space | Transactions one HN-I runs at once, each with its own buffers. |
+| `dvmMaxOps` | 4 | at least 2 when `numMn > 0` | DVMOps one MN runs at once; one entry is kept for a Non-sync. |
 | `slcEn` | 0 | needs `numHnf > 0` | Builds one System Level Cache slice per HN-F. |
 | `slcSizePerHnf` | 65536 | whole power-of-two number of sets | Bytes of data per slice. |
 | `slcWays` | 8 | power of two | Associativity. |
@@ -1458,18 +1460,18 @@ as the owner. `StashOnceSep` forms return `CompStashDone`.
 
 | Step | From | To | Message |
 |------|------------|------------|----------------------------------------------------------------------|
-| 1 | Initiating Requester | MN | `DVMOp` |
-| 2 | MN | Requester A | `SnpDVMOp` |
-| 3 | Requester A | MN | `SnpResp` |
-| 4 | MN | Requester B | `SnpDVMOp` |
-| 5 | Requester B | MN | `SnpResp` |
+| 1 | Initiating Requester | MN | `DVMOp(Sync)`, once its earlier DVMOps have their `Comp` |
+| 2 | MN | Initiating Requester | `DBIDResp` |
+| 3 | Initiating Requester | MN | `NonCopyBackWriteData`, the 8-byte payload |
+| 4 | MN | every other RN-F and RN-D | `SnpDVMOp_P1` and `SnpDVMOp_P2`, once every older DVMOp at the MN has finished |
+| 5 | each of them | MN | `SnpResp`, once its DVM operations are complete |
 | 6 | MN | Initiating Requester | `Comp` |
 
-: Table 8.8 DVM Sync distributed by the MN
+: Table 8.8 DVM Sync distributed by the MN (B8.2.2)
 
-RTL status: Partial. Sequential broadcast and response collection exist. The
-two-part DVM payload is not decoded, so no operation-specific ordering is
-applied.
+RTL status: Implemented. Non-sync DVMOps follow the same steps without the
+wait in step 4; their `Comp` also follows their own snoop responses
+(Section 9.12).
 
 # 9 Home Node internals
 
@@ -1862,7 +1864,7 @@ GPT caches, so memory holds what the walker must see. A walk's result fills
 the `gpcCacheEntries`-entry cache, including a fault entry for a malformed
 descriptor or a failed read. Writing CTRL or GPT_BASE, or INVALIDATE,
 invalidates the cache; a walk in flight across an invalidation does not fill
-it. Invalidation by DVM arrives with the MN payload decode (Stage 6).
+it. A GPT TLBI decoded by the MN invalidates it too (Section 9.12).
 
 **Faults.** The first fault is kept in FAULT_ADDR and FAULT_INFO (address,
 PAS, SrcID, malformed) until software clears it; every fault is counted.
@@ -1872,6 +1874,52 @@ is not checked: it returns nothing to the Requester and any later access to
 the line is checked at its Home before it reaches the Subordinate. Direct
 transfers (Stage 8) are decided by a Home after its check, so their
 downstream legs are covered.
+
+## 9.12 Misc Node and DVM
+
+`chi_mn_dvm` runs up to `dvmMaxOps` DVMOps, each in its own entry. A DVMOp is
+a write (B8.2.1): the MN answers with `DBIDResp`, whose DBID is the entry,
+takes the 8-byte payload, and only then snoops. A DVMOp that finds no entry
+is answered with `RetryAck` and later a `PCrdGrant`, with two credit types so
+that a grant for a Sync also leaves an entry free. One entry is always kept
+for a Non-sync: a Request Node may hold its answer to a `SnpDVMOp(Sync)` until
+its own Non-sync DVMOp completes, so a tracker full of Syncs could deadlock
+(B8.2.3.1). Anything other than a DVMOp sent to the MN, or a reserved
+DVMType, completes with NDERR.
+
+**Snoops.** Each entry sends the two parts of `SnpDVMOp` back to back to every
+RN-F and RN-D except the Requester, which B8.2.1 permits; an RN-I has no
+snoop channel and receives none. Both parts carry the entry index as TxnID,
+the MN's own (B8.3.3). A Request Node is never sent a second `SnpDVMOp(Sync)`
+or a second `SnpDVMOp(Non-sync)` while one of that kind is outstanding to it,
+which is what every RN-F and RN-D must accept (B8.2.3.2). Entries snoop
+oldest first.
+
+**Ordering.** A Sync sends its snoops only when every older DVMOp, from any
+source, has collected all its snoop responses. Each Request Node answers a
+`SnpDVMOp(Sync)` only when its own DVM operations are complete (B8.2.2), so a
+Sync's `Comp` follows the completion everywhere of every DVM operation the MN
+accepted before it. `Comp` for a Non-sync follows its own snoop responses;
+early `Comp` (B8.2.1.1) is not used. Two Non-syncs are not ordered against
+each other.
+
+**Payload.** Part 1 carries `REQ.Addr[MPA-1:3]` in the SNP address field, and
+part 2 carries bits `[MPA-1:3]` of the write data; bit 0 of the field marks
+the part, and `REQ.Addr[3]` is zero in a DVMOp, so part 1 is the request
+address unchanged (Table B8.10). Range and Num go in `FwdNID` of part 1 and
+`VMID[15:8]` in `VMIDExt` of part 1 (Table B8.14, B13.10.44). Table B8.14 and
+the low rows of Table B8.10 were not legible in the specification text
+available to this project, so the bit positions used for Range, Num[4:3] and
+`VMID[15:8]` are a reading of the table's layout rather than a checked
+transcription; they must be verified before the MN is used with real Request
+Nodes.
+
+**DVMType decode.** TLBI, BPI, PICI, VICI and Sync (`REQ.Addr[13:11]`) are
+recognised; the reserved types complete with NDERR. A TLBI whose Stage field
+(`REQ.Addr[39:38]`) is GPT (Table B8.12) also invalidates the GPT cache of
+the Granule Protection Check: by PA (`PA[51:12]` from the payload) when AddrV
+is set and the invalidation size is one granule, otherwise the whole cache.
+It still goes to every Request Node.
 
 # 10 RN-F boundary cache-state model
 
@@ -1946,7 +1994,7 @@ Reference throughput limits:
   with up to `maxOutstandingSnoops` snoops in flight, so a transaction's
   snoops cost one round trip rather than one per sharer. An HN-I runs
   `hniEntries` transactions, one per line, with ordered streams pipelined on
-  the SN-I's acceptance. The MN processes one transaction at a time, and DVMs
+  the SN-I's acceptance. The MN runs `dvmMaxOps` DVMOps at once, and DVMs
   add one full response round trip per target.
 
 No timing constraints, synthesis reports, PPA results, latency measurements
@@ -1961,7 +2009,7 @@ or performance guarantees are supplied.
 | `chi_link_sva.sv` | `NO_SEND_WITHOUT_RUN_OR_CREDIT`, `NO_CREDIT_OVERFLOW`, `NO_CREDIT_UNDERFLOW`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_CREDITS_DRAINED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_OUTSIDE_ACTIVE`, `LCRD_RETURN_NOT_DELIVERED`, `PEER_CREDITS_IN_RANGE`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_proto_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `REQ_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `DAT_STABLE_UNDER_BACKPRESSURE`, `DOWNSTREAM_OPCODE_LEGAL`, `DOWNSTREAM_FIELDS_LEGAL`, `COMPDATA_RESP_LEGAL`, `WRITE_COMPLETION_RESP_ZERO`, `PCRD_GRANT_FIELDS_UNUSED`, `RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE`, `NO_COMPLETION_WHILE_SNOOPING`, `RECEIPT_BEFORE_DATA` | `CONCURRENT_TRANSACTIONS`, `SAME_LOCATION_WAITER`, `RETRY_ACK_SENT`, `PCRD_GRANT_SENT`, `DIRECTORY_EVICTION`, `ATOMIC_EXECUTED`, `SNOOP_ISSUED`, `EXCLUSIVE_OKAY` |
-| `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
+| `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `MN_INPUTS_ALWAYS_READY`, `MN_SYNC_AFTER_OLDER_OPERATIONS`, `MN_ONE_SNOOP_OF_EACH_KIND_PER_TARGET`, `MN_NONSYNC_ENTRY_KEPT` | `MN_CONCURRENT_DVM`, `MN_SYNC_WAITS`, `MN_GPT_INVALIDATE`, `MN_RETRY_ACK_SENT` |
 | `chi_ordering_sva.sv` | pairwise `ONE_RUNNING_ENTRY_PER_LOCATION`, per-entry `START_ONLY_AFTER_OLDER_SAME_LOCATION`, `STARTED_IMPLIES_ACTIVE` | none |
 | `chi_hnf_ordering_sva.sv` | `ENDPOINT_ORDER_RESPECTED`, `ORDERED_REQUEST_STARTS_IN_ARRIVAL_ORDER` | none |
 | `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA`, `HNI_DOWNSTREAM_PAS_PRESERVED` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
@@ -2274,7 +2322,7 @@ the cross-references in the prose stay correct in every output format.
    L-Credits terminate at the node ports.
 3. Only flit parity is live. The scalar `*CHK` control and credit checks are
    declared and driven to zero.
-4. The MN serializes its transactions.
+4. The MN does not send early `Comp` for Non-sync DVMOps.
 5. No RN cache controller is provided; Section 10 is the contract, not RTL.
 6. MultiReq and `CacheLineID`, PBHA, MTE tag semantics and MEC access control
    are carriage only. MPAM is carried but not enforced.
@@ -2282,7 +2330,8 @@ the cross-references in the prose stay correct in every output format.
    Subordinate, the atomic datapath is 64 bits so wider operands are
    unsupported, and DCT, DMT and DWT are not used: all data passes through
    the Home.
-8. DVM decodes no payload, so no operation-specific ordering is applied.
+8. The `FwdNID` and `VMIDExt` packing of `SnpDVMOp` is not verified against
+   Table B8.14 (Section 9.12).
 9. Runtime SAM writes lack complete validation, CHI-MMIO lacks security and
    quiescent commit, and APB quiescence does not inspect every internal
    topology slot.
@@ -2329,7 +2378,7 @@ the cross-references in the prose stay correct in every output format.
 | Home concurrency | One transaction per POS entry, one per location at a time | Throughput scales with `posEntries`; same-location requests queue in arrival order. |
 | Directory eviction | Victim buffer snoops with `SnpCleanInvalid` and writes back | Dirty data is never lost to a capacity eviction. |
 | Snoop fanout | A transaction's snoops in flight together, `maxOutstandingSnoops` per Home | One snoop round trip per transaction; SNP traffic bounded per Home. |
-| DVM fanout | Sequential unicast | Minimal replication state, additive target latency. |
+| DVM fanout | `dvmMaxOps` DVMOps; per Request Node one Sync and one Non-sync `SnpDVMOp` | Overlapped DVM latency within what every Request Node must accept. |
 | Home to subordinate mapping | Index modulo the subordinate count | Static striping rather than address-based balancing. |
 | Atomic execution point | Always the Home | No far-atomic negotiation, but one serialization point. |
 | APB security | Writes require Root (`PNSE=1`, `PPROT[1]=0`) with RME, Secure without | Reads remain unrestricted. |

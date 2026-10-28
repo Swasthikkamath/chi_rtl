@@ -29,12 +29,18 @@ module chi_sva_compile (
     .rspInValid(1'b0),
     .rspInReady(mnRspReady),
     .rspInFlit('0),
+    .datInValid(1'b0),
+    .datInReady(),
+    .datInFlit('0),
     .snpOutValid(mnSnpValid),
     .snpOutReady(1'b1),
     .snpOutFlit(mnSnpFlit),
     .rspOutValid(mnRspValid),
     .rspOutReady(1'b1),
     .rspOutFlit(mnRspFlit),
+    .gptInvalidateAll(),
+    .gptInvalidateByPa(),
+    .gptInvalidateAddr(),
     .idle(mnIdle)
   );
 endmodule

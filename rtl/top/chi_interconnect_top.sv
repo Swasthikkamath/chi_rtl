@@ -95,7 +95,11 @@ module chi_interconnect_top #(
   typedef logic [CHI_MAX_NODEID_W-1:0]
     rnf_id_array_t [(CFG.numRnf > 0 ? CFG.numRnf : 1)];
   typedef logic [CHI_MAX_NODEID_W-1:0] requester_id_array_t [NUM_DVM];
-  typedef logic [CHI_MAX_NODEID_W-1:0] dvm_id_array_t [NUM_DVM-1:0];
+  // SnpDVMOp goes to RN-Fs and RN-Ds; an RN-I has no snoop channel
+  // (IHI 0050H B8.2.1).
+  localparam int unsigned NUM_DVM_TGT_E =
+    ((CFG.numRnf + CFG.numRnd) > 0) ? (CFG.numRnf + CFG.numRnd) : 1;
+  typedef logic [CHI_MAX_NODEID_W-1:0] dvm_target_array_t [NUM_DVM_TGT_E];
   typedef logic [CFG.addrW-1:0] region_addr_array_t [NUM_REGIONS-1:0];
   typedef logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] region_target_array_t [NUM_REGIONS-1:0];
   typedef logic [CHI_SAM_ATTR_W-1:0] region_attr_array_t [NUM_REGIONS-1:0];
@@ -182,10 +186,10 @@ module chi_interconnect_top #(
     return values;
   endfunction
 
-  function automatic dvm_id_array_t makeDvmIds(input node_id_array_t ids);
-    dvm_id_array_t values;
-    for (int unsigned i = 0; i < NUM_DVM; i++)
-      values[i] = (i < NUM_REQ) ? ids[i] : '0;
+  function automatic dvm_target_array_t makeDvmTargets(input node_id_array_t ids);
+    dvm_target_array_t values;
+    for (int unsigned i = 0; i < NUM_DVM_TGT_E; i++)
+      values[i] = (i < (CFG.numRnf + CFG.numRnd)) ? ids[OFF_RNF+i] : '0;
     return values;
   endfunction
 
@@ -302,9 +306,9 @@ module chi_interconnect_top #(
   localparam snf_id_array_t SNF_NODE_IDS = makeSnfIds(EFFECTIVE_NODE_IDS);
   localparam sni_id_array_t SNI_NODE_IDS = makeSniIds(EFFECTIVE_NODE_IDS);
   localparam rnf_id_array_t RNF_NODE_IDS = makeRnfIds(EFFECTIVE_NODE_IDS);
-  localparam dvm_id_array_t DVM_NODE_IDS = makeDvmIds(EFFECTIVE_NODE_IDS);
   localparam requester_id_array_t REQUESTER_NODE_IDS =
     makeRequesterIds(EFFECTIVE_NODE_IDS);
+  localparam dvm_target_array_t DVM_TARGET_IDS = makeDvmTargets(EFFECTIVE_NODE_IDS);
   localparam region_addr_array_t EFFECTIVE_REGION_BASE = makeRegionBase();
   localparam region_addr_array_t EFFECTIVE_REGION_LIMIT = makeRegionLimit();
   localparam region_target_array_t EFFECTIVE_REGION_TARGET =
@@ -399,6 +403,14 @@ module chi_interconnect_top #(
   logic apbGpcError;
   logic gpcWalking;
   logic gpcEventFault;
+  // GPT TLBIs decoded by the MNs.
+  localparam int unsigned NUM_MN_E = (CFG.numMn > 0) ? CFG.numMn : 1;
+  logic [NUM_MN_E-1:0] mnGptInvalidateAll;
+  logic [NUM_MN_E-1:0] mnGptInvalidateByPa;
+  logic [CHI_MAX_ADDR_W-1:0] mnGptInvalidateAddr [NUM_MN_E];
+  logic dvmGptInvalidateAll;
+  logic dvmGptInvalidateByPa;
+  logic [CHI_MAX_ADDR_W-1:0] dvmGptInvalidateAddr;
   // APB register blocks. PADDR[11:8] selects a 256-byte block: 0 is the
   // region editor, 1 the HN-F policy registers.
   logic apbRegionSelect;
@@ -533,6 +545,11 @@ module chi_interconnect_top #(
           $fatal(1, "Stash requires RN-F and HN-F endpoints");
         if (CFG.dvmEn && ((CFG.numMn == 0) || (NUM_REQ == 0)))
           $fatal(1, "DVM requires an MN and a Request Node");
+        if ((CFG.numMn > 0) && (CFG.dvmMaxOps < 2))
+          $fatal(1, "dvmMaxOps is %0d but must be at least 2: one MN tracker entry stays reserved for a Non-sync DVMOp (IHI 0050H B8.2.3.1)",
+                 CFG.dvmMaxOps);
+        if (CFG.dvmEn && (CFG.addrW < 44))
+          $fatal(1, "dvmEn needs addrW of at least 44: the DVM payload spans REQ.Addr up to bit 43 (IHI 0050H B8.4.2)");
         if (CFG.exclEn
             && (((CFG.numHnf + CFG.numHni) == 0)
                 || (CFG.exclMonitors == 0)))
@@ -950,6 +967,34 @@ module chi_interconnect_top #(
     assign linkCreditError[i] = 1'b0;
   end
 
+  // Two MNs invalidating by PA in one cycle become one invalidation of
+  // everything.
+  always_comb begin
+    int unsigned byPa;
+    dvmGptInvalidateAll = 1'b0;
+    dvmGptInvalidateByPa = 1'b0;
+    dvmGptInvalidateAddr = '0;
+    byPa = 0;
+    for (int unsigned i = 0; i < CFG.numMn; i++) begin
+      if (mnGptInvalidateAll[i])
+        dvmGptInvalidateAll = 1'b1;
+      if (mnGptInvalidateByPa[i]) begin
+        byPa++;
+        dvmGptInvalidateAddr = mnGptInvalidateAddr[i];
+      end
+    end
+    if (byPa > 1)
+      dvmGptInvalidateAll = 1'b1;
+    else if (byPa == 1)
+      dvmGptInvalidateByPa = !dvmGptInvalidateAll;
+  end
+
+  for (genvar i = CFG.numMn; i < NUM_MN_E; i++) begin : no_mn_gpt
+    assign mnGptInvalidateAll[i] = 1'b0;
+    assign mnGptInvalidateByPa[i] = 1'b0;
+    assign mnGptInvalidateAddr[i] = '0;
+  end
+
   if (CFG.gpcMode != GPC_NONE) begin : gpc
     chi_gpc #(
       .CFG(CFG), .NUM_HOMES(NUM_HOMES_E), .NUM_HNF(NUM_HNF_E)
@@ -962,9 +1007,9 @@ module chi_interconnect_top #(
       .checkPas(gpcCheckPas), .checkSrcId(gpcCheckSrcId),
       .checkDone(gpcCheckDone), .checkFail(gpcCheckFail),
       .gptReadValid, .gptReadAddr, .gptReadDone, .gptReadData, .gptReadError,
-      // DVM-driven GPT invalidation arrives with the MN payload decode.
-      .dvmInvalidateAll(1'b0), .dvmInvalidateByPa(1'b0),
-      .dvmInvalidateAddr('0),
+      .dvmInvalidateAll(dvmGptInvalidateAll),
+      .dvmInvalidateByPa(dvmGptInvalidateByPa),
+      .dvmInvalidateAddr(dvmGptInvalidateAddr),
       .walking(gpcWalking), .eventFault(gpcEventFault)
     );
   end else begin : no_gpc
@@ -1084,16 +1129,23 @@ module chi_interconnect_top #(
   for (genvar i = 0; i < CFG.numMn; i++) begin : mn_nodes
     chi_mn_dvm #(
       .CFG(CFG), .MN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_MN+i]),
-      .NUM_DVM_NODES(NUM_DVM), .DVM_NODE_IDS(DVM_NODE_IDS)
+      .NUM_DVM_NODES(NUM_DVM_TGT_E), .DVM_NODE_IDS(DVM_TARGET_IDS),
+      .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS)
     ) mn (
       .clk, .resetn, .reqInValid(reqOutValid[OFF_MN+i]),
       .reqInReady(reqOutReady[OFF_MN+i]), .reqInFlit(reqOutFlit[OFF_MN+i]),
       .rspInValid(rspOutValid[OFF_MN+i]),
       .rspInReady(rspOutReady[OFF_MN+i]), .rspInFlit(rspOutFlit[OFF_MN+i]),
+      // The 8-byte DVM payload arrives as NonCopyBackWriteData.
+      .datInValid(datOutValid[OFF_MN+i]),
+      .datInReady(datOutReady[OFF_MN+i]), .datInFlit(datOutFlit[OFF_MN+i]),
       .snpOutValid(snpInValid[OFF_MN+i]),
       .snpOutReady(snpInReady[OFF_MN+i]), .snpOutFlit(snpInFlit[OFF_MN+i]),
       .rspOutValid(rspInValid[OFF_MN+i]),
       .rspOutReady(rspInReady[OFF_MN+i]), .rspOutFlit(rspInFlit[OFF_MN+i]),
+      .gptInvalidateAll(mnGptInvalidateAll[i]),
+      .gptInvalidateByPa(mnGptInvalidateByPa[i]),
+      .gptInvalidateAddr(mnGptInvalidateAddr[i]),
       .idle(mnIdle[i])
     );
     assign reqInValid[OFF_MN+i] = 1'b0;
@@ -1101,7 +1153,6 @@ module chi_interconnect_top #(
     assign datInValid[OFF_MN+i] = 1'b0;
     assign datInFlit[OFF_MN+i] = '0;
     assign snpOutReady[OFF_MN+i] = 1'b1;
-    assign datOutReady[OFF_MN+i] = 1'b1;
   end
 
   chi_noc_top #(

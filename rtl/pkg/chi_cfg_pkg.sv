@@ -193,6 +193,8 @@ package chi_cfg_pkg;
     chi_gpc_mode_e      gpcMode;
     int unsigned        gpcTableGranules;   // GPI entries of the on-chip table
     int unsigned        gpcCacheEntries;    // GPT cache entries of the walker
+    // DVM transactions one MN runs at once; one is kept for a Non-sync.
+    int unsigned        dvmMaxOps;
     int unsigned        lcrdDepth;
     int unsigned        exclMonitors;
     int unsigned        interleaveGranule;
@@ -235,6 +237,7 @@ package chi_cfg_pkg;
     slcReplPolicy: SLC_REPL_PLRU, slcInclusion: SLC_NON_INCLUSIVE,
     slcAllocPolicy: SLC_ALLOC_HINT, slcEccEn: 1'b0, slcTagPipelineDepth: 1,
     gpcMode: GPC_NONE, gpcTableGranules: 4096, gpcCacheEntries: 16,
+    dvmMaxOps: 4,
     lcrdDepth: 8, exclMonitors: 32,
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,
