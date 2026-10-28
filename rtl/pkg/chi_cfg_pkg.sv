@@ -87,6 +87,14 @@ package chi_cfg_pkg;
     SLC_ALLOC_CACHEABLE = 1'b1   // allocate every Cacheable, non-Device line
   } chi_slc_alloc_e;
 
+  // Granule Protection Check at the Homes: off, an on-chip GPI table, or a
+  // walk of the Granule Protection Table in memory.
+  typedef enum logic [1:0] {
+    GPC_NONE  = 2'd0,
+    GPC_TABLE = 2'd1,
+    GPC_WALK  = 2'd2
+  } chi_gpc_mode_e;
+
   // SAM region attributes: [0] valid, [1] reserved (it was the secure-only
   // bit), [3:2] chi_sam_region_kind_e, [11:4] the PASs allowed to access the
   // region, bit 4+p for PAS encoding p (IHI 0050H Table B13.47).
@@ -181,6 +189,10 @@ package chi_cfg_pkg;
     chi_slc_alloc_e     slcAllocPolicy;
     logic               slcEccEn;           // SECDED on the data array
     int unsigned        slcTagPipelineDepth; // lookup stages; 1 is built
+    // Granule Protection Check.
+    chi_gpc_mode_e      gpcMode;
+    int unsigned        gpcTableGranules;   // GPI entries of the on-chip table
+    int unsigned        gpcCacheEntries;    // GPT cache entries of the walker
     int unsigned        lcrdDepth;
     int unsigned        exclMonitors;
     int unsigned        interleaveGranule;
@@ -222,6 +234,7 @@ package chi_cfg_pkg;
     slcEn: 1'b0, slcSizePerHnf: 65536, slcWays: 8, slcLineBytes: 64,
     slcReplPolicy: SLC_REPL_PLRU, slcInclusion: SLC_NON_INCLUSIVE,
     slcAllocPolicy: SLC_ALLOC_HINT, slcEccEn: 1'b0, slcTagPipelineDepth: 1,
+    gpcMode: GPC_NONE, gpcTableGranules: 4096, gpcCacheEntries: 16,
     lcrdDepth: 8, exclMonitors: 32,
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,

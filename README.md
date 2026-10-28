@@ -15,7 +15,8 @@ transaction per POS entry concurrently with same-location ordering and
 parallel snoops, a non-coherent Home with concurrent, Endpoint-ordered
 transactions, Physical Address Space checks per address region with
 `{line, PAS}` locations in both Homes, an optional System Level Cache slice
-per HN-F, a directory with dirty-safe eviction, atomic transactions, cache
+per HN-F, a completer-side Granule Protection Check (on-chip table or GPT
+walk), a directory with dirty-safe eviction, atomic transactions, cache
 stashing with Data Pull, and `PrefetchTgt` routing.
 
 Behaviour that is deliberately partial or absent includes multiple interfaces

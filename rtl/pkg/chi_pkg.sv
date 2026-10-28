@@ -252,6 +252,76 @@ package chi_pkg;
     return mask[pas];
   endfunction
 
+  // Index of the HN-F an address hashes to: the same arithmetic as
+  // chi_hn_hash, for logic that needs the index rather than the NodeID.
+  function automatic int unsigned hnHashIndex(
+    input chi_cfg_pkg::chi_cfg_t cfg,
+    input logic [CHI_MAX_ADDR_W-1:0] address
+  );
+    int unsigned shift;
+    logic [CHI_MAX_ADDR_W-1:0] granule;
+    logic [CHI_MAX_ADDR_W-1:0] hash;
+    shift = 0;
+    while ((32'd1 << shift) < cfg.interleaveGranule)
+      shift++;
+    granule = (address & ((CHI_MAX_ADDR_W'(1) << cfg.addrW) - 1)) >> shift;
+    hash = granule ^ (granule >> cfg.hnHashShift);
+    return (cfg.numHnf > 0) ? int'(hash % CHI_MAX_ADDR_W'(cfg.numHnf)) : 0;
+  endfunction
+
+  // Granule Protection Information (Arm ARM, RME chapter): a 4-bit GPI per
+  // granule names the PAS that may access it. Encodings outside these
+  // fault as malformed.
+  localparam logic [3:0] GPI_NO_ACCESS  = 4'b0000;
+  localparam logic [3:0] GPI_SECURE     = 4'b1000;
+  localparam logic [3:0] GPI_NON_SECURE = 4'b1001;
+  localparam logic [3:0] GPI_ROOT       = 4'b1010;
+  localparam logic [3:0] GPI_REALM      = 4'b1011;
+  localparam logic [3:0] GPI_ALL_ACCESS = 4'b1111;
+
+  function automatic logic gpiPermits(input logic [3:0] gpi, input chi_pas_e pas);
+    case (gpi)
+      GPI_ALL_ACCESS: return 1'b1;
+      GPI_SECURE:     return pas == PAS_SECURE;
+      GPI_NON_SECURE: return pas == PAS_NON_SECURE;
+      GPI_ROOT:       return pas == PAS_ROOT;
+      GPI_REALM:      return pas == PAS_REALM;
+      default:        return 1'b0;
+    endcase
+  endfunction
+
+  // Granule size from the PGS encoding: 4 KB, 64 KB or 16 KB.
+  function automatic int unsigned gpcGranuleShift(input logic [1:0] pgs);
+    case (pgs)
+      2'b01:   return 16;
+      2'b10:   return 14;
+      default: return 12;
+    endcase
+  endfunction
+
+  // Protected physical address size from the PPS encoding.
+  function automatic int unsigned gpcPpsBits(input logic [2:0] pps);
+    case (pps)
+      3'b000:  return 32;
+      3'b001:  return 36;
+      3'b010:  return 40;
+      3'b011:  return 42;
+      3'b100:  return 44;
+      3'b101:  return 48;
+      default: return 52;
+    endcase
+  endfunction
+
+  // Bits of address one level 0 GPT entry covers, from L0GPTSZ.
+  function automatic int unsigned gpcL0Bits(input logic [3:0] l0gptsz);
+    case (l0gptsz)
+      4'b0100: return 34;
+      4'b0110: return 36;
+      4'b1001: return 39;
+      default: return 30;
+    endcase
+  endfunction
+
   // SECDED (72,64): a Hamming code over positions 1..71, check bits at the
   // power-of-two positions and data bits in order at the others, plus an
   // overall parity bit. Single-bit errors anywhere are corrected; double-bit

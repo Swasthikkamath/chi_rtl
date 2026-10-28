@@ -46,7 +46,11 @@ module chi_hnf_compile (
     .snpOutValid, .snpOutReady(1'b1), .snpOutFlit,
     .datOutValid, .datOutReady(1'b1), .datOutFlit,
     .idle(hnfIdle),
-    .slcMaintStart(1'b0), .slcMaintInvalidate(1'b0), .slcMaintBusy()
+    .slcMaintStart(1'b0), .slcMaintInvalidate(1'b0), .slcMaintBusy(),
+    .gpcCheckValid(), .gpcCheckAddr(), .gpcCheckPas(), .gpcCheckSrcId(),
+    .gpcCheckDone(1'b1), .gpcCheckFail(1'b0),
+    .gptReadValid(1'b0), .gptReadAddr('0), .gptReadDone(), .gptReadData(),
+    .gptReadError()
   );
 
   generate

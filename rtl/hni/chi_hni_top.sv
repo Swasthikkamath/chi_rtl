@@ -94,7 +94,14 @@ module chi_hni_top #(
   output logic [CFG.addrW-1:0] mmioRegionUpdateLimit,
   output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] mmioRegionUpdateTarget,
   output logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] mmioRegionUpdateAttributes,
-  output logic idle
+  output logic idle,
+  // Granule Protection Check (chi_gpc), before anything is sent downstream.
+  output logic gpcCheckValid,
+  output logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gpcCheckAddr,
+  output chi_pkg::chi_pas_e gpcCheckPas,
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] gpcCheckSrcId,
+  input  logic gpcCheckDone,
+  input  logic gpcCheckFail
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -171,6 +178,7 @@ module chi_hni_top #(
     logic               dnMainDone;   // read, write or atomic done (or skipped)
     logic               dnCmoDone;    // forwarded CMO done
     logic               dnAccepted;   // the SN-I has accepted the first request
+    logic               gpcPending;   // granule protection not yet answered
     chi_resp_e          dnResp;       // Resp of the SN-I's CompData or Comp
     chi_resp_err_e      dnErr;        // RespErr the SN-I reported
   } hni_entry_t;
@@ -286,6 +294,11 @@ module chi_hni_top #(
   logic [RESERVE_W-1:0] retryCreditsOutstanding;
   logic retryGrantsOwed;
   hni_entry_t allocEntry;
+  hni_entry_t allocEntryChecked;
+  logic gpcAllocCheck;
+  logic gpcRecheckValid;
+  logic [IDX_W-1:0] gpcRecheckEntry;
+  logic [IDX_W-1:0] gpcRecheckPointer;
 
   // Per-entry conditions.
   logic [DEPTH-1:0] eMayStart;
@@ -555,6 +568,42 @@ module chi_hni_top #(
                                      HNI_K_COPYBACK, HNI_K_CFG_WRITE};
   end
 
+  // Granule protection: the request being allocated is checked when it has
+  // no other error, otherwise one waiting entry is checked again. A failed
+  // check completes with NDERR and sends nothing downstream
+  // (IHI 0050H B9.1.1).
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    gpcAllocCheck = (CFG.gpcMode != GPC_NONE) && posAllocValid && !allocEntry.err;
+    found = 1'b0;
+    gpcRecheckEntry = '0;
+    candidate = 0;
+    if ((CFG.gpcMode != GPC_NONE) && !gpcAllocCheck)
+      for (int unsigned offset = 0; offset < DEPTH; offset++) begin
+        candidate = int'(gpcRecheckPointer) + offset;
+        if (candidate >= DEPTH)
+          candidate = candidate - DEPTH;
+        if (!found && posActive[candidate] && entry[candidate].gpcPending) begin
+          found = 1'b1;
+          gpcRecheckEntry = IDX_W'(candidate);
+        end
+      end
+    gpcRecheckValid = found;
+    gpcCheckValid = gpcAllocCheck || gpcRecheckValid;
+    gpcCheckAddr = gpcAllocCheck ? incomingReq.addr : entry[gpcRecheckEntry].req.addr;
+    gpcCheckPas = gpcAllocCheck ? incomingReq.pas : entry[gpcRecheckEntry].req.pas;
+    gpcCheckSrcId = gpcAllocCheck ? incomingReq.srcId
+                                  : entry[gpcRecheckEntry].req.srcId;
+    allocEntryChecked = allocEntry;
+    if (gpcAllocCheck) begin
+      if (!gpcCheckDone)
+        allocEntryChecked.gpcPending = 1'b1;
+      else if (gpcCheckFail)
+        allocEntryChecked.err = 1'b1;
+    end
+  end
+
   // ---------------------------------------------------------------------
   // Per-entry conditions.
   // ---------------------------------------------------------------------
@@ -583,7 +632,8 @@ module chi_hni_top #(
               && (posRequester[j] == posRequester[i]))
             olderOrderedPending = 1'b1;
         end
-      eMayStart[i] = posActive[i] && !posStarted[i] && !olderSameLine;
+      eMayStart[i] = posActive[i] && !posStarted[i] && !olderSameLine
+                     && !e.gpcPending;
       eEndpointClear[i] = (e.req.order != ORDER_ENDPOINT) || !olderOrderedPending;
 
       // What still has to go downstream.
@@ -1084,6 +1134,8 @@ module chi_hni_top #(
   logic [DEPTH-1:0] eOwoWrite;
   logic [DEPTH-1:0] eCompAckOwed;
   logic [DEPTH-1:0] eReceiptOwed;
+  logic [DEPTH-1:0] eErr;
+  logic [DEPTH-1:0] eGpcPending;
   logic [DEPTH-1:0] liveWaitDownstream;
   logic [DEPTH-1:0] liveWaitRequester;
 
@@ -1096,6 +1148,8 @@ module chi_hni_top #(
       eOwoWrite[i] = (entry[i].kind == HNI_K_WRITE) && entry[i].req.expCompAck;
       eCompAckOwed[i] = entry[i].compAckOwed;
       eReceiptOwed[i] = entry[i].receiptOwed;
+      eErr[i] = posActive[i] && entry[i].err;
+      eGpcPending[i] = posActive[i] && entry[i].gpcPending;
       liveWaitDownstream[i] = dnWaiting[i];
       liveWaitRequester[i] = (entry[i].wrOwed && !entry[i].dbidOwed)
                              || (entry[i].compAckOwed && !entry[i].dbidOwed
@@ -1113,6 +1167,7 @@ module chi_hni_top #(
       rspPointer <= '0;
       datPointer <= '0;
       datTrackerTurn <= 1'b0;
+      gpcRecheckPointer <= '0;
       selectedRegion <= '0;
       mmioRegionUpdate <= 1'b0;
       mmioRegionUpdateIndex <= '0;
@@ -1137,7 +1192,15 @@ module chi_hni_top #(
 
       // Allocation.
       if (posAllocValid && posAllocReady)
-        entry[posAllocIndex] <= allocEntry;
+        entry[posAllocIndex] <= allocEntryChecked;
+
+      if (gpcRecheckValid && gpcCheckDone) begin
+        entry[gpcRecheckEntry].gpcPending <= 1'b0;
+        if (gpcCheckFail)
+          entry[gpcRecheckEntry].err <= 1'b1;
+        gpcRecheckPointer <= (int'(gpcRecheckEntry) == (DEPTH - 1))
+                             ? '0 : (gpcRecheckEntry + 1'b1);
+      end
 
       for (int unsigned i = 0; i < DEPTH; i++) begin
         // Start: an entry with nothing to send downstream counts as

@@ -123,6 +123,7 @@ packed flit field by itself is carriage, not implementation.
 | Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | System Level Cache | B2.8.3, B4.2.2.1, B7.4.2 | Implemented | One slice per HN-F when `slcEn`: set-associative, `{line, PAS}` tags, clean and dirty lines, PLRU, RRIP or random replacement, SECDED data with `slcEccEn`. Looked up with the directory when an entry starts; hits are read through a one-line port, fills and dirty data are written when the entry retires, dirty evictions are written back by victim entries that hold the location. Only Cacheable, non-Device lines are kept; CMOs, Combined writes, `ReadOnce*Invalid` and Device or Non-cacheable accesses take the line out first. `slcTagPipelineDepth` other than 1 is rejected. Section 9.10. |
+| Granule Protection Check | B9.1.1, B10.7.3.1; Arm ARM RME (GPT format) | Implemented | `gpcMode` TABLE (on-chip GPI array) or WALK (GPT in memory, shared cache and two-level walker). Every request a Home admits is checked before it snoops, looks up the SLC or goes downstream; a failure completes with NDERR and has no other effect, and the first fault is recorded with its address, PAS and SrcID. GPT reads go through a tracker reserved in the HN-F that owns each line. Root-only registers, including cache invalidation by all or by PA. The GPT layout follows the Arm ARM as recalled, not checked against it (Section 9.11). DVM-driven invalidation arrives with Stage 6. |
 | `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
@@ -487,6 +488,7 @@ chi_interconnect_top
 │   └── chi_flit_fifo  x3     (REQ, RSP, DAT out)
 ├── mn_nodes[*] : chi_mn_dvm
 ├── apb_cfg/policy_regs : chi_hnf_policy_regs     [CFG_APB]
+├── gpc/gpc_unit : chi_gpc                         [gpcMode != NONE]
 └── chi_noc_top
     └── chi_mesh | chi_ring | chi_xbar              [topology]
         └── chi_xp[*]
@@ -569,6 +571,9 @@ it is a parameter at all and what choosing it wrong costs.
 | `slcAllocPolicy` | `SLC_ALLOC_HINT` | HINT, CACHEABLE | Allocate on `MemAttr.Allocate`, or for every Cacheable line. |
 | `slcEccEn` | 0 | 0 or 1 | SECDED on each 64-bit word of the data array. |
 | `slcTagPipelineDepth` | 1 | exactly 1 | Tag lookup stages; the lookup shares the directory's stage. |
+| `gpcMode` | `GPC_NONE` | NONE, TABLE, WALK; needs `rmeEn` and `cfgAccess` APB; WALK needs an HN-F | Granule Protection Check at every Home. |
+| `gpcTableGranules` | 4096 | positive with TABLE | Granules the on-chip GPI array covers. |
+| `gpcCacheEntries` | 16 | positive with WALK | Entries of the shared GPT cache. |
 | `lcrdDepth` | 8 | 2 or greater | L-Credits advertised per channel and receive-buffer depth. |
 | `exclMonitors` | 32 | positive | Exclusive monitor entries. |
 | `interleaveGranule` | 64 | power of two, at least 64 | HN hash stripe bytes. |
@@ -723,6 +728,7 @@ open, not because interoperability demands it.
 | `retryRecords` | The Home decides how many P-Credits it has out at once. | Entries idling in reserve for re-sent requests against how quickly retried Requesters are invited back. |
 | `hniEntries` | Transaction tracking depth is unspecified. | Concurrent HN-I transactions against two 64-byte buffers per entry. |
 | `slc*` | An interconnect cache is optional and invisible to the protocol. | Memory traffic and latency against area; the policies trade hit rate against how much RN-F state the SLC duplicates. |
+| `gpc*` | Where the completer-side GPC is made, and how, is system design (B10.7.3.1 only requires one). | Table area against the latency of walks; cache size against walk traffic. |
 | `maxOutstandingSnoops` | CHI bounds snoops only per location and Snoopee (B4.11.2); how many a Home has in flight is its choice. | Snoop latency overlap against the snoop traffic a Home can inject at once. |
 | `lcrdDepth` | CHI fixes the credit protocol, not the pool size. | Receive-buffer area against sustainable throughput. See Section 3.2.3. |
 | `exclMonitors` | Monitor count is unspecified; the architecture permits spurious failure. | Monitor area against the spurious exclusive-failure rate. |
@@ -1216,7 +1222,8 @@ security policy and commit protocol in this section are
 APB runs on `clk` and `PREADY` is always 1. Addresses are 12-bit and word
 aligned. `PADDR[11:8]` selects a 256-byte block: block 0 is the region editor
 below, block 1 the HN-F policy registers of Table 7.1b, and every other block
-returns `PSLVERR`. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
+returns `PSLVERR`; block 2 holds the GPC registers of Table 7.1c when `gpcMode`
+is not NONE. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
 A write must be a Root access with `rmeEn` (`PNSE=1`, `PPROT[1]=0`, the AMBA
 APB5 encoding) and a Secure access without it (`PPROT[1]=0`); anything else
 returns `PSLVERR`. Unsupported or
@@ -1245,6 +1252,22 @@ writes return `PSLVERR`.
 | `0x110` | SLC_MAINT | RW | 0 | Write `PWDATA[0]=1` to clean the selected HN-F's SLC, with `PWDATA[1]=1` to clean and invalidate it; `PSLVERR` without `slcEn` or while busy. Reads `[0]` busy, which clears once the walk is done and every write-back has completed. |
 
 : Table 7.1b APB4 register map of `chi_hnf_policy_regs` (block 1)
+
+| Offset | Name | Access | Function |
+|--------|------|--------|----------|
+| `0x200` | CTRL | RW | `[0]` enable, `[2:1]` PGS (4 KB, 64 KB, 16 KB), `[6:4]` PPS, `[11:8]` L0GPTSZ. A write invalidates the GPT cache. |
+| `0x204`, `0x208` | TABLE_BASE | RW | First byte of the TABLE range. |
+| `0x20c`, `0x210` | GPT_BASE | RW | Level 0 table base, 4 KB aligned. A write invalidates the GPT cache. |
+| `0x214` | GPI_INDEX | RW | Granule index into the TABLE array. |
+| `0x218` | GPI_DATA | RW | Eight 4-bit GPIs from granule `GPI_INDEX & ~7`. |
+| `0x21c` | INVALIDATE | W | `[0]` the whole GPT cache, `[1]` the entries holding INV_ADDR. |
+| `0x220`, `0x224` | INV_ADDR | RW | Address for invalidation by PA. |
+| `0x228` | FAULT_STATUS | RW | `[0]` a fault is recorded, write 1 to clear; `[31:16]` faults counted. |
+| `0x22c`, `0x230` | FAULT_ADDR | RO | Address of the first recorded fault. |
+| `0x234` | FAULT_INFO | RO | `[2:0]` PAS, `[3]` malformed GPT, `[26:16]` SrcID. |
+| `0x238` | STATUS | RO | `[0]` a walk is in progress. |
+
+: Table 7.1c GPC registers of `chi_gpc` (block 2); writes need the Root PAS
 
 A policy bit only narrows what the configuration allows: the HN-F ANDs it with
 the global enable in `chi_cfg_t` and with the capability of the node involved.
@@ -1484,6 +1507,7 @@ The fields of an entry, and who writes them:
 | Downstream | `dnBusy`, `dnKind`, `dnReadDone`, `dnWriteDone`, `dnCmoDone` | per tracker start and completion |
 | Responses | `receiptOwed`, `dbidOwed`, `dbidWithComp`, `compOwed`, `compGranSent`, `compCmoOwed`, `compAckOwed`, `sfUpdOwed` | plan, then per message sent or received |
 | SLC | `slcHit`, `slcDirty`, `slcKeep`, `slcRemove`, `slcKeepDirty`, `slcUpdOwed` | plan at start; `slcKeepDirty` and `slcUpdOwed` when the entry finishes |
+| Granule protection | `gpcPending` | at allocation; cleared when the check is answered (Section 9.11) |
 
 : Table 9.2 POS entry fields
 
@@ -1800,6 +1824,55 @@ every write-back it started has reached memory.
 single-bit error is corrected on the way out of the array; a double-bit error
 poisons that word (B9.2.3).
 
+## 9.11 Granule Protection Check
+
+Every request a Home admits is checked against the granule protection of its
+physical granule before the Home snoops, looks up its SLC or sends anything
+downstream; a request that fails completes with NDERR in its own message
+structure and has no other effect (B9.1.1: an illegal access). The check is
+`chi_gpc`, one unit shared by every Home: each Home has a check port, and the
+answer is combinational when the table or the GPT cache holds it. An entry
+whose answer is not yet known waits in the POS (or the HN-I table), holding
+back younger requests to its location as any older entry does, and its Home
+presents it again until the answer arrives.
+
+**TABLE.** An on-chip array of 4-bit GPIs covers `gpcTableGranules` granules
+from TABLE_BASE; an address outside that range is not protected. The array
+resets to "all access" and only the Root PAS can write it (Table 7.1c).
+
+**WALK.** The Granule Protection Table in memory, decoded as the RME chapter
+of the Arm ARM describes it: CTRL holds the granule size (PGS), the protected
+physical address size (PPS) and the level 0 region size (L0GPTSZ), and
+GPT_BASE the level 0 table. A level 0 entry is a block descriptor (type
+`0b0001`, one GPI in bits `[7:4]`) or a table descriptor (type `0b0011`,
+level 1 table address in bits `[51:12]`); a level 1 entry holds sixteen GPIs,
+one per granule. GPI `0b0000` permits no access, `0b1000` Secure, `0b1001`
+Non-secure, `0b1010` Root, `0b1011` Realm and `0b1111` every PAS; other values
+fault as malformed. An address at or above 2^PPS faults. The Arm ARM is not
+part of this project's references on hand, so these encodings are recalled
+rather than checked; they are the first thing to verify before relying on
+WALK mode.
+
+One walk runs at a time. Each GPT read goes to the HN-F that owns the line,
+which reads it from its SN-F in the Root PAS through a downstream tracker
+reserved for the walker, so a walk never waits for a POS entry and never
+competes with the transactions it is holding up (Section 9.7). Reads bypass
+the SLC: software makes GPT updates visible at the PoPA before invalidating
+GPT caches, so memory holds what the walker must see. A walk's result fills
+the `gpcCacheEntries`-entry cache, including a fault entry for a malformed
+descriptor or a failed read. Writing CTRL or GPT_BASE, or INVALIDATE,
+invalidates the cache; a walk in flight across an invalidation does not fill
+it. Invalidation by DVM arrives with the MN payload decode (Stage 6).
+
+**Faults.** The first fault is kept in FAULT_ADDR and FAULT_INFO (address,
+PAS, SrcID, malformed) until software clears it; every fault is counted.
+
+**Requests that bypass the Home.** `PrefetchTgt` goes straight to an SN-F and
+is not checked: it returns nothing to the Requester and any later access to
+the line is checked at its Home before it reaches the Subordinate. Direct
+transfers (Stage 8) are decided by a Home after its check, so their
+downstream legs are covered.
+
 # 10 RN-F boundary cache-state model
 
 These tables are the required architectural model for an RN-F cache
@@ -1894,6 +1967,7 @@ or performance guarantees are supplied.
 | `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA`, `HNI_DOWNSTREAM_PAS_PRESERVED` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
 | `chi_pas_sva.sv` | `SAM_PAS_REFUSAL_KEEPS_REGION`, `SAM_ACCEPTED_PAS_ALLOWED`, `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED`, `SF_ONE_WAY_PER_LOCATION` | `SAM_PAS_REFUSED`, `PAS_ALIAS_EVICTED`, `POPA_FORWARDED`, `REFUSED_REQUEST_ALLOCATED` |
 | `chi_slc_sva.sv` | `SLC_ONE_WAY_PER_LOCATION`, `SLC_DIRTY_NEVER_DROPPED`, `SLC_NO_DEVICE_ALLOCATION`, `SLC_DISCARD_ONLY_AFTER_WRITEBACK` | `SLC_HIT`, `SLC_MISS_FILL`, `SLC_DIRTY_EVICTION`, `SLC_EVICTION_HOLDS_REQUEST`, `SLC_CMO_HITS_DIRTY`, `SLC_MAINTENANCE` |
+| `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
 | `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
@@ -2000,6 +2074,7 @@ rtl/hnf/chi_dwt_ctrl.sv
 rtl/hnf/chi_stash_ctrl.sv
 rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_slc.sv
+rtl/hnf/chi_gpc.sv
 rtl/hnf/chi_hnf_top.sv
 rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
@@ -2017,6 +2092,7 @@ rtl/sva/chi_hni_sva.sv
 rtl/sva/chi_home_liveness_sva.sv
 rtl/sva/chi_pas_sva.sv
 rtl/sva/chi_slc_sva.sv
+rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```

@@ -378,6 +378,27 @@ module chi_interconnect_top #(
   logic [NUM_HNF_E-1:0] slcMaintStart;
   logic [NUM_HNF_E-1:0] slcMaintInvalidate;
   logic [NUM_HNF_E-1:0] slcMaintBusy;
+  // Granule Protection Check: one check port per Home (every HN-F, then
+  // every HN-I) and one GPT read port per HN-F.
+  localparam int unsigned NUM_HOMES_E =
+    ((CFG.numHnf + CFG.numHni) > 0) ? (CFG.numHnf + CFG.numHni) : 1;
+  logic [NUM_HOMES_E-1:0] gpcCheckValid;
+  logic [NUM_HOMES_E-1:0][CHI_MAX_ADDR_W-1:0] gpcCheckAddr;
+  chi_pas_e [NUM_HOMES_E-1:0] gpcCheckPas;
+  logic [NUM_HOMES_E-1:0][CHI_NODEID_SLOT_W-1:0] gpcCheckSrcId;
+  logic [NUM_HOMES_E-1:0] gpcCheckDone;
+  logic [NUM_HOMES_E-1:0] gpcCheckFail;
+  logic [NUM_HNF_E-1:0] gptReadValid;
+  logic [CHI_MAX_ADDR_W-1:0] gptReadAddr;
+  logic [NUM_HNF_E-1:0] gptReadDone;
+  logic [NUM_HNF_E-1:0][511:0] gptReadData;
+  logic [NUM_HNF_E-1:0] gptReadError;
+  logic apbGpcSelect;
+  logic [31:0] apbGpcRdata;
+  logic apbGpcReady;
+  logic apbGpcError;
+  logic gpcWalking;
+  logic gpcEventFault;
   // APB register blocks. PADDR[11:8] selects a 256-byte block: 0 is the
   // region editor, 1 the HN-F policy registers.
   logic apbRegionSelect;
@@ -471,6 +492,18 @@ module chi_interconnect_top #(
           if (CFG.slcTagPipelineDepth != 1)
             $fatal(1, "slcTagPipelineDepth is %0d but only a single-stage tag lookup, combined with the snoop filter lookup, is built",
                    CFG.slcTagPipelineDepth);
+        end
+        if (CFG.gpcMode != GPC_NONE) begin
+          if (!CFG.rmeEn)
+            $fatal(1, "gpcMode needs rmeEn: granule protection checks the RME Physical Address Spaces");
+          if ((CFG.gpcMode == GPC_TABLE) && (CFG.gpcTableGranules == 0))
+            $fatal(1, "gpcMode TABLE needs gpcTableGranules of at least 1");
+          if ((CFG.gpcMode == GPC_WALK) && (CFG.gpcCacheEntries == 0))
+            $fatal(1, "gpcMode WALK needs gpcCacheEntries of at least 1");
+          if ((CFG.gpcMode == GPC_WALK) && (CFG.numHnf == 0))
+            $fatal(1, "gpcMode WALK needs an HN-F: the GPT is read from memory through the HN-F that owns each line");
+          if (CFG.cfgAccess != CFG_APB)
+            $fatal(1, "gpcMode needs cfgAccess APB: the GPC registers are Root-only APB registers");
         end
         if ((CFG.numHni > 0) && (CFG.hniEntries == 0))
           $fatal(1, "hniEntries must be at least 1: an HN-I with no entry can never accept a request");
@@ -644,6 +677,7 @@ module chi_interconnect_top #(
     always_comb begin
       apbRegionSelect = PSEL && (PADDR[11:8] == 4'h0);
       apbPolicySelect = PSEL && (PADDR[11:8] == 4'h1);
+      apbGpcSelect = PSEL && (PADDR[11:8] == 4'h2) && (CFG.gpcMode != GPC_NONE);
     end
 
     chi_cfg_slave #(
@@ -687,6 +721,10 @@ module chi_interconnect_top #(
         PRDATA = apbPolicyRdata;
         PREADY = apbPolicyReady;
         PSLVERR = apbPolicyError;
+      end else if (apbGpcSelect) begin
+        PRDATA = apbGpcRdata;
+        PREADY = apbGpcReady;
+        PSLVERR = apbGpcError;
       end
     end
   end else begin : no_apb_cfg
@@ -702,6 +740,7 @@ module chi_interconnect_top #(
       apbRegionUpdateAttributes = '0;
       apbRegionSelect = 1'b0;
       apbPolicySelect = 1'b0;
+      apbGpcSelect = 1'b0;
       apbRegionRdata = '0;
       apbPolicyRdata = '0;
       apbRegionReady = 1'b1;
@@ -911,8 +950,48 @@ module chi_interconnect_top #(
     assign linkCreditError[i] = 1'b0;
   end
 
+  if (CFG.gpcMode != GPC_NONE) begin : gpc
+    chi_gpc #(
+      .CFG(CFG), .NUM_HOMES(NUM_HOMES_E), .NUM_HNF(NUM_HNF_E)
+    ) gpc_unit (
+      .clk, .resetn,
+      .PADDR(PADDR[7:0]), .PSEL(apbGpcSelect), .PENABLE, .PWRITE, .PWDATA,
+      .PSTRB, .PPROT, .PNSE, .PRDATA(apbGpcRdata), .PREADY(apbGpcReady),
+      .PSLVERR(apbGpcError),
+      .checkValid(gpcCheckValid), .checkAddr(gpcCheckAddr),
+      .checkPas(gpcCheckPas), .checkSrcId(gpcCheckSrcId),
+      .checkDone(gpcCheckDone), .checkFail(gpcCheckFail),
+      .gptReadValid, .gptReadAddr, .gptReadDone, .gptReadData, .gptReadError,
+      // DVM-driven GPT invalidation arrives with the MN payload decode.
+      .dvmInvalidateAll(1'b0), .dvmInvalidateByPa(1'b0),
+      .dvmInvalidateAddr('0),
+      .walking(gpcWalking), .eventFault(gpcEventFault)
+    );
+  end else begin : no_gpc
+    always_comb begin
+      gpcCheckDone = '1;
+      gpcCheckFail = '0;
+      gptReadValid = '0;
+      gptReadAddr = '0;
+      apbGpcRdata = '0;
+      apbGpcReady = 1'b1;
+      apbGpcError = 1'b1;
+      gpcWalking = 1'b0;
+      gpcEventFault = 1'b0;
+    end
+  end
+
   for (genvar i = CFG.numHnf; i < NUM_HNF_E; i++) begin : no_hnf_maint
     assign slcMaintBusy[i] = 1'b0;
+    assign gptReadDone[i] = 1'b0;
+    assign gptReadData[i] = '0;
+    assign gptReadError[i] = 1'b0;
+  end
+  for (genvar i = CFG.numHnf + CFG.numHni; i < NUM_HOMES_E; i++) begin : no_home_check
+    assign gpcCheckValid[i] = 1'b0;
+    assign gpcCheckAddr[i] = '0;
+    assign gpcCheckPas[i] = PAS_SECURE;
+    assign gpcCheckSrcId[i] = '0;
   end
 
   for (genvar i = 0; i < CFG.numHnf; i++) begin : hnf_nodes
@@ -945,7 +1024,13 @@ module chi_interconnect_top #(
       .idle(hnfIdle[i]),
       .slcMaintStart(slcMaintStart[i]),
       .slcMaintInvalidate(slcMaintInvalidate[i]),
-      .slcMaintBusy(slcMaintBusy[i])
+      .slcMaintBusy(slcMaintBusy[i]),
+      .gpcCheckValid(gpcCheckValid[i]), .gpcCheckAddr(gpcCheckAddr[i]),
+      .gpcCheckPas(gpcCheckPas[i]), .gpcCheckSrcId(gpcCheckSrcId[i]),
+      .gpcCheckDone(gpcCheckDone[i]), .gpcCheckFail(gpcCheckFail[i]),
+      .gptReadValid(gptReadValid[i]), .gptReadAddr(gptReadAddr),
+      .gptReadDone(gptReadDone[i]), .gptReadData(gptReadData[i]),
+      .gptReadError(gptReadError[i])
     );
   end
 
@@ -977,6 +1062,12 @@ module chi_interconnect_top #(
       .regionUpdateTarget(selectedRegionUpdateTarget),
       .regionUpdateAttributes(selectedRegionUpdateAttributes),
       .othersQuiescent(hniOthersQuiescent[i]),
+      .gpcCheckValid(gpcCheckValid[CFG.numHnf+i]),
+      .gpcCheckAddr(gpcCheckAddr[CFG.numHnf+i]),
+      .gpcCheckPas(gpcCheckPas[CFG.numHnf+i]),
+      .gpcCheckSrcId(gpcCheckSrcId[CFG.numHnf+i]),
+      .gpcCheckDone(gpcCheckDone[CFG.numHnf+i]),
+      .gpcCheckFail(gpcCheckFail[CFG.numHnf+i]),
       .mmioRegionUpdate(mmioRegionUpdate[i]),
       .mmioRegionUpdateIndex(mmioRegionUpdateIndex[i]),
       .mmioRegionUpdateBase(mmioRegionUpdateBase[i]),

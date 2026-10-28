@@ -88,7 +88,22 @@ module chi_hnf_top #(
   // and every write-back has completed.
   input  logic slcMaintStart,
   input  logic slcMaintInvalidate,
-  output logic slcMaintBusy
+  output logic slcMaintBusy,
+  // Granule Protection Check (chi_gpc): every request the Home admits is
+  // checked before it starts; done is combinational, fail means NDERR.
+  output logic gpcCheckValid,
+  output logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gpcCheckAddr,
+  output chi_pkg::chi_pas_e gpcCheckPas,
+  output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] gpcCheckSrcId,
+  input  logic gpcCheckDone,
+  input  logic gpcCheckFail,
+  // GPT reads for the walker, of lines this HN-F owns, through a tracker
+  // reserved for them.
+  input  logic gptReadValid,
+  input  logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gptReadAddr,
+  output logic gptReadDone,
+  output logic [511:0] gptReadData,
+  output logic gptReadError
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -98,6 +113,13 @@ module chi_hnf_top #(
   localparam int unsigned NUM_VB = (VICTIM_DEPTH > 0) ? VICTIM_DEPTH : 1;
   localparam int unsigned NUM_OWNERS = POS_DEPTH + NUM_VB;
   localparam int unsigned OWNER_W = clog2Min1(NUM_OWNERS);
+  // With a GPT walker, one more downstream tracker serves its reads.
+  localparam bit GPT_READS = CFG.gpcMode == GPC_WALK;
+  localparam int unsigned TRK_OWNERS = NUM_OWNERS + (GPT_READS ? 1 : 0);
+  localparam int unsigned TRK_W = clog2Min1(TRK_OWNERS);
+  localparam int unsigned GPT_OWNER = NUM_OWNERS;
+  // An index that is in range whether or not the walker's tracker exists.
+  localparam int unsigned GPT_IDX = GPT_READS ? GPT_OWNER : 0;
   localparam int unsigned POS_W = clog2Min1(POS_DEPTH);
   localparam int unsigned VB_W = clog2Min1(NUM_VB);
   localparam int unsigned RNF_W = clog2Min1(NUM_RNF);
@@ -126,8 +148,8 @@ module chi_hnf_top #(
           $fatal(1, "chi_hnf_top VICTIM_DEPTH must be at least 1: a directory eviction needs a victim entry to snoop out and write back the evicted line");
         // The owner index is the TxnID of every snoop and every downstream
         // request, and the POS index is the DBID, so both must fit TxnID.
-        if (NUM_OWNERS > (1 << CFG.txnIdW))
-          $fatal(1, "posEntries (%0d) plus VICTIM_DEPTH (%0d) owners do not fit the %0d-bit TxnID the Home uses for snoops, downstream requests and DBID",
+        if (TRK_OWNERS > (1 << CFG.txnIdW))
+          $fatal(1, "posEntries (%0d) plus VICTIM_DEPTH (%0d) owners, and the GPT walker's tracker with gpcMode WALK, do not fit the %0d-bit TxnID the Home uses for snoops, downstream requests and DBID",
                  CFG.posEntries, VICTIM_DEPTH, CFG.txnIdW);
       end
     end
@@ -217,6 +239,8 @@ module chi_hnf_top #(
     logic               slcRemove;   // the line leaves the SLC at retirement
     logic               slcKeepDirty; // recorded when the entry finishes
     logic               slcUpdOwed;  // SLC write or removal at retirement
+    // Granule Protection Check still to be answered; the entry cannot start.
+    logic               gpcPending;
   } entry_t;
 
   // Victim-buffer entry. The key holds the evicted location, PAS included.
@@ -568,27 +592,41 @@ module chi_hnf_top #(
   logic [POS_W-1:0] compAckEntry;
 
   // Downstream trackers.
-  logic [NUM_OWNERS-1:0] dnStartValid;
-  chi_hnf_dn_e [NUM_OWNERS-1:0] dnStartKind;
-  logic [NUM_OWNERS-1:0][3:0] dnStartGranules;
-  logic [NUM_OWNERS-1:0] dnStartNoData;
-  logic [NUM_OWNERS-1:0] dnStartWantReceipt;
-  logic [NUM_OWNERS-1:0] dnBusy;
-  logic [NUM_OWNERS-1:0] dnWaiting;
-  logic [NUM_OWNERS-1:0] dnDone;
+  logic [TRK_OWNERS-1:0] dnStartValid;
+  chi_hnf_dn_e [TRK_OWNERS-1:0] dnStartKind;
+  logic [TRK_OWNERS-1:0][3:0] dnStartGranules;
+  logic [TRK_OWNERS-1:0] dnStartNoData;
+  logic [TRK_OWNERS-1:0] dnStartWantReceipt;
+  logic [TRK_OWNERS-1:0] dnBusy;
+  logic [TRK_OWNERS-1:0] dnWaiting;
+  logic [TRK_OWNERS-1:0] dnDone;
   // What each POS entry waits for from outside the Home, for the bound
   // completion assertions.
   logic [POS_DEPTH-1:0] liveWaitSnoop;
   logic [POS_DEPTH-1:0] liveWaitDownstream;
   logic [POS_DEPTH-1:0] liveWaitRequester;
-  logic [NUM_OWNERS-1:0] dnResend;
-  logic [NUM_OWNERS-1:0][3:0] dnResendType;
+  logic [TRK_OWNERS-1:0] dnResend;
+  logic [TRK_OWNERS-1:0][3:0] dnResendType;
   logic dnReqValid;
-  logic [OWNER_W-1:0] dnReqOwner;
+  logic [TRK_W-1:0] dnReqOwner;
   logic dnReqCreditReturn;
   logic [3:0] dnReqCreditType;
   logic dnDatValid;
-  logic [OWNER_W-1:0] dnDatOwner;
+  logic [TRK_W-1:0] dnDatOwner;
+  // GPT walker reads.
+  logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gptAddr;
+  logic [511:0] gptBuf;
+  logic gptErr;
+  logic gptDatValid;
+  // Granule Protection Check port.
+  logic gpcAllocCheck;
+  logic gpcRecheckValid;
+  logic [POS_W-1:0] gpcRecheckEntry;
+  logic [POS_W-1:0] gpcRecheckPointer;
+  chi_hnf_err_e allocBaseErr;
+  // For the bound GPC assertions.
+  logic [POS_DEPTH-1:0] eGpcFailed;
+  logic [POS_DEPTH-1:0] eGpcPending;
   logic [1:0] dnDatDataId;
   logic [CHI_RSP_DBID_SLOT_W-1:0] dnDatTxnId;
   logic snRspValid;
@@ -930,6 +968,49 @@ module chi_hnf_top #(
     reqInReady = resourcesAvailable || retryHandshake;
   end
 
+  // A request the Requester-side SAM refused, or one in a PAS this
+  // configuration does not support, completes with NDERR and touches
+  // nothing (IHI 0050H B9.1.1, Table B13.47).
+  always_comb begin
+    if (reqInFlit.decodeErr == NOC_ERR_ADDRESS)
+      allocBaseErr = HNF_ERR_ADDRESS;
+    else if ((reqInFlit.decodeErr == NOC_ERR_PAS)
+             || !pasLegal(CFG, incomingReq.pas))
+      allocBaseErr = HNF_ERR_PAS;
+    else if (hnfKind(incomingReq.opcode) == HNF_KIND_ILLEGAL)
+      allocBaseErr = HNF_ERR_UNSUPPORTED;
+    else
+      allocBaseErr = HNF_ERR_NONE;
+  end
+
+  // The GPC port checks the request being allocated, and otherwise one
+  // waiting entry whose answer the walker did not have yet.
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    gpcAllocCheck = (CFG.gpcMode != GPC_NONE) && posAllocValid
+                    && (allocBaseErr == HNF_ERR_NONE);
+    found = 1'b0;
+    gpcRecheckEntry = '0;
+    candidate = 0;
+    if ((CFG.gpcMode != GPC_NONE) && !gpcAllocCheck)
+      for (int unsigned offset = 0; offset < POS_DEPTH; offset++) begin
+        candidate = int'(gpcRecheckPointer) + offset;
+        if (candidate >= POS_DEPTH)
+          candidate = candidate - POS_DEPTH;
+        if (!found && posActive[candidate] && entry[candidate].gpcPending) begin
+          found = 1'b1;
+          gpcRecheckEntry = POS_W'(candidate);
+        end
+      end
+    gpcRecheckValid = found;
+    gpcCheckValid = gpcAllocCheck || gpcRecheckValid;
+    gpcCheckAddr = gpcAllocCheck ? incomingReq.addr : entry[gpcRecheckEntry].req.addr;
+    gpcCheckPas = gpcAllocCheck ? incomingReq.pas : entry[gpcRecheckEntry].req.pas;
+    gpcCheckSrcId = gpcAllocCheck ? incomingReq.srcId
+                                  : entry[gpcRecheckEntry].req.srcId;
+  end
+
   // The entry a request starts as.
   always_comb begin
     chi_hnf_kind_e kind;
@@ -939,18 +1020,16 @@ module chi_hnf_top #(
     allocEntry.req = incomingReq;
     allocEntry.kind = kind;
     allocEntry.cmo = hnfCmo(incomingReq.opcode);
-    // A request the Requester-side SAM refused, or one in a PAS this
-    // configuration does not support, completes with NDERR and touches
-    // nothing (IHI 0050H B9.1.1, Table B13.47).
-    if (reqInFlit.decodeErr == NOC_ERR_ADDRESS)
-      allocEntry.err = HNF_ERR_ADDRESS;
-    else if ((reqInFlit.decodeErr == NOC_ERR_PAS)
-             || !pasLegal(CFG, incomingReq.pas))
-      allocEntry.err = HNF_ERR_PAS;
-    else if (kind == HNF_KIND_ILLEGAL)
-      allocEntry.err = HNF_ERR_UNSUPPORTED;
-    else
-      allocEntry.err = HNF_ERR_NONE;
+    allocEntry.err = allocBaseErr;
+    // Granule protection is checked for every request without another error
+    // (IHI 0050H B9.1.1: a protected granule is an illegal access). An
+    // answer not yet available holds the entry until the walker has it.
+    if (gpcAllocCheck) begin
+      if (!gpcCheckDone)
+        allocEntry.gpcPending = 1'b1;
+      else if (gpcCheckFail)
+        allocEntry.err = HNF_ERR_GPC;
+    end
     allocEntry.reqIsRnf = isRnf(incomingReq.srcId);
     allocEntry.reqRnf = rnfIndex(incomingReq.srcId);
     allocEntry.snpOpcode = SNP_SHARED;
@@ -1013,7 +1092,8 @@ module chi_hnf_top #(
       candidate = int'(startPointer) + offset;
       if (candidate >= POS_DEPTH)
         candidate = candidate - POS_DEPTH;
-      if (!found && (entry[candidate].phase == PH_WAIT) && mayStart[candidate]) begin
+      if (!found && (entry[candidate].phase == PH_WAIT) && mayStart[candidate]
+          && !entry[candidate].gpcPending) begin
         found = 1'b1;
         startIndex = POS_W'(candidate);
       end
@@ -1693,6 +1773,7 @@ module chi_hnf_top #(
                  && ((incomingDat.opcode == DAT_COMP_DATA)
                      || (incomingDat.opcode == DAT_DATA_SEP_RESP));
     memDatValid = snDatValid && (int'(incomingDat.txnId) < NUM_OWNERS);
+    gptDatValid = GPT_READS && snDatValid && (int'(incomingDat.txnId) == GPT_OWNER);
     memDatOwner = OWNER_W'(incomingDat.txnId);
   end
 
@@ -1760,6 +1841,14 @@ module chi_hnf_top #(
       dnStartNoData[owner] = 1'b0;
       dnStartWantReceipt[owner] = 1'b0;
     end
+    // The walker's read: one at a time, never while one is completing.
+    if (GPT_READS) begin
+      dnStartValid[GPT_IDX] = gptReadValid && !dnBusy[GPT_IDX] && !gptReadDone;
+      dnStartKind[GPT_IDX] = HNF_DN_READ;
+      dnStartGranules[GPT_IDX] = 4'hf;
+      dnStartNoData[GPT_IDX] = 1'b0;
+      dnStartWantReceipt[GPT_IDX] = 1'b0;
+    end
   end
 
 
@@ -1767,7 +1856,7 @@ module chi_hnf_top #(
   localparam logic [CHI_MAX_NODEID_W-1:0] SN_NODE_ID_TABLE [1] = '{SN_NODE_ID};
 
   chi_sn_tracker #(
-    .CFG(CFG), .NUM_OWNERS(NUM_OWNERS),
+    .CFG(CFG), .NUM_OWNERS(TRK_OWNERS),
     .NUM_SUB(1), .SUB_NODE_IDS(SN_NODE_ID_TABLE)
   ) sn_tracker (
     .clk, .resetn,
@@ -1855,6 +1944,15 @@ module chi_hnf_top #(
           request.stashNidValidOrEndianOrDeep = e.req.stashNidValidOrEndianOrDeep;
         end
       endcase
+    end else if (GPT_READS && (int'(dnReqOwner) == GPT_OWNER)) begin
+      // A GPT read: the whole line, in the Root PAS, straight from memory
+      // below every cache (the GPT is maintained to the PoPA).
+      request.opcode = REQ_READ_NO_SNP;
+      request.pas = PAS_ROOT;
+      request.memAttr = 4'b0100;
+      request.addr = {gptAddr[CHI_MAX_ADDR_W-1:6], 6'b0};
+      request.returnNidOrStashNidOrDataTarget = HN_NODE_ID;
+      request.returnTxnIdOrStashLpid = CHI_RTNTXNID_SLOT_W'(dnReqOwner);
     end else begin
       request.qos = '0;
       request.pas = keyPas(victim[vbIndex].key);
@@ -2275,6 +2373,8 @@ module chi_hnf_top #(
   // every response, and a stash target owes CompAck once it has the line.
   always_comb begin
     for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      eGpcFailed[i] = posActive[i] && (entry[i].err == HNF_ERR_GPC);
+      eGpcPending[i] = posActive[i] && entry[i].gpcPending;
       liveWaitSnoop[i] = entry[i].snpPending != '0;
       liveWaitDownstream[i] = dnWaiting[i];
       liveWaitRequester[i] = (entry[i].wrOwed && !entry[i].dbidOwed)
@@ -2339,6 +2439,42 @@ module chi_hnf_top #(
         idle = 1'b0;
   end
 
+  // The walker's GPT line, delivered whole when its read completes.
+  if (GPT_READS) begin : gpt_reads
+    always_ff @(posedge clk) begin
+      if (!resetn) begin
+        gptAddr <= '0;
+        gptBuf <= '0;
+        gptErr <= 1'b0;
+      end else begin
+        if (dnStartValid[GPT_IDX]) begin
+          gptAddr <= gptReadAddr;
+          gptErr <= 1'b0;
+        end
+        if (gptDatValid) begin
+          gptBuf[int'(incomingDat.dataId)*128 +: CFG.dataW] <=
+            incomingDat.data[CFG.dataW-1:0];
+          if (incomingDat.respErr != RESP_ERR_OK)
+            gptErr <= 1'b1;
+        end
+      end
+    end
+    always_comb begin
+      gptReadDone = dnDone[GPT_IDX];
+      gptReadData = gptBuf;
+      gptReadError = gptErr;
+    end
+  end else begin : no_gpt_reads
+    always_comb begin
+      gptAddr = '0;
+      gptBuf = '0;
+      gptErr = 1'b0;
+      gptReadDone = 1'b0;
+      gptReadData = '0;
+      gptReadError = 1'b0;
+    end
+  end
+
   // ---------------------------------------------------------------------
   // Sequential state.
   // ---------------------------------------------------------------------
@@ -2355,6 +2491,7 @@ module chi_hnf_top #(
       datPointer <= '0;
       sfUpdatePointer <= '0;
       slcUpdatePointer <= '0;
+      gpcRecheckPointer <= '0;
       datTrackerTurn <= 1'b0;
     end else begin
       // Allocation.
@@ -2579,6 +2716,14 @@ module chi_hnf_top #(
       // The SLC read port fills the buffer as memory would.
       if (slcReadValid)
         entry[slcReadEntry].dnReadDone <= 1'b1;
+      // A waiting entry's granule protection answer.
+      if (gpcRecheckValid && gpcCheckDone) begin
+        entry[gpcRecheckEntry].gpcPending <= 1'b0;
+        if (gpcCheckFail)
+          entry[gpcRecheckEntry].err <= HNF_ERR_GPC;
+        gpcRecheckPointer <= (int'(gpcRecheckEntry) == (POS_DEPTH - 1))
+                             ? '0 : (gpcRecheckEntry + 1'b1);
+      end
       if (sfUpdateValid && sfUpdateReady && !sfUpdateEvict)
         sfUpdatePointer <= (int'(sfUpdateEntry) == (POS_DEPTH - 1))
                            ? '0 : (sfUpdateEntry + 1'b1);
