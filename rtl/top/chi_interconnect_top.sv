@@ -69,6 +69,7 @@ module chi_interconnect_top #(
   localparam int unsigned NUM_DVM = (NUM_REQ > 0) ? NUM_REQ : 1;
   localparam int unsigned NUM_HNF_E = (CFG.numHnf > 0) ? CFG.numHnf : 1;
   localparam int unsigned NUM_SNF_E = (CFG.numSnf > 0) ? CFG.numSnf : 1;
+  localparam int unsigned NUM_SNI_E = (CFG.numSni > 0) ? CFG.numSni : 1;
   localparam int unsigned NUM_HNI_E = (CFG.numHni > 0) ? CFG.numHni : 1;
   localparam int unsigned OFF_RNF = 0;
   localparam int unsigned OFF_RND = OFF_RNF + CFG.numRnf;
@@ -83,8 +84,13 @@ module chi_interconnect_top #(
   typedef chi_mesh_placement_t placement_array_t [NUM_NODES-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] hnf_id_array_t [NUM_HNF_E-1:0];
   typedef logic [CHI_MAX_NODEID_W-1:0] snf_id_array_t [NUM_SNF_E];
+  typedef logic [CHI_MAX_NODEID_W-1:0] sni_id_array_t [NUM_SNI_E];
+  // Ascending like the chi_hnf_top parameters they are passed to: an
+  // unpacked array is assigned by position, so a descending source would
+  // reverse the order and RN-F i would no longer be index i inside the Home.
   typedef logic [CHI_MAX_NODEID_W-1:0]
-    rnf_id_array_t [(CFG.numRnf > 0 ? CFG.numRnf : 1)-1:0];
+    rnf_id_array_t [(CFG.numRnf > 0 ? CFG.numRnf : 1)];
+  typedef logic [CHI_MAX_NODEID_W-1:0] requester_id_array_t [NUM_DVM];
   typedef logic [CHI_MAX_NODEID_W-1:0] dvm_id_array_t [NUM_DVM-1:0];
   typedef logic [CFG.addrW-1:0] region_addr_array_t [NUM_REGIONS-1:0];
   typedef logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] region_target_array_t [NUM_REGIONS-1:0];
@@ -147,11 +153,28 @@ module chi_interconnect_top #(
     return values;
   endfunction
 
+  function automatic sni_id_array_t makeSniIds(input node_id_array_t ids);
+    sni_id_array_t values;
+    for (int unsigned i = 0; i < NUM_SNI_E; i++)
+      values[i] = (i < CFG.numSni) ? ids[OFF_SNI+i] : '0;
+    return values;
+  endfunction
+
   function automatic rnf_id_array_t makeRnfIds(input node_id_array_t ids);
     rnf_id_array_t values;
     for (int unsigned i = 0;
          i < (CFG.numRnf > 0 ? CFG.numRnf : 1); i++)
       values[i] = (i < CFG.numRnf) ? ids[OFF_RNF+i] : '0;
+    return values;
+  endfunction
+
+  // Every Requester (RN-F, RN-D, RN-I), in ordinal order.
+  function automatic requester_id_array_t makeRequesterIds(
+    input node_id_array_t ids
+  );
+    requester_id_array_t values;
+    for (int unsigned i = 0; i < NUM_DVM; i++)
+      values[i] = (i < NUM_REQ) ? ids[i] : '0;
     return values;
   endfunction
 
@@ -265,8 +288,11 @@ module chi_interconnect_top #(
   localparam node_id_array_t EFFECTIVE_NODE_IDS = makeNodeIds();
   localparam hnf_id_array_t HNF_NODE_IDS = makeHnfIds(EFFECTIVE_NODE_IDS);
   localparam snf_id_array_t SNF_NODE_IDS = makeSnfIds(EFFECTIVE_NODE_IDS);
+  localparam sni_id_array_t SNI_NODE_IDS = makeSniIds(EFFECTIVE_NODE_IDS);
   localparam rnf_id_array_t RNF_NODE_IDS = makeRnfIds(EFFECTIVE_NODE_IDS);
   localparam dvm_id_array_t DVM_NODE_IDS = makeDvmIds(EFFECTIVE_NODE_IDS);
+  localparam requester_id_array_t REQUESTER_NODE_IDS =
+    makeRequesterIds(EFFECTIVE_NODE_IDS);
   localparam region_addr_array_t EFFECTIVE_REGION_BASE = makeRegionBase();
   localparam region_addr_array_t EFFECTIVE_REGION_LIMIT = makeRegionLimit();
   localparam region_target_array_t EFFECTIVE_REGION_TARGET =
@@ -404,6 +430,8 @@ module chi_interconnect_top #(
             || (CFG.snpFilterWays > CFG.snpFilterEntries)
             || ((CFG.snpFilterEntries % CFG.snpFilterWays) != 0))
           $fatal(1, "Invalid snoop-filter geometry");
+        if ((CFG.numHni > 0) && (CFG.hniEntries == 0))
+          $fatal(1, "hniEntries must be at least 1: an HN-I with no entry can never accept a request");
         if ((CFG.numHnf > 0) && (CFG.maxOutstandingSnoops == 0))
           $fatal(1, "maxOutstandingSnoops must be at least 1: an HN-F with no snoop slot can never snoop a sharer");
         // The set index is taken straight from the low line-address bits.
@@ -807,6 +835,7 @@ module chi_interconnect_top #(
       .SN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_SNF+SNF_INDEX]),
       .NUM_RNF((CFG.numRnf > 0) ? CFG.numRnf : 1),
       .RNF_NODE_IDS(RNF_NODE_IDS),
+      .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS),
       .SN_DMT_CAP(SNF_DMT_CAP[SNF_INDEX]),
       .SN_DWT_CAP(SNF_DWT_CAP[SNF_INDEX]),
       .RNF_DCT_CAP(RNF_DCT_CAP)
@@ -835,7 +864,9 @@ module chi_interconnect_top #(
       .NUM_REGIONS(NUM_REGIONS), .CFG_MMIO_BASE(CFG_MMIO_BASE),
       .REGION_BASE('{default:'0}), .REGION_LIMIT('{default:{CFG.addrW{1'b1}}}),
       .REGION_TARGET('{default:EFFECTIVE_NODE_IDS[OFF_SNI+(i % CFG.numSni)]}),
-      .REGION_ATTRIBUTES('{default:{SAM_REGION_DIRECT,1'b0,1'b1}})
+      .REGION_ATTRIBUTES('{default:{SAM_REGION_DIRECT,1'b0,1'b1}}),
+      .NUM_SNI(NUM_SNI_E), .SNI_NODE_IDS(SNI_NODE_IDS),
+      .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS)
     ) hni (
       .clk, .resetn, .reqInValid(reqOutValid[OFF_HNI+i]),
       .reqInReady(reqOutReady[OFF_HNI+i]), .reqInFlit(reqOutFlit[OFF_HNI+i]),

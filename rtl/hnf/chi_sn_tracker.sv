@@ -1,23 +1,30 @@
-// Downstream (Home to Subordinate) transaction trackers of one HN-F.
+// Downstream (Home to Subordinate) transaction trackers of one Home.
 //
-// One tracker per owner — POS entry or victim-buffer entry — so an owner
-// has at most one downstream operation in flight, and the tracker index is
-// the TxnID the Home uses towards the Subordinate. That TxnID space is
-// separate from every Requester's: the Home never forwards a Requester's
+// One tracker per owner — a transaction entry or a victim-buffer entry — so
+// an owner has at most one downstream operation in flight, and the tracker
+// index is the TxnID the Home uses towards the Subordinate. That TxnID space
+// is separate from every Requester's: the Home never forwards a Requester's
 // TxnID downstream (IHI 0050H B2.4.2, B2.3.9).
 //
 // An operation is one of:
-//   HNF_DN_READ   ReadNoSnp; the Subordinate's CompData lands in the owner's
-//                 line buffer (written by chi_hnf_top from the DAT input).
-//   HNF_DN_WRITE  WriteNoSnpFull or WriteNoSnpPtl; the tracker sends the data
-//                 packets once the DBID has arrived (IHI 0050H B2.3.9.2).
-//   HNF_DN_CMO    a forwarded cache maintenance request; done on Comp.
+//   HNF_DN_READ    ReadNoSnp; the Subordinate's CompData lands in the
+//                  owner's buffer (written by the Home from its DAT input).
+//   HNF_DN_WRITE   a write; the tracker sends the data packets once the DBID
+//                  has arrived (IHI 0050H B2.3.9.2).
+//   HNF_DN_CMO     forwarded cache maintenance; done on Comp.
+//   HNF_DN_ATOMIC  a forwarded atomic: the operand goes out once the DBID has
+//                  arrived, and the operation is done on Comp for an
+//                  AtomicStore, or once the original value has come back in
+//                  CompData for the others (IHI 0050H B2.3.3).
 //
 // The tracker also runs Request Retry as a Requester (IHI 0050H B2.10): a
-// RetryAck parks the operation until a PCrdGrant of the recorded type is
-// available, the request is then re-sent with AllowRetry deasserted, and a
-// credit that no parked operation can use is handed back with PCrdReturn once
-// nothing in flight could still be retried.
+// RetryAck parks the operation until a PCrdGrant of the recorded type from
+// the same Subordinate is available, the request is then re-sent with
+// AllowRetry deasserted, and a credit that no parked operation can use is
+// handed back with PCrdReturn once nothing in flight to that Subordinate
+// could still be retried. Credits are kept per Subordinate because a credit
+// is valid only at the node that granted it; a Home with one Subordinate
+// uses NUM_SUB = 1.
 //
 // The issue valids never look at their readies (design specification,
 // Section 2.8); a request or data packet is issued in a cycle where both are
@@ -25,19 +32,31 @@
 module chi_sn_tracker #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned NUM_OWNERS = 1,
-  parameter int unsigned OWNER_W = chi_pkg::clog2Min1(NUM_OWNERS)
+  parameter int unsigned NUM_SUB = 1,
+  parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
+    SUB_NODE_IDS [NUM_SUB] = '{default:'0},
+  parameter int unsigned OWNER_W = chi_pkg::clog2Min1(NUM_OWNERS),
+  parameter int unsigned SUB_W = chi_pkg::clog2Min1(NUM_SUB)
 ) (
   input  logic clk,
   input  logic resetn,
   input  logic [NUM_OWNERS-1:0] startValid,
   input  chi_hnf_pkg::chi_hnf_dn_e [NUM_OWNERS-1:0] startKind,
-  // Read: granules the data message covers. Write: granules to send.
+  // The Subordinate the operation goes to, as an index into SUB_NODE_IDS.
+  input  logic [NUM_OWNERS-1:0][SUB_W-1:0] startSub,
+  // Read: granules the data message covers. Write and atomic: granules to
+  // send.
   input  logic [NUM_OWNERS-1:0][3:0] startGranules,
+  // Atomic: granules of the value that comes back; zero for AtomicStore.
+  input  logic [NUM_OWNERS-1:0][3:0] startReadGranules,
   // The data does not pass the Home (DMT read, DWT write).
   input  logic [NUM_OWNERS-1:0] startNoData,
-  // Ask the Subordinate for a ReadReceipt (Order = Request accepted).
+  // Ask the Subordinate for a ReadReceipt (an ordered read).
   input  logic [NUM_OWNERS-1:0] startWantReceipt,
   output logic [NUM_OWNERS-1:0] busy,
+  // The request has left the Home and the operation waits on the
+  // Subordinate: a response, data, or a P-Credit after a RetryAck.
+  output logic [NUM_OWNERS-1:0] waiting,
   output logic [NUM_OWNERS-1:0] done,
   // A request being re-sent carries AllowRetry = 0 and this PCrdType.
   output logic [NUM_OWNERS-1:0] resend,
@@ -47,12 +66,14 @@ module chi_sn_tracker #(
   output logic [OWNER_W-1:0] reqIssueOwner,
   output logic reqIssueCreditReturn,
   output logic [3:0] reqIssueCreditType,
+  output logic [SUB_W-1:0] reqIssueCreditSub,
   input  logic datIssueReady,
   output logic datIssueValid,
   output logic [OWNER_W-1:0] datIssueOwner,
   output logic [1:0] datIssueDataId,
   output logic [chi_cfg_pkg::CHI_RSP_DBID_SLOT_W-1:0] datIssueTxnId,
-  // Responses and data from the Subordinate, already filtered by SrcID.
+  // Responses and data from the Subordinates, already filtered by the Home
+  // to what a Subordinate sent.
   input  logic rspValid,
   input  chi_pkg::chi_rsp_flit_t rsp,
   input  logic datValid,
@@ -73,6 +94,7 @@ module chi_sn_tracker #(
 
   dn_state_e [NUM_OWNERS-1:0] state;
   chi_hnf_dn_e [NUM_OWNERS-1:0] kind;
+  logic [NUM_OWNERS-1:0][SUB_W-1:0] sub;
   logic [NUM_OWNERS-1:0] noData;
   logic [NUM_OWNERS-1:0] wantReceipt;
   logic [NUM_OWNERS-1:0] accepted;
@@ -81,11 +103,13 @@ module chi_sn_tracker #(
   logic [NUM_OWNERS-1:0] gotReceipt;
   logic [NUM_OWNERS-1:0][3:0] granules;
   logic [NUM_OWNERS-1:0][3:0] granulesDone;
+  logic [NUM_OWNERS-1:0][3:0] rdGranules;
+  logic [NUM_OWNERS-1:0][3:0] rdGranulesDone;
   logic [NUM_OWNERS-1:0][CHI_RSP_DBID_SLOT_W-1:0] dbid;
   logic [NUM_OWNERS-1:0] resendReg;
   logic [NUM_OWNERS-1:0][3:0] creditTypeReg;
-  logic [15:0][7:0] credits;
-  logic [15:0][7:0] creditsNext;
+  logic [NUM_SUB-1:0][15:0][7:0] credits;
+  logic [NUM_SUB-1:0][15:0][7:0] creditsNext;
 
   logic [OWNER_W-1:0] reqPointer;
   logic [OWNER_W-1:0] datPointer;
@@ -95,14 +119,16 @@ module chi_sn_tracker #(
   logic datIssueFire;
   logic [NUM_OWNERS-1:0] complete;
   logic [NUM_OWNERS-1:0] takeCredit;
-  logic [15:0] creditWanted;
-  logic anyUnaccepted;
+  logic [NUM_SUB-1:0][15:0] creditWanted;
+  logic [NUM_SUB-1:0] anyUnaccepted;
   logic returnFound;
   int unsigned candidate;
   logic rspForOwner;
   logic [OWNER_W-1:0] rspOwner;
   logic datForOwner;
   logic [OWNER_W-1:0] datOwner;
+  logic grantKnown;
+  logic [SUB_W-1:0] grantSub;
 
   always_comb begin
     rspOwner = OWNER_W'(rsp.txnId);
@@ -113,8 +139,18 @@ module chi_sn_tracker #(
                   && ((dat.opcode == DAT_COMP_DATA)
                       || (dat.opcode == DAT_DATA_SEP_RESP));
 
+    // A PCrdGrant counts only for the Subordinate that sent it.
+    grantKnown = 1'b0;
+    grantSub = '0;
+    for (int unsigned s = 0; s < NUM_SUB; s++)
+      if (rsp.srcId == CHI_NODEID_SLOT_W'(SUB_NODE_IDS[s])) begin
+        grantKnown = 1'b1;
+        grantSub = SUB_W'(s);
+      end
+
     for (int unsigned owner = 0; owner < NUM_OWNERS; owner++) begin
       busy[owner] = state[owner] != DN_IDLE;
+      waiting[owner] = (state[owner] == DN_ACTIVE) || (state[owner] == DN_RETRY);
       resend[owner] = resendReg[owner];
       resendCreditType[owner] = creditTypeReg[owner];
       case (kind[owner])
@@ -128,49 +164,60 @@ module chi_sn_tracker #(
                             && (noData[owner]
                                 || (gotDbid[owner]
                                     && (granulesDone[owner] == granules[owner])));
+        HNF_DN_ATOMIC:
+          complete[owner] = gotDbid[owner]
+                            && (granulesDone[owner] == granules[owner])
+                            && ((rdGranules[owner] == '0)
+                                ? gotComp[owner]
+                                : (rdGranulesDone[owner] == rdGranules[owner]));
         default:
           complete[owner] = gotComp[owner];
       endcase
     end
   end
 
-  // P-Credit accounting. A parked operation takes a credit of its type while
-  // one is available, counting a grant that arrives this cycle and the
-  // credits lower-numbered waiters take first. A credit that nothing waits for
-  // is returned, but only once no request in flight could still be answered
-  // with a RetryAck.
+  // P-Credit accounting, per Subordinate. A parked operation takes a credit
+  // of its type while one is available, counting a grant that arrives this
+  // cycle and the credits lower-numbered waiters take first. A credit that
+  // nothing waits for is returned, but only once no request in flight to
+  // that Subordinate could still be answered with a RetryAck.
   always_comb begin
     creditWanted = '0;
-    anyUnaccepted = 1'b0;
+    anyUnaccepted = '0;
     for (int unsigned owner = 0; owner < NUM_OWNERS; owner++) begin
       if (state[owner] == DN_RETRY)
-        creditWanted[creditTypeReg[owner]] = 1'b1;
+        creditWanted[sub[owner]][creditTypeReg[owner]] = 1'b1;
       if ((state[owner] == DN_REQ)
           || ((state[owner] == DN_ACTIVE) && !accepted[owner]))
-        anyUnaccepted = 1'b1;
+        anyUnaccepted[sub[owner]] = 1'b1;
     end
 
     creditsNext = credits;
-    if (rspValid && (rsp.opcode == RSP_PCRD_GRANT))
-      creditsNext[rsp.pCrdType] = creditsNext[rsp.pCrdType] + 8'd1;
+    if (rspValid && (rsp.opcode == RSP_PCRD_GRANT) && grantKnown)
+      creditsNext[grantSub][rsp.pCrdType] =
+        creditsNext[grantSub][rsp.pCrdType] + 8'd1;
+
     takeCredit = '0;
     for (int unsigned owner = 0; owner < NUM_OWNERS; owner++) begin
       if ((state[owner] == DN_RETRY)
-          && (creditsNext[creditTypeReg[owner]] != '0)) begin
+          && (creditsNext[sub[owner]][creditTypeReg[owner]] != '0)) begin
         takeCredit[owner] = 1'b1;
-        creditsNext[creditTypeReg[owner]] =
-          creditsNext[creditTypeReg[owner]] - 8'd1;
+        creditsNext[sub[owner]][creditTypeReg[owner]] =
+          creditsNext[sub[owner]][creditTypeReg[owner]] - 8'd1;
       end
     end
 
     returnFound = 1'b0;
     reqIssueCreditType = '0;
-    for (int unsigned type_ = 0; type_ < 16; type_++)
-      if (!returnFound && (credits[type_] != '0) && !creditWanted[type_]
-          && !anyUnaccepted) begin
-        returnFound = 1'b1;
-        reqIssueCreditType = 4'(type_);
-      end
+    reqIssueCreditSub = '0;
+    for (int unsigned s = 0; s < NUM_SUB; s++)
+      for (int unsigned type_ = 0; type_ < 16; type_++)
+        if (!returnFound && (credits[s][type_] != '0)
+            && !creditWanted[s][type_] && !anyUnaccepted[s]) begin
+          returnFound = 1'b1;
+          reqIssueCreditType = 4'(type_);
+          reqIssueCreditSub = SUB_W'(s);
+        end
   end
 
   always_comb begin
@@ -196,8 +243,9 @@ module chi_sn_tracker #(
       if (candidate >= NUM_OWNERS)
         candidate = candidate - NUM_OWNERS;
       if (!datOwnerFound && (state[candidate] == DN_ACTIVE)
-          && (kind[candidate] == HNF_DN_WRITE) && !noData[candidate]
-          && gotDbid[candidate]
+          && ((kind[candidate] == HNF_DN_WRITE)
+              || (kind[candidate] == HNF_DN_ATOMIC))
+          && !noData[candidate] && gotDbid[candidate]
           && ((granules[candidate] & ~granulesDone[candidate]) != '0)) begin
         datOwnerFound = 1'b1;
         datIssueOwner = OWNER_W'(candidate);
@@ -223,6 +271,7 @@ module chi_sn_tracker #(
         state[owner] <= DN_IDLE;
         kind[owner] <= HNF_DN_READ;
       end
+      sub <= '0;
       noData <= '0;
       wantReceipt <= '0;
       accepted <= '0;
@@ -231,6 +280,8 @@ module chi_sn_tracker #(
       gotReceipt <= '0;
       granules <= '0;
       granulesDone <= '0;
+      rdGranules <= '0;
+      rdGranulesDone <= '0;
       dbid <= '0;
       resendReg <= '0;
       creditTypeReg <= '0;
@@ -242,7 +293,8 @@ module chi_sn_tracker #(
       done <= '0;
       credits <= creditsNext;
       if (reqIssueFire && reqIssueCreditReturn)
-        credits[reqIssueCreditType] <= creditsNext[reqIssueCreditType] - 8'd1;
+        credits[reqIssueCreditSub][reqIssueCreditType] <=
+          creditsNext[reqIssueCreditSub][reqIssueCreditType] - 8'd1;
 
       if (reqIssueFire && !reqIssueCreditReturn)
         reqPointer <= (int'(reqIssueOwner) == (NUM_OWNERS - 1))
@@ -257,7 +309,10 @@ module chi_sn_tracker #(
             if (startValid[owner]) begin
               state[owner] <= DN_REQ;
               kind[owner] <= startKind[owner];
+              sub[owner] <= startSub[owner];
               granules[owner] <= startGranules[owner];
+              rdGranules[owner] <= (startKind[owner] == HNF_DN_ATOMIC)
+                                   ? startReadGranules[owner] : '0;
               noData[owner] <= startNoData[owner];
               wantReceipt[owner] <= startWantReceipt[owner];
               accepted[owner] <= 1'b0;
@@ -265,6 +320,7 @@ module chi_sn_tracker #(
               gotComp[owner] <= 1'b0;
               gotReceipt[owner] <= 1'b0;
               granulesDone[owner] <= '0;
+              rdGranulesDone[owner] <= '0;
               resendReg[owner] <= 1'b0;
             end
           end
@@ -307,8 +363,12 @@ module chi_sn_tracker #(
             if (datForOwner && (datOwner == OWNER_W'(owner))) begin
               accepted[owner] <= 1'b1;
               for (int unsigned g = 0; g < 4; g++)
-                if ((g >= int'(dat.dataId)) && (g < (int'(dat.dataId) + STEP)))
-                  granulesDone[owner][g] <= 1'b1;
+                if ((g >= int'(dat.dataId)) && (g < (int'(dat.dataId) + STEP))) begin
+                  if (kind[owner] == HNF_DN_ATOMIC)
+                    rdGranulesDone[owner][g] <= 1'b1;
+                  else
+                    granulesDone[owner][g] <= 1'b1;
+                end
             end
             if (datIssueFire && (datIssueOwner == OWNER_W'(owner))) begin
               for (int unsigned g = 0; g < 4; g++)

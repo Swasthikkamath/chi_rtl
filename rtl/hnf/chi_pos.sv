@@ -13,14 +13,15 @@
 // cleared when it is allocated again, so a reused index is never mistaken for
 // an older transaction.
 //
-// RESERVED entries are held back from requests that arrive with AllowRetry
-// set, so a request re-sent on a P-Credit always finds one
-// (IHI 0050H B2.10). reservedOnly qualifies the allocation accordingly.
+// reserved entries are held back from requests that arrive with AllowRetry
+// set: one for every P-Credit the Home has granted and not yet seen used or
+// returned, so a request re-sent on a P-Credit always finds a free entry
+// (IHI 0050H B2.10.2).
 module chi_pos #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned DEPTH = CFG.posEntries,
   parameter int unsigned KEY_W = CFG.addrW - 6,
-  parameter int unsigned RESERVED = 0,
+  parameter int unsigned RESERVE_W = 16,
   parameter int unsigned IDX_W = chi_pkg::clog2Min1(DEPTH)
 ) (
   input  logic clk,
@@ -28,6 +29,7 @@ module chi_pos #(
   input  logic allocValid,
   // The request may use a reserved entry: it was re-sent on a P-Credit.
   input  logic allocCredited,
+  input  logic [RESERVE_W-1:0] reserved,
   output logic allocReady,
   output logic [IDX_W-1:0] allocIndex,
   input  logic [KEY_W-1:0] allocKey,
@@ -42,6 +44,8 @@ module chi_pos #(
   output logic [DEPTH-1:0] active,
   output logic [DEPTH-1:0] started,
   output logic [IDX_W:0] freeCount,
+  // Free entries beyond the reserved ones.
+  output logic [IDX_W:0] unreservedCount,
   // Packed rather than unpacked because the bound ordering assertions take
   // these arrays as ports, and an unpacked array port is not portable across
   // every simulator's bind implementation.
@@ -72,8 +76,10 @@ module chi_pos #(
       end
     end
     freeCount = (IDX_W+1)'(freeTotal);
-    // An uncredited request may not take the last RESERVED free entries.
-    allocReady = freeFound && (allocCredited || (freeTotal > RESERVED));
+    unreservedCount = (freeTotal > int'(reserved))
+                      ? (IDX_W+1)'(freeTotal - int'(reserved)) : '0;
+    // An uncredited request may not take a reserved entry.
+    allocReady = freeFound && (allocCredited || (unreservedCount != '0));
     allocIndex = freeIndex;
   end
 

@@ -45,6 +45,10 @@ module chi_hnf_top #(
   parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     RNF_NODE_IDS [NUM_RNF] = '{default:'0},
+  // Every Requester that may send to this Home, for Request Retry.
+  parameter int unsigned NUM_REQUESTERS = NUM_RNF,
+  parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
+    REQUESTER_NODE_IDS [NUM_REQUESTERS] = '{default:'0},
   // Capabilities of the SN-F this Home is striped to and of every RN-F as a
   // DCT forwarder (IHI 0050H B16.1.3, B16.1.5).
   parameter bit SN_DMT_CAP = 1'b1,
@@ -99,6 +103,7 @@ module chi_hnf_top #(
   localparam int unsigned KEY_W = LINE_W + CHI_PAS_W;
   localparam int unsigned RETRY_RECORDS =
     (CFG.retryRecords > 0) ? CFG.retryRecords : 1;
+  localparam int unsigned RESERVE_W = 16;
   localparam int unsigned DAT_BYTES = CFG.dataW / 8;
   localparam int unsigned STEP = datIdStep(CFG);
   localparam int unsigned POISON_PER_BEAT = CFG.dataW / 64;
@@ -109,6 +114,8 @@ module chi_hnf_top #(
   generate
     begin : chi_cfg_check
       initial begin
+        if (NUM_REQUESTERS == 0)
+          $fatal(1, "chi_hnf_top NUM_REQUESTERS must be at least 1: Request Retry has to know whom it owes a P-Credit");
         if (VICTIM_DEPTH == 0)
           $fatal(1, "chi_hnf_top VICTIM_DEPTH must be at least 1: a directory eviction needs a victim entry to snoop out and write back the evicted line");
         // The owner index is the TxnID of every snoop and every downstream
@@ -371,20 +378,19 @@ module chi_hnf_top #(
   // Admission and Request Retry.
   logic dropRequest;
   logic resourcesAvailable;
-  logic retryAccept;
   logic retryAck;
   logic [3:0] retryClass;
-  logic retryRecordFull;
   logic [1:0] retryCategory;
   logic retryAckWant;
   logic retryHandshake;
+  logic retryGrantAllowed;
   logic retryGrantValid;
   logic retryGrantReady;
   logic [CHI_NODEID_SLOT_W-1:0] retryGrantTgtId;
   logic [3:0] retryGrantClass;
-  logic retryCreditsPending;
-  logic [7:0] retryPending [CHI_CREDIT_TYPES];
-  logic [7:0] retryOutstanding [CHI_CREDIT_TYPES];
+  logic [RESERVE_W-1:0] retryCreditsOutstanding;
+  logic retryGrantsOwed;
+  logic [POS_W:0] posUnreservedCount;
   logic requestHandshake;
   entry_t allocEntry;
 
@@ -482,7 +488,13 @@ module chi_hnf_top #(
   logic [NUM_OWNERS-1:0] dnStartNoData;
   logic [NUM_OWNERS-1:0] dnStartWantReceipt;
   logic [NUM_OWNERS-1:0] dnBusy;
+  logic [NUM_OWNERS-1:0] dnWaiting;
   logic [NUM_OWNERS-1:0] dnDone;
+  // What each POS entry waits for from outside the Home, for the bound
+  // completion assertions.
+  logic [POS_DEPTH-1:0] liveWaitSnoop;
+  logic [POS_DEPTH-1:0] liveWaitDownstream;
+  logic [POS_DEPTH-1:0] liveWaitRequester;
   logic [NUM_OWNERS-1:0] dnResend;
   logic [NUM_OWNERS-1:0][3:0] dnResendType;
   logic dnReqValid;
@@ -569,17 +581,18 @@ module chi_hnf_top #(
   // Transaction table, hazards, directory, exclusive monitor, stash decode.
   // ---------------------------------------------------------------------
   chi_pos #(
-    .CFG(CFG), .DEPTH(POS_DEPTH), .KEY_W(KEY_W), .RESERVED(0)
+    .CFG(CFG), .DEPTH(POS_DEPTH), .KEY_W(KEY_W), .RESERVE_W(RESERVE_W)
   ) pos (
     .clk, .resetn,
     .allocValid(posAllocValid), .allocCredited(!incomingReq.allowRetry),
+    .reserved(retryCreditsOutstanding),
     .allocReady(posAllocReady), .allocIndex(posAllocIndex),
     .allocKey(incomingKey), .allocRequester(incomingReq.srcId),
     .allocTxnId(incomingReq.txnId), .allocOpcode(incomingReq.opcode),
     .allocOrder(incomingReq.order),
     .startMask(posStartMask), .freeMask(posFreeMask),
     .active(posActive), .started(posStarted), .freeCount(posFreeCount),
-    .key(posKey), .requester(posRequester), .txnId(posTxnId),
+    .unreservedCount(posUnreservedCount), .key(posKey), .requester(posRequester), .txnId(posTxnId),
     .opcode(posOpcode), .order(posOrder), .older(posOlder)
   );
 
@@ -699,8 +712,10 @@ module chi_hnf_top #(
       retryCategory = 2'd2;
     else
       retryCategory = 2'd0;
-    // RetryAck is optional: when the record table is full the request is held
-    // with back-pressure instead, which keeps the credit accounting exact.
+    // A request that finds no entry it may use is retried, so the REQ input
+    // is always consumed (design specification, Section 9.7). Only a request
+    // from a node outside REQUESTER_NODE_IDS, or one claiming a P-Credit the
+    // Home never granted, is held with back-pressure instead.
     retryAckWant = reqInValid && !resourcesAvailable && retryAck;
     retryHandshake = retryAckWant && rspFifoReady;
     requestHandshake = reqInValid && resourcesAvailable;
@@ -739,28 +754,35 @@ module chi_hnf_top #(
           || (incomingReq.order == ORDER_ENDPOINT));
   end
 
+  // A grant reserves an entry for the request it invites. It needs an
+  // unreserved free entry beyond any an uncredited request takes this cycle,
+  // and the Home keeps at most retryRecords credits outstanding.
+  always_comb begin
+    retryGrantAllowed =
+      (int'(posUnreservedCount)
+       > ((posAllocValid && incomingReq.allowRetry) ? 1 : 0))
+      && (int'(retryCreditsOutstanding) < RETRY_RECORDS);
+  end
+
   chi_retry #(
-    .NODEID_W(CHI_NODEID_SLOT_W), .ENTRIES(RETRY_RECORDS),
-    .CREDIT_TYPES(CHI_CREDIT_TYPES)
+    .NODEID_W(CHI_NODEID_SLOT_W), .NUM_REQUESTERS(NUM_REQUESTERS),
+    .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS),
+    .CREDIT_TYPES(CHI_CREDIT_TYPES), .OUTSTANDING_W(RESERVE_W)
   ) retry (
     .clk, .resetn, .requestValid(reqInValid),
     .resourcesAvailable, .allowRetry(incomingReq.allowRetry),
     .requestCategory(retryCategory), .requestSrcId(incomingReq.srcId),
-    .requestQos(incomingReq.qos), .acceptRequest(retryAccept),
+    .requestQos(incomingReq.qos),
     .sendRetryAck(retryAck), .retryAckSent(retryHandshake),
-    .retryClass, .recordFull(retryRecordFull),
+    .retryClass,
     .creditUseValid(posAllocValid && !incomingReq.allowRetry),
-    .creditUseClass(incomingReq.pCrdType),
     .creditReturnValid(requestHandshake
                        && (incomingReq.opcode == REQ_PCRD_RETURN)),
-    .creditReturnClass(incomingReq.pCrdType),
-    // A grant promises the next request a POS entry; one credit is
-    // outstanding at a time.
-    .grantAllowed(posAllocReady && !retryCreditsPending),
+    .grantAllowed(retryGrantAllowed),
     .grantValid(retryGrantValid), .grantReady(retryGrantReady),
     .grantTgtId(retryGrantTgtId), .grantClass(retryGrantClass),
-    .pendingCount(retryPending), .creditsOutstanding(retryOutstanding),
-    .creditsPending(retryCreditsPending)
+    .creditsOutstanding(retryCreditsOutstanding),
+    .grantsOwed(retryGrantsOwed)
   );
 
   // ---------------------------------------------------------------------
@@ -1443,18 +1465,23 @@ module chi_hnf_top #(
   end
 
 
+  // The HN-F has one Subordinate, so every operation goes to index 0.
+  localparam logic [CHI_MAX_NODEID_W-1:0] SN_NODE_ID_TABLE [1] = '{SN_NODE_ID};
+
   chi_sn_tracker #(
-    .CFG(CFG), .NUM_OWNERS(NUM_OWNERS)
+    .CFG(CFG), .NUM_OWNERS(NUM_OWNERS),
+    .NUM_SUB(1), .SUB_NODE_IDS(SN_NODE_ID_TABLE)
   ) sn_tracker (
     .clk, .resetn,
     .startValid(dnStartValid), .startKind(dnStartKind),
-    .startGranules(dnStartGranules), .startNoData(dnStartNoData),
+    .startSub('0), .startGranules(dnStartGranules),
+    .startReadGranules('0), .startNoData(dnStartNoData),
     .startWantReceipt(dnStartWantReceipt),
-    .busy(dnBusy), .done(dnDone),
+    .busy(dnBusy), .waiting(dnWaiting), .done(dnDone),
     .resend(dnResend), .resendCreditType(dnResendType),
     .reqIssueReady(reqFifoReady), .reqIssueValid(dnReqValid),
     .reqIssueOwner(dnReqOwner), .reqIssueCreditReturn(dnReqCreditReturn),
-    .reqIssueCreditType(dnReqCreditType),
+    .reqIssueCreditType(dnReqCreditType), .reqIssueCreditSub(),
     .datIssueReady(datTrackerWins && datFifoReady),
     .datIssueValid(dnDatValid), .datIssueOwner(dnDatOwner),
     .datIssueDataId(dnDatDataId), .datIssueTxnId(dnDatTxnId),
@@ -1942,6 +1969,20 @@ module chi_hnf_top #(
         victimFree = 1'b1;
         victimFreeIndex = VB_W'(v);
       end
+  end
+
+  // A Requester owes write data once it has the DBID, CompAck once it has
+  // every response, and a stash target owes CompAck once it has the line.
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      liveWaitSnoop[i] = entry[i].snpPending != '0;
+      liveWaitDownstream[i] = dnWaiting[i];
+      liveWaitRequester[i] = (entry[i].wrOwed && !entry[i].dbidOwed)
+                             || (entry[i].compAckOwed && !entry[i].dbidOwed
+                                 && !entry[i].compOwed)
+                             || (entry[i].pullAckOwed
+                                 && (entry[i].pullGranSent == 4'hf));
+    end
   end
 
   always_comb begin

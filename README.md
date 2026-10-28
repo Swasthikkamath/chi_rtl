@@ -9,9 +9,11 @@ The RTL covers configurable Issue H flit records, three selectable internal
 topologies built from one crosspoint with automatic placement, address mapping, a real CHI link layer on every node port, and
 coherent and noncoherent Home Node transaction paths. Implemented protocol
 behaviour includes L-Credits and link activation, flit parity, the Request
-Retry credit loop with `RetryAck`, `PCrdGrant` and `PCrdReturn`, a coherent
-Home that runs one transaction per POS entry concurrently with same-location
-ordering and parallel snoops, a directory with dirty-safe eviction, atomic transactions, cache
+Retry credit loop with `RetryAck`, `PCrdGrant` and `PCrdReturn` (with every
+granted credit holding an entry in reserve), a coherent Home that runs one
+transaction per POS entry concurrently with same-location ordering and
+parallel snoops, a non-coherent Home with concurrent, Endpoint-ordered
+transactions, a directory with dirty-safe eviction, atomic transactions, cache
 stashing with Data Pull, and `PrefetchTgt` routing.
 
 Behaviour that is deliberately partial or absent includes multiple interfaces
@@ -135,7 +137,7 @@ simulator would check that this flow cannot.
 | `rtl/noc/` | One parameterized crosspoint (`chi_xp`: router, route compute, arbitration) and the mesh, ring and crossbar wiring around it |
 | `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
 | `rtl/hnf/` | HN-F per-entry transactions: POS and hazards, directory and victim buffer, snoops, downstream trackers, retry credits, stash, atomics, exclusives; DCT, DMT and DWT decision blocks |
-| `rtl/hni/` | HN-I forwarding and the project-defined configuration access |
+| `rtl/hni/` | HN-I transactions to SN-Is, the CHI MMIO configuration window, and the APB HN-F policy registers |
 | `rtl/mn/` | Sequential DVM distribution |
 | `rtl/sva/` | Bound local safety, stability and protocol-field assertions with covers |
 | `rtl/top/` | Product top and the compile and elaboration harnesses |

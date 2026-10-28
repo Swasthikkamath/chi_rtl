@@ -132,6 +132,8 @@ package chi_cfg_pkg;
     int unsigned        retryRecords;
     // Snoops one HN-F may have in flight across all its transactions.
     int unsigned        maxOutstandingSnoops;
+    // Transactions one HN-I runs at once.
+    int unsigned        hniEntries;
     int unsigned        lcrdDepth;
     int unsigned        exclMonitors;
     int unsigned        interleaveGranule;
@@ -165,6 +167,7 @@ package chi_cfg_pkg;
     topology: MESH_2D, meshX: 3, meshY: 3, numXp: 4, numDevPortsPerXp: 2,
     snpFilterEntries: 1024, snpFilterWays: 4,
     posEntries: 32, retryRecords: 16, maxOutstandingSnoops: 16,
+    hniEntries: 8,
     lcrdDepth: 8, exclMonitors: 32,
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,

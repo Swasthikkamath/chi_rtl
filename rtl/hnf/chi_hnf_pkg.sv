@@ -63,11 +63,12 @@ package chi_hnf_pkg;
     HNF_ERR_UNSUPPORTED = 3'd4   // the HN-F does not support the opcode
   } chi_hnf_err_e;
 
-  // Downstream operation a POS or victim entry asks the SN tracker for.
+  // Downstream operation an owner asks the SN tracker for.
   typedef enum logic [1:0] {
-    HNF_DN_READ  = 2'd0,  // ReadNoSnp into the entry's line buffer
-    HNF_DN_WRITE = 2'd1,  // WriteNoSnpFull or WriteNoSnpPtl from the buffer
-    HNF_DN_CMO   = 2'd2   // forwarded cache maintenance
+    HNF_DN_READ   = 2'd0,  // ReadNoSnp into the owner's line buffer
+    HNF_DN_WRITE  = 2'd1,  // a write from the buffer
+    HNF_DN_CMO    = 2'd2,  // forwarded cache maintenance
+    HNF_DN_ATOMIC = 2'd3   // a forwarded atomic: operand out, value back
   } chi_hnf_dn_e;
 
   function automatic logic isAtomicOpcode(input chi_req_opcode_e op);

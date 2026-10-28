@@ -49,5 +49,7 @@ rtl/sva/chi_mn_sva.sv
 rtl/sva/chi_ordering_sva.sv
 rtl/sva/chi_hnf_ordering_sva.sv
 rtl/sva/chi_snoop_sva.sv
+rtl/sva/chi_hni_sva.sv
+rtl/sva/chi_home_liveness_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv

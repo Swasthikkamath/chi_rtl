@@ -115,10 +115,12 @@ packed flit field by itself is carriage, not implementation.
 | RN cache states and transitions | B4.1, B4.6--B4.8 | Not implemented | Out of project scope. State encodings exist in `chi_pkg` and the required model is documented in Section 10, but there is no RN cache controller here. |
 | Home concurrency, POS and same-location hazards | B2.7.5, B4.11.2 | Implemented | Every POS entry runs its own transaction. Transactions to different `{line, PAS}` locations proceed together; one location runs one transaction at a time in arrival order (age matrix in `chi_pos`, start permission in `chi_hazard`). |
 | Inclusive precise snoop filter | B4.4, B4.6 | Partial | Sharer vector and owner per `{line, PAS}`; one lookup and one update per cycle; eviction never takes a way a transaction holds, and the evicted location is snooped out with `SnpCleanInvalid` and written back by the victim buffer. Silent evictions leave stale sharer bits, which cost a snoop. Section 9.3. |
-| Request Retry, `RetryAck` and `PCrdGrant` | B2.5.5, B2.10 | Implemented | `chi_retry` records the `SrcID`, QoS and credit class behind every `RetryAck`, allocates one of four P-Credit types, and issues `PCrdGrant` naming the recorded Requester with no `TxnID` and no `DBID`. QoS selects which record is granted and age breaks ties. |
+| Request Retry, `RetryAck` and `PCrdGrant` | B2.5.5, B2.10 | Implemented | HN-F and HN-I. `chi_retry` counts the grants it owes per Requester and credit type, so a Home can always answer with `RetryAck` and its REQ input is never held. One of four P-Credit types is used; `PCrdGrant` names the Requester, carries no `TxnID` and no `DBID`, and goes to the highest recorded QoS, then round-robin. Every granted credit holds a transaction entry in reserve, so a request re-sent on it is always accepted. |
+| Deadlock freedom across REQ, RSP, SNP and DAT | B2.10, B4.11, B2.7.5.3 | Implemented | Every Home accepts RSP and DAT unconditionally into storage reserved before the message was invited and answers REQ with an entry or `RetryAck`, so no channel waits on another in a cycle. The argument is in Section 9.7; `chi_home_liveness_sva` states its environment assumptions and the entry-completion property for a formal tool, with per-entry bounded-completion covers in every build. |
 | P-Credit return | B2.5.6, B2.10.1 | Implemented | A granted credit leaves the accounting either when a request arrives with `AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`, which the Home accepts and discards. |
 | Exclusives | B6 | Partial | Checked when the entry starts, after same-location ordering. Exclusive loads register, `CleanUnique` and `WriteNoSnp` with `Excl` are checked; a failing `CleanUnique` sends no snoop and completes Shared, a failing `WriteNoSnp` writes nothing. The monitor is still keyed by SrcID and line without LPID or PAS and does not re-register on failure (Stage 7). |
 | Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
+| HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
@@ -195,7 +197,7 @@ the fabric, reached over the internal networks, and have no pins.
 | SN-F | `numSnf` | `snf[]` | 5--6 | Subordinate for coherent memory. Terminates the downstream reads and writes a Home issues, and is the target of `PrefetchTgt`. |
 | SN-I | `numSni` | `sni[]` | 7 | Subordinate for peripheral space. Same channel set as SN-F; the distinction is which SAM region kind selects it. |
 | HN-F | `numHnf` | internal | 8--11 | Coherent Home. Serialization point, snoop filter, POS, retry credits and the offload engines. Section 2.5 and Section 9. |
-| HN-I | `numHni` | internal | 12 | Non-coherent Home. Relays to SN-I through its own SAM and hosts the CHI MMIO configuration window. |
+| HN-I | `numHni` | internal | 12 | Non-coherent Home. Runs `hniEntries` transactions to SN-Is through its own SAM and hosts the CHI MMIO configuration window. Section 9.8. |
 | MN | `numMn` | internal | 13 | Misc Node. Sequences DVM operations to the DVM-capable Requesters. |
 
 : Table 2.1 Node classes, their count fields, and their ordinals in the default configuration
@@ -279,7 +281,7 @@ which is the useful way to read the hierarchy.
 | Link | `chi_link_port`, `chi_link_rx`, `chi_link_tx`, `chi_lcrd_mgr`, `chi_link_fsm` | 8 ports | L-Credit pools, receive buffers, activation state, parity |
 | Address decode | `chi_sam`, `chi_hn_hash`, `chi_prefetch_map` | 5 Requester-side, 1 in the HN-I | Region table, hash configuration |
 | Transport | `chi_noc_top`, `chi_xp` under `chi_mesh`, `chi_ring` or `chi_xbar` | 1, four networks wide | Crosspoint output FIFOs, arbiter age and round-robin state |
-| Protocol | `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm` | 4, 1, 1 | POS, snoop filter, retry records, exclusive monitors, transaction FSM state |
+| Protocol | `chi_hnf_top`, `chi_hni_top`, `chi_mn_dvm` | 4, 1, 1 | POS, snoop filter, retry counters, exclusive monitors, transaction state |
 
 : Table 2.3 The four layers, their modules, their instance counts in the default configuration, and the state each owns
 
@@ -382,12 +384,13 @@ The protocol layer is where a transaction stops being a flit in transit and
 becomes state. There are three endpoint types:
 
 - `chi_hnf_top`, the coherent Home, is the serialization point for a line.
-  It owns the snoop filter, the POS, the retry records and every engine that
+  It owns the snoop filter, the POS, the retry counters and every engine that
   acts on a coherent transaction. Section 2.5 shows its interior.
 - `chi_hni_top`, the non-coherent Home, has no coherence state at all. It
-  decodes the address a second time through its own `chi_sam`, relays the
-  transaction to an SN-I, and recognises the CHI MMIO configuration window
-  described in Section 7.2. It also accepts and discards `PrefetchTgt`
+  decodes the address a second time through its own `chi_sam`, runs up to
+  `hniEntries` transactions to SN-Is under its own TxnIDs, keeps their order
+  per line and per Endpoint (Section 9.8), and recognises the CHI MMIO
+  configuration window described in Section 7.2. It also accepts and discards `PrefetchTgt`
   without responding, for the same reason the HN-F does.
 - `chi_mn_dvm`, the Misc Node, is the DVM sequencer. It unicasts `SnpDVMOp`
   to each DVM-capable Requester in turn and collects the responses before
@@ -474,7 +477,11 @@ chi_interconnect_top
 │   ├── chi_sn_tracker        (one downstream tracker per owner)
 │   └── chi_flit_fifo  x4     (REQ, RSP, SNP, DAT out)
 ├── hni_nodes[*] : chi_hni_top
-│   └── chi_sam
+│   ├── chi_sam
+│   ├── chi_pos               (entries, keys, age matrix)
+│   ├── chi_retry
+│   ├── chi_sn_tracker        (one tracker per entry, credits per SN-I)
+│   └── chi_flit_fifo  x3     (REQ, RSP, DAT out)
 ├── mn_nodes[*] : chi_mn_dvm
 ├── apb_cfg/policy_regs : chi_hnf_policy_regs     [CFG_APB]
 └── chi_noc_top
@@ -547,8 +554,9 @@ it is a parameter at all and what choosing it wrong costs.
 | `snpFilterEntries` | 1024 | positive, divisible by ways | Total Home directory entries. |
 | `snpFilterWays` | 4 | 1 through entries, exact divisor | Directory associativity. |
 | `posEntries` | 32 | positive | POS entries, each a concurrent transaction. |
-| `retryRecords` | 16 | positive | Retry record table depth, that is, the number of outstanding `RetryAck` records the Home can hold. |
+| `retryRecords` | 16 | positive | P-Credits a Home may have granted and not yet seen used or returned; each holds a transaction entry in reserve. |
 | `maxOutstandingSnoops` | 16 | positive when `numHnf > 0` | Snoops one HN-F may have in flight across all its transactions. |
+| `hniEntries` | 8 | positive when `numHni > 0`, and within the TxnID space | Transactions one HN-I runs at once, each with its own buffers. |
 | `lcrdDepth` | 8 | 2 or greater | L-Credits advertised per channel and receive-buffer depth. |
 | `exclMonitors` | 32 | positive | Exclusive monitor entries. |
 | `interleaveGranule` | 64 | power of two, at least 64 | HN hash stripe bytes. |
@@ -697,7 +705,8 @@ open, not because interoperability demands it.
 | `meshX`, `meshY`, `numXp`, `numDevPortsPerXp` | Fabric shape is microarchitecture. | Hop count against crosspoint count; also consumes NodeID bits. |
 | `snpFilterEntries`, `snpFilterWays` | CHI requires a Home to track sharers but not how. | Directory area against back-invalidation traffic. See Section 3.2.3. |
 | `posEntries` | Transaction tracking depth is unspecified. | Concurrent transactions per Home against entry state and line-buffer area. |
-| `retryRecords` | The Home decides how many retried Requesters it will remember. | Retry table area against how often the Home must back-pressure instead of retrying. |
+| `retryRecords` | The Home decides how many P-Credits it has out at once. | Entries idling in reserve for re-sent requests against how quickly retried Requesters are invited back. |
+| `hniEntries` | Transaction tracking depth is unspecified. | Concurrent HN-I transactions against two 64-byte buffers per entry. |
 | `maxOutstandingSnoops` | CHI bounds snoops only per location and Snoopee (B4.11.2); how many a Home has in flight is its choice. | Snoop latency overlap against the snoop traffic a Home can inject at once. |
 | `lcrdDepth` | CHI fixes the credit protocol, not the pool size. | Receive-buffer area against sustainable throughput. See Section 3.2.3. |
 | `exclMonitors` | Monitor count is unspecified; the architecture permits spurious failure. | Monitor area against the spurious exclusive-failure rate. |
@@ -749,11 +758,12 @@ round trip. Larger values also let different transactions snoop together.
 The count costs only a small counter; what it limits is the snoop traffic one
 Home can put on the SNP network at once.
 
-**`retryRecords` bounds how many Requesters can be waiting for a P-Credit.**
-When the table is full this design back-pressures the request rather than
-issuing another `RetryAck`, which keeps credit accounting exact at the cost of
-holding the channel. Section 9.4 covers why that choice was made. Sizing it
-below the number of Requesters guarantees back-pressure under load.
+**`retryRecords` bounds how many P-Credits a Home has out.** A grant holds an
+entry in reserve until the Requester re-sends its request or returns the
+credit, so a large value can leave many entries idle while Requesters are slow
+to come back, and a small one slows how fast retried Requesters are invited
+back. It never causes back-pressure: owed grants are counted per Requester and
+credit type, so `RetryAck` is always available (Section 9.4).
 
 **`nodeIdW` has a floor set by the fabric geometry, not by the node count.**
 The NodeID carries the routing fields, so
@@ -1037,7 +1047,7 @@ REQ, RSP, SNP and DAT are separate networks with separate routers, FIFOs and
 arbiters, so a flit of one channel never occupies a resource another channel
 needs. The arguments below are therefore made per channel. Each relies on the
 consumption assumption that an endpoint eventually accepts every flit addressed
-to it; Section 9 discusses what the Home does to honour it.
+to it; Section 9.7 shows that the Homes honour it.
 
 **Mesh.** XY routing takes every X hop before any Y hop. A channel dependency
 from a Y link to an X link would need a Y-to-X turn, which the routing never
@@ -1232,13 +1242,15 @@ The HN-I recognizes any address in the 4 KiB window at `CFG_MMIO_BASE`.
 
 : Table 7.2 CHI MMIO offsets recognised by the HN-I
 
-A read returns one `CompData`; a write consumes the next DAT flit and returns
-`Comp`. The path does not check the DAT opcode, byte enables, security or
-PAS, privilege, base and limit validity, target validity, or quiescence.
+A read returns one `CompData` with the 64-bit register at its natural byte
+position (B2.9.4). A write is an ordinary write transaction: `DBIDResp`, the
+data, then `Comp` once the register has taken the value. Configuration
+accesses to the register line are serialized like any other line at the HN-I
+(Section 9.8). The path does not check byte enables, security or PAS,
+privilege, base and limit validity, target validity, or quiescence.
 Unsupported offsets silently read SELECT or ignore the write and still
-complete successfully, and an invalid SELECT payload is silently ignored.
-Only one HN-I transaction is active at a time. This is a reference control
-path, not a hardened management interface.
+complete successfully, and an invalid SELECT payload is silently ignored. This
+is a reference control path, not a hardened management interface.
 
 # 8 Transaction flows
 
@@ -1354,15 +1366,14 @@ performed at the Home; there is no far-atomic negotiation.
 
 : Table 8.6 Request Retry followed by a P-Credit grant
 
-RTL status: Implemented. The Home records the `SrcID`, QoS and credit class
-behind each `RetryAck` in a `retryRecords`-deep table, and the record is taken
-when the `RetryAck` is accepted rather than when it is first presented, so a
-back-pressured response channel cannot book the same Requester twice. QoS
-selects which record is granted next and age breaks ties. `PCrdGrant` names
-the recorded Requester and carries no `TxnID` and no `DBID`. When the record
-table is full, the request is back-pressured instead of retried, which keeps
-the credit accounting exact. A RetryAck is given only when no POS entry is
-free; a busy location is never a reason to retry.
+RTL status: Implemented, at the HN-F and the HN-I. The Home counts the grant
+it owes when the `RetryAck` is accepted by its output stage, so a
+back-pressured response channel cannot count a Requester twice. Grants go to
+the highest recorded QoS, then round-robin; `PCrdGrant` carries no `TxnID` and
+no `DBID`. A grant is sent only when a free entry exists beyond those already
+reserved, and the entry stays reserved until the request comes back or the
+credit is returned, so step 4 is always accepted. A `RetryAck` is given only
+when no entry is free; a busy location is never a reason to retry.
 
 ## 8.7 WriteUniqueFullStash with Data Pull
 
@@ -1509,13 +1520,23 @@ to the grant (Table B4.27) or the transaction kind.
 
 ## 9.4 Retry credits
 
-`chi_retry` records the `SrcID`, the QoS and the credit class behind every
-`RetryAck` and reports the pending and outstanding counts per class.
-`CHI_CREDIT_TYPES` is 4 of the 16 `PCrdType` values Issue H allows. A request
-is retried only when no POS entry is free; a busy location is never a reason.
-A grant is issued only while an entry is free and no earlier grant is
-outstanding. A credit leaves the accounting when a request arrives with
-`AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`.
+`chi_retry` keeps, per Requester and credit type, the number of grants it owes.
+A Requester has at most 1024 requests outstanding (B2.4.2), so the counters
+cannot overflow and a Home can answer any request with `RetryAck`: its REQ
+input is never held because retry state is full. `CHI_CREDIT_TYPES` is 4 of
+the 16 `PCrdType` values Issue H allows. A request is retried only when no
+entry is free for it; a busy location is never a reason.
+
+Credits are reserved, not merely granted. `creditsOutstanding` counts credits
+granted and not yet used or returned, and `chi_pos` keeps that many free
+entries back from requests that arrive with `AllowRetry` set. A grant needs a
+free entry beyond the reserved ones and beyond any an uncredited request takes
+in the same cycle, so free entries never fall below reserved ones and a
+request re-sent on a credit always finds one (B2.10.2). The credit leaves the
+count when the re-sent request is allocated or when the Requester returns it
+with `PCrdReturn`. Only a request from a node the Home does not know, or one
+that claims a credit it was never granted, can find no entry; it is held with
+back-pressure.
 
 ## 9.5 Ordering
 
@@ -1536,7 +1557,106 @@ Subordinate. The Home sends only `ReadNoSnp`, `WriteNoSnpFull`,
 and `Order` zero. A RetryAck from the SN-F parks the tracker until a
 `PCrdGrant` of the recorded type arrives; the request is then re-sent with
 `AllowRetry` deasserted. A credit nothing waits for is returned with
-`PCrdReturn` once no request in flight could still be retried.
+`PCrdReturn` once no request in flight could still be retried. Credits are
+kept per Subordinate, because a credit is good only at the node that granted
+it; the HN-I uses this for its several SN-Is.
+
+## 9.7 Deadlock freedom across the four channels
+
+Section 5.6 shows that each channel's network is deadlock free provided every
+endpoint eventually accepts every flit addressed to it. This section shows that
+the Homes meet that condition and that no dependency between channels closes a
+cycle. It takes from the environment only what CHI requires of it:
+
+- E1. An RN-F answers every snoop without waiting for its own outstanding
+  requests (B4.11.1).
+- E2. A Requester accepts every response and data message of a request it has
+  outstanding, and sends write data once it has the DBID and CompAck once it
+  has the responses CompAck follows, without waiting for another request; an
+  OWO Requester sends CompAck after DBIDResp without waiting for Comp
+  (B2.7.5.3).
+- E3. A Subordinate answers every request it accepted, and follows every
+  `RetryAck` with a `PCrdGrant` (B2.10).
+- E4. Every endpoint returns L-Credits for the flits it receives.
+
+What the Homes guarantee:
+
+- H1. RSP and DAT inputs are always ready. Every message a Home receives lands
+  in storage reserved before the message was invited: a snoop response or its
+  data in the owner's line buffer, Requester data in the buffer its DBID
+  names, Subordinate data in the buffer of the owner whose TxnID it carries,
+  and CompAck in entry state.
+- H2. The REQ input is consumed whenever the RSP output stage can take a
+  `RetryAck`: a request is allocated an entry, dropped (`PCrdReturn`,
+  `PrefetchTgt`), or retried. Retry state cannot fill (Section 9.4).
+- H3. A granted P-Credit holds an entry in reserve, so a re-sent request never
+  needs a second retry and is never held.
+- H4. An entry waits only on older entries (the same location, an older ordered
+  request from its source), on its output stages, on the messages E1 to E3
+  promise, and on shared engines that serve entries in rotation. The waits
+  among entries follow age, so they cannot form a cycle, and the oldest entry
+  for a location waits on no other entry.
+- H5. A directory update that needs a victim entry waits for one; victim
+  entries depend only on snoop responses (E1) and Subordinate writes (E3),
+  never on POS entries, so they always drain.
+
+The channels then depend on each other only in one direction. REQ from a
+Requester is consumed by H2, which needs only RSP. REQ from a Home is consumed
+by a Subordinate (E3, E4). SNP is consumed by RN-Fs (E1, E4), whose answers
+travel on RSP and DAT. RSP and DAT are consumed unconditionally everywhere (H1,
+E2, E4). No dependency leaves RSP or DAT, so the inter-channel graph is
+acyclic.
+
+POS full turns new requests into `RetryAck` and never stops RSP or DAT; the
+entries in the full POS complete by H4 and H5, and each completion lets a grant
+go out. A retried Requester waits only for its grant, the grant only for an
+unreserved free entry, and the re-sent request only for its reserved entry.
+A snoop waits only for an SNP output slot and for its response (E1); at most
+`maxOutstandingSnoops` are in flight per HN-F, and every response is accepted.
+The HN-I has the same structure (Section 9.8); its OWO writes wait for CompAck,
+which by E2 does not wait for anything the write holds.
+
+`RetryAck` has priority on the RSP output. The number of `RetryAck`s is bounded
+by the requests Requesters have outstanding, so completions can be delayed but
+not starved.
+
+`chi_home_liveness_sva` writes E1 to E4 as assumptions on each entry's wait
+states and output readies, and asserts that every allocated entry eventually
+frees. These are strong properties for a formal tool and are compiled only
+with `CHI_SVA_LIVENESS` defined; every build has a per-entry cover that an
+entry completes within 256 cycles.
+
+## 9.8 HN-I
+
+The HN-I is the Home for the address ranges its SAM maps to SN-Is. It keeps no
+coherence state but is an ordering point. Up to `hniEntries` transactions run
+at once, each with an entry in `chi_pos`, a request buffer and a response
+buffer. The entry index is the TxnID towards the SN-I and the DBID towards the
+Requester; no Requester TxnID is sent downstream (B2.4.2).
+
+Two rules order the transactions. One transaction per `{line, PAS}` runs at a
+time, in arrival order, which gives every observer one order per line (B4.11)
+and keeps Request Order. A request with Order = Endpoint goes to its SN-I only
+once every older ordered request from the same source has been accepted
+downstream (a `ReadReceipt`, `DBIDResp`, data or completion, never a
+`RetryAck`); the downstream request carries the same Order value, which HN-I to
+SN-I permits (Table B2.9), so the SN-I keeps the order from there.
+
+| Request | HN-I behaviour |
+|---------|----------------|
+| `ReadNoSnp`, `ReadOnce*` | `ReadNoSnp` to the SN-I; `ReadReceipt` on allocation when ordered; `CompData` from the buffer, with the SN-I's state for `ReadNoSnp` and I for `ReadOnce*`. |
+| Immediate and Combined writes | `DBIDResp` on allocation, the data into the buffer, then `WriteNoSnpFull`, `WriteNoSnpPtl` or `WriteNoSnpDef` to the SN-I. `Comp` follows the SN-I's unless the write has Early Write Acknowledge (never for `WriteNoSnpDef`, whose `Comp` carries the SN-I's answer, Table B4.29). An OWO write goes downstream only after its CompAck (B2.7.5.3). A Combined write's CMO is forwarded when it is a persist or Storage CMO and `CompCMO` follows it; other CMOs complete at the HN-I, which holds no data. |
+| `WriteNoSnpZero`, `WriteUniqueZero` | A full line of zeros to the SN-I, then `CompDBIDResp`. |
+| CMOs | Persist and Storage CMOs forwarded (`CleanSharedPersistSep` with ReturnNID naming the Requester); others completed at the HN-I. |
+| Atomics | Forwarded: the operand goes after the SN-I's DBID, and its `CompData` or `Comp` is returned to the Requester. |
+| `Evict`, `StashOnce*` | `Comp`, or `CompStashDone` for the separate forms; nothing is stashed. |
+| Allocating reads, CopyBacks, `CleanUnique`, `MakeUnique`, `DVMOp`, `ReadNoSnpSep`, unknown opcodes, unmapped addresses | NDERR, after any data the Requester owes (B9.1.1, B1.6). |
+| Configuration window | Section 7.2. |
+
+: Table 9.3 HN-I request handling
+
+`Excl` is passed to the SN-I and its `EXOK` passed back until the HN-I has an
+exclusive monitor of its own (Stage 7).
 
 # 10 RN-F boundary cache-state model
 
@@ -1609,9 +1729,10 @@ Reference throughput limits:
   bandwidth of each channel.
 - An HN-F runs up to `posEntries` transactions at once, one per location,
   with up to `maxOutstandingSnoops` snoops in flight, so a transaction's
-  snoops cost one round trip rather than one per sharer. The HN-I and the MN
-  process one transaction at a time, and DVMs add one full response round trip
-  per target.
+  snoops cost one round trip rather than one per sharer. An HN-I runs
+  `hniEntries` transactions, one per line, with ordered streams pipelined on
+  the SN-I's acceptance. The MN processes one transaction at a time, and DVMs
+  add one full response round trip per target.
 
 No timing constraints, synthesis reports, PPA results, latency measurements
 or performance guarantees are supplied.
@@ -1628,6 +1749,8 @@ or performance guarantees are supplied.
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
 | `chi_ordering_sva.sv` | pairwise `ONE_RUNNING_ENTRY_PER_LOCATION`, per-entry `START_ONLY_AFTER_OLDER_SAME_LOCATION`, `STARTED_IMPLIES_ACTIVE` | none |
 | `chi_hnf_ordering_sva.sv` | `ENDPOINT_ORDER_RESPECTED`, `ORDERED_REQUEST_STARTS_IN_ARRIVAL_ORDER` | none |
+| `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
+| `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
 | `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
 
@@ -1745,6 +1868,8 @@ rtl/sva/chi_mn_sva.sv
 rtl/sva/chi_ordering_sva.sv
 rtl/sva/chi_hnf_ordering_sva.sv
 rtl/sva/chi_snoop_sva.sv
+rtl/sva/chi_hni_sva.sv
+rtl/sva/chi_home_liveness_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```
@@ -1926,7 +2051,7 @@ the cross-references in the prose stay correct in every output format.
    L-Credits terminate at the node ports.
 3. Only flit parity is live. The scalar `*CHK` control and credit checks are
    declared and driven to zero.
-4. The HN-I and the MN serialize their transactions.
+4. The MN serializes its transactions.
 5. No RN cache controller is provided; Section 10 is the contract, not RTL.
 6. MultiReq and `CacheLineID`, PBHA, MTE tag semantics and MEC access control
    are carriage only. MPAM is carried but not enforced.
@@ -1946,11 +2071,10 @@ the cross-references in the prose stay correct in every output format.
     the design asserts `deactivate`, so although the link layer now implements
     the `LCrdReturn` exchange in both directions, the deactivation path has
     never been walked.
-12. A granted P-Credit reserves nothing. `chi_retry` grants a credit only
-    while a POS entry is free, but the entry is not held for the credited
-    request, so another request can take it first. The credited request is
-    then back-pressured until an entry frees rather than retried a second
-    time, which satisfies B2.10 but holds the REQ channel.
+12. A request from a node outside the Home's Requester list, or one that
+    claims a P-Credit it was never granted, cannot be retried and is held with
+    back-pressure; every request from a well-behaved Requester is allocated,
+    dropped or retried (Section 9.4).
 13. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
     performance characterization. The smoke run in Section 12.7 drives no
@@ -1968,7 +2092,7 @@ the cross-references in the prose stay correct in every output format.
 | Internal flow control | Ready/valid with registered crosspoint outputs | No claim of per-hop CHI L-Credits. |
 | Handshake structure | Valid never depends on its ready; forward and backward directions live in separate blocks | The fabric elaborates with no circular combinational logic. |
 | P-Credit types | 4 of the 16 Issue H values, indexed by request category | Resources are partitioned by category rather than per requester. |
-| Retry record capacity | `retryRecords` entries; back-pressure when full | Credit accounting stays exact instead of over-promising. |
+| Retry state | Owed grants counted per Requester and type; `retryRecords` credits out at once, each holding an entry | `RetryAck` is always possible; a re-sent request is always accepted. |
 | `PrefetchTgt` target | A separate address-to-SN-F mapper | The hint reaches memory without consuming Home resources. |
 | HN selection | XOR-folded granule modulo `numHnf` | Supports non-power-of-two Home counts. |
 | SAM overlap | The lowest region index wins | A security rejection at the first match does not fall through. |

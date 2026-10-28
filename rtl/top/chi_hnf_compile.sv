@@ -34,7 +34,8 @@ module chi_hnf_compile (
   chi_hnf_top #(
     .CFG(CHI_CFG_DEFAULT), .HN_NODE_ID(HN_NODE_ID),
     .SN_NODE_ID(SN_NODE_ID), .NUM_RNF(NUM_RNF),
-    .RNF_NODE_IDS(RNF_NODE_IDS)
+    .RNF_NODE_IDS(RNF_NODE_IDS),
+    .NUM_REQUESTERS(NUM_RNF), .REQUESTER_NODE_IDS(RNF_NODE_IDS)
   ) hnf (
     .clk, .resetn, .policy(CHI_HNF_POLICY_DEFAULT),
     .reqInValid(1'b0), .reqInReady, .reqInFlit('0),
