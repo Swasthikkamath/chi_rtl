@@ -17,6 +17,11 @@
 //   0x08 ACTIVE  RO  policy the selected HN-F is using now
 //   0x0C COMMIT  WO  PSTRB[0] with PWDATA[0] = 1 copies every staged policy
 //                    into the active set, provided the fabric is quiescent
+//   0x10 SLC_MAINT RW write PWDATA[0] = 1 to clean the selected HN-F's SLC
+//                    (write back every dirty line), with PWDATA[1] = 1 to
+//                    clean and invalidate it; reads PRDATA[0] = busy until
+//                    the walk is done and every write-back has completed.
+//                    Writing while busy returns PSLVERR.
 module chi_hnf_policy_regs #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned NUM_HNF = (CFG.numHnf > 0) ? CFG.numHnf : 1,
@@ -38,7 +43,10 @@ module chi_hnf_policy_regs #(
   output logic PREADY,
   output logic PSLVERR,
   input  logic trafficQuiescent,
-  output chi_cfg_pkg::chi_hnf_policy_t policy [NUM_HNF]
+  output chi_cfg_pkg::chi_hnf_policy_t policy [NUM_HNF],
+  output logic [NUM_HNF-1:0] slcMaintStart,
+  output logic [NUM_HNF-1:0] slcMaintInvalidate,
+  input  logic [NUM_HNF-1:0] slcMaintBusy
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -47,6 +55,7 @@ module chi_hnf_policy_regs #(
   localparam logic [7:0] ADDR_STAGED = 8'h04;
   localparam logic [7:0] ADDR_ACTIVE = 8'h08;
   localparam logic [7:0] ADDR_COMMIT = 8'h0c;
+  localparam logic [7:0] ADDR_SLC_MAINT = 8'h10;
   localparam int unsigned SELECT_W = clog2Min1(NUM_HNF);
   localparam int unsigned POLICY_W = $bits(chi_hnf_policy_t);
 
@@ -79,6 +88,7 @@ module chi_hnf_policy_regs #(
       ADDR_STAGED: PRDATA = 32'(staged[selected]);
       ADDR_ACTIVE: PRDATA = 32'(policy[selected]);
       ADDR_COMMIT: PRDATA = '0;
+      ADDR_SLC_MAINT: PRDATA = 32'(slcMaintBusy[selected]);
       default: addressImplemented = 1'b0;
     endcase
 
@@ -96,6 +106,23 @@ module chi_hnf_policy_regs #(
       else if (PWRITE && (PADDR == ADDR_COMMIT) && PSTRB[0] && PWDATA[0]
                && !trafficQuiescent)
         PSLVERR = 1'b1;
+      else if (PWRITE && (PADDR == ADDR_SLC_MAINT)
+               && (!CFG.slcEn || slcMaintBusy[selected]))
+        PSLVERR = 1'b1;
+    end
+  end
+
+  always_ff @(posedge PCLK) begin
+    if (!PRESETn) begin
+      slcMaintStart <= '0;
+      slcMaintInvalidate <= '0;
+    end else begin
+      slcMaintStart <= '0;
+      if (transfer && PWRITE && !PSLVERR && (PADDR == ADDR_SLC_MAINT)
+          && PSTRB[0] && PWDATA[0]) begin
+        slcMaintStart[selected] <= 1'b1;
+        slcMaintInvalidate[selected] <= PWDATA[1];
+      end
     end
   end
 

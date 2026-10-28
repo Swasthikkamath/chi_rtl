@@ -252,6 +252,69 @@ package chi_pkg;
     return mask[pas];
   endfunction
 
+  // SECDED (72,64): a Hamming code over positions 1..71, check bits at the
+  // power-of-two positions and data bits in order at the others, plus an
+  // overall parity bit. Single-bit errors anywhere are corrected; double-bit
+  // errors are detected.
+  function automatic logic [7:0] secdedEncode(input logic [63:0] data);
+    logic [71:1] code;
+    logic [7:0] check;
+    int unsigned bitIndex;
+    code = '0;
+    bitIndex = 0;
+    for (int unsigned position = 1; position <= 71; position++)
+      if ((position & (position - 1)) != 0) begin
+        code[position] = data[bitIndex];
+        bitIndex++;
+      end
+    check = '0;
+    for (int unsigned k = 0; k < 7; k++)
+      for (int unsigned position = 1; position <= 71; position++)
+        if (((position >> k) & 1) != 0)
+          check[k] = check[k] ^ code[position];
+    check[7] = (^data) ^ (^check[6:0]);
+    return check;
+  endfunction
+
+  // Returns the corrected data; corrected is set for a single-bit error,
+  // uncorrectable for a double-bit error.
+  function automatic logic [63:0] secdedDecode(
+    input  logic [63:0] data,
+    input  logic [7:0] check,
+    output logic corrected,
+    output logic uncorrectable
+  );
+    logic [7:0] expected;
+    logic [6:0] syndrome;
+    logic parityError;
+    logic [63:0] fixed;
+    int unsigned bitIndex;
+    expected = secdedEncode(data);
+    syndrome = expected[6:0] ^ check[6:0];
+    parityError = (^data) ^ (^check);
+    fixed = data;
+    corrected = 1'b0;
+    uncorrectable = 1'b0;
+    if (syndrome != '0) begin
+      if (parityError) begin
+        corrected = 1'b1;
+        bitIndex = 0;
+        for (int unsigned position = 1; position <= 71; position++)
+          if ((position & (position - 1)) != 0) begin
+            if (position == int'(syndrome))
+              fixed[bitIndex] = !fixed[bitIndex];
+            bitIndex++;
+          end
+      end else begin
+        uncorrectable = 1'b1;
+      end
+    end else if (parityError) begin
+      // Only the overall parity bit is wrong.
+      corrected = 1'b1;
+    end
+    return fixed;
+  endfunction
+
   function automatic logic pasMecIdApplicable(input chi_pas_e pas);
     return (pas == PAS_REALM) || (pas == PAS_SYSTEM_AGENT)
            || (pas == PAS_NON_SECURE_PROTECTED);

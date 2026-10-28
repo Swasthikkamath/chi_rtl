@@ -82,7 +82,13 @@ module chi_hnf_top #(
   output logic datOutValid,
   input  logic datOutReady,
   output chi_pkg::chi_noc_flit_t datOutFlit,
-  output logic idle
+  output logic idle,
+  // SLC maintenance from the Root-only register: write back every dirty
+  // line, and with invalidate also drop every line; busy until it is done
+  // and every write-back has completed.
+  input  logic slcMaintStart,
+  input  logic slcMaintInvalidate,
+  output logic slcMaintBusy
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -204,6 +210,13 @@ module chi_hnf_top #(
     logic               compCmoOwed; // CompCMO of a Combined write
     logic               compAckOwed; // CompAck from the Requester
     logic               sfUpdOwed;   // directory write at retirement
+    // System Level Cache, decided when the entry starts.
+    logic               slcHit;      // the line was in the SLC
+    logic               slcDirty;    // and dirty there
+    logic               slcKeep;     // the line ends in the SLC
+    logic               slcRemove;   // the line leaves the SLC at retirement
+    logic               slcKeepDirty; // recorded when the entry finishes
+    logic               slcUpdOwed;  // SLC write or removal at retirement
   } entry_t;
 
   // Victim-buffer entry. The key holds the evicted location, PAS included.
@@ -332,6 +345,31 @@ module chi_hnf_top #(
     return (e.kind == HNF_KIND_WRITE) && !isWriteUnique(e.req.opcode);
   endfunction
 
+  // MemAttr[2] is Cacheable and MemAttr[1] Device (IHI 0050H B2.8.3); only
+  // Cacheable, non-Device lines live in the SLC.
+  function automatic logic slcCacheable(input chi_req_flit_t req);
+    return req.memAttr[2] && !req.memAttr[1];
+  endfunction
+
+  // MemAttr[3] is the Allocate hint; slcAllocPolicy may ignore it.
+  function automatic logic slcAllocHint(input chi_req_flit_t req);
+    return slcCacheable(req)
+           && ((CFG.slcAllocPolicy == SLC_ALLOC_CACHEABLE) || req.memAttr[3]);
+  endfunction
+
+  // Transactions the SLC gives the line up for before they start: cache
+  // maintenance (it must reach memory or beyond), a read that asks for the
+  // line to be dropped, and any access that may not be cached.
+  function automatic logic slcBypass(input entry_t e);
+    return (e.kind == HNF_KIND_CMO) || (e.cmo != HNF_CMO_NONE)
+           || (e.req.opcode inside {REQ_READ_ONCE_CLEAN_INVALID,
+                                    REQ_READ_ONCE_MAKE_INVALID})
+           || ((e.kind inside {HNF_KIND_READ_ONCE, HNF_KIND_READ_NOSNP,
+                               HNF_KIND_WRITE, HNF_KIND_WRITE_ZERO,
+                               HNF_KIND_COPYBACK, HNF_KIND_ATOMIC})
+               && !slcCacheable(e.req));
+  endfunction
+
   always_comb begin
     incomingReq = unpackReqFlit(CFG, reqInFlit.payload[CHI_MAX_REQ_FLIT_W-1:0]);
     incomingRsp = unpackRspFlit(CFG, rspInFlit.payload[CHI_MAX_RSP_FLIT_W-1:0]);
@@ -393,6 +431,47 @@ module chi_hnf_top #(
   logic [POS_W:0] posUnreservedCount;
   logic requestHandshake;
   entry_t allocEntry;
+
+  // System Level Cache.
+  localparam int unsigned NUM_LOCKS = POS_DEPTH + NUM_VB;
+  logic slcLookupHit;
+  logic slcLookupDirty;
+  logic slcReadValid;
+  logic [POS_W-1:0] slcReadEntry;
+  logic [511:0] slcReadData;
+  logic [7:0] slcReadPoison;
+  logic slcReadCorrected;
+  logic slcUpdateValid;
+  logic [KEY_W-1:0] slcUpdateKey;
+  logic slcUpdateRemove;
+  logic slcUpdateDiscard;
+  logic slcUpdateDirty;
+  logic [511:0] slcUpdateData;
+  logic [7:0] slcUpdatePoison;
+  logic slcUpdateReady;
+  logic slcUpdateFromRetire;
+  logic [POS_W-1:0] slcUpdateEntry;
+  logic [POS_W-1:0] slcUpdatePointer;
+  logic slcVictimReady;
+  logic slcVictimValid;
+  logic [KEY_W-1:0] slcVictimKey;
+  logic [511:0] slcVictimData;
+  logic [7:0] slcVictimPoison;
+  logic slcMaintWalking;
+  logic slcEventFill;
+  logic slcEventDirtyEviction;
+  logic slcEventUncorrectable;
+  logic [NUM_LOCKS-1:0] slcLockValid;
+  logic [NUM_LOCKS-1:0][KEY_W-1:0] slcLockKey;
+  // A start candidate the SLC must give up first: a CMO, a Combined write,
+  // a ReadOnce*Invalid, or a Device or Non-cacheable access.
+  logic slcFlushWant;
+  logic [POS_DEPTH-1:0] eNeedSlcRead;
+  logic [POS_DEPTH-1:0] eRawWriteback;
+  // For the bound SLC assertions.
+  logic slcUpdateCacheable;
+  logic slcUpdateWroteBack;
+  logic slcStartIsCmo;
 
   // Start (directory lookup and plan).
   logic startValid;
@@ -652,6 +731,111 @@ module chi_hnf_top #(
     .victimOwner(sfVictimOwner)
   );
 
+  // Every location a transaction or a victim entry holds is locked in the
+  // SLC, so what an entry learnt at its start stays true until it retires.
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++) begin
+      slcLockValid[i] = posActive[i];
+      slcLockKey[i] = posKey[i];
+    end
+    for (int unsigned v = 0; v < NUM_VB; v++) begin
+      slcLockValid[POS_DEPTH + v] = victim[v].valid;
+      slcLockKey[POS_DEPTH + v] = victim[v].key;
+    end
+  end
+
+  if (CFG.slcEn) begin : slc_slice
+    chi_slc #(
+      .CFG(CFG), .KEY_W(KEY_W), .NUM_LOCKS(NUM_LOCKS)
+    ) slc (
+      .clk, .resetn,
+      .lookupKey(posKey[startIndex]),
+      .lookupHit(slcLookupHit), .lookupDirty(slcLookupDirty),
+      .readValid(slcReadValid), .readKey(posKey[slcReadEntry]),
+      .readData(slcReadData), .readPoison(slcReadPoison),
+      .readCorrected(slcReadCorrected),
+      .updateValid(slcUpdateValid), .updateKey(slcUpdateKey),
+      .updateRemove(slcUpdateRemove), .updateDiscard(slcUpdateDiscard),
+      .updateDirty(slcUpdateDirty), .updateData(slcUpdateData),
+      .updatePoison(slcUpdatePoison), .updateReady(slcUpdateReady),
+      .lockValid(slcLockValid), .lockKey(slcLockKey),
+      .victimReady(slcVictimReady), .victimValid(slcVictimValid),
+      .victimKey(slcVictimKey), .victimData(slcVictimData),
+      .victimPoison(slcVictimPoison),
+      .maintStart(slcMaintStart), .maintInvalidate(slcMaintInvalidate),
+      .maintWalking(slcMaintWalking),
+      .eventFill(slcEventFill), .eventDirtyEviction(slcEventDirtyEviction),
+      .eventUncorrectable(slcEventUncorrectable)
+    );
+  end else begin : no_slc
+    always_comb begin
+      slcLookupHit = 1'b0;
+      slcLookupDirty = 1'b0;
+      slcReadData = '0;
+      slcReadPoison = '0;
+      slcReadCorrected = 1'b0;
+      slcUpdateReady = 1'b1;
+      slcVictimValid = 1'b0;
+      slcVictimKey = '0;
+      slcVictimData = '0;
+      slcVictimPoison = '0;
+      slcMaintWalking = 1'b0;
+      slcEventFill = 1'b0;
+      slcEventDirtyEviction = 1'b0;
+      slcEventUncorrectable = 1'b0;
+    end
+  end
+
+  // SLC read port: one entry per cycle takes the whole line into its buffer
+  // as memory-level data.
+  always_comb begin
+    slcReadValid = 1'b0;
+    slcReadEntry = '0;
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      if (!slcReadValid && eNeedSlcRead[i]) begin
+        slcReadValid = 1'b1;
+        slcReadEntry = POS_W'(i);
+      end
+  end
+
+  // SLC update port: a start candidate the SLC must give its line up for
+  // first, else one retiring entry in rotation; the maintenance walk uses
+  // the port when neither does. A dirty line leaving the SLC needs a victim
+  // entry the directory is not taking this cycle.
+  always_comb begin
+    logic found;
+    int unsigned candidate;
+    entry_t e;
+    found = 1'b0;
+    slcUpdateEntry = '0;
+    candidate = 0;
+    for (int unsigned offset = 0; offset < POS_DEPTH; offset++) begin
+      candidate = int'(slcUpdatePointer) + offset;
+      if (candidate >= POS_DEPTH)
+        candidate = candidate - POS_DEPTH;
+      if (!found && (entry[candidate].phase == PH_RETIRE)
+          && entry[candidate].slcUpdOwed) begin
+        found = 1'b1;
+        slcUpdateEntry = POS_W'(candidate);
+      end
+    end
+    e = entry[slcUpdateEntry];
+    slcUpdateFromRetire = found && !slcFlushWant;
+    slcUpdateValid = slcFlushWant || found;
+    slcUpdateKey = slcFlushWant ? posKey[startIndex] : posKey[slcUpdateEntry];
+    // A flush writes the SLC's own line back; a retiring entry that removes
+    // the line has already written the latest data to memory itself.
+    slcUpdateRemove = slcFlushWant || e.slcRemove;
+    slcUpdateDiscard = !slcFlushWant && e.slcRemove;
+    slcUpdateDirty = e.slcKeepDirty;
+    slcUpdateData = bufData[slcUpdateEntry];
+    slcUpdatePoison = bufPoison[slcUpdateEntry];
+    slcVictimReady = victimFree && !(sfVictimValid && sfUpdateValid && sfUpdateReady);
+    slcUpdateCacheable = slcCacheable(e.req);
+    slcUpdateWroteBack = e.dnWriteDone || !e.slcKeepDirty;
+    slcStartIsCmo = entry[startIndex].kind == HNF_KIND_CMO;
+  end
+
   // The monitor is consulted when an entry starts, after chi_hazard has
   // ordered it behind every older transaction to the same location.
   always_comb begin
@@ -837,7 +1021,10 @@ module chi_hnf_top #(
     // A physical-aliasing CMO starts only once no other PAS of its line is
     // in the directory; until then it evicts one per cycle instead.
     sfAliasEvict = found && eAllPas[startIndex] && sfLookupAliasValid;
-    startValid = found && !sfAliasEvict;
+    slcFlushWant = found && !sfAliasEvict && CFG.slcEn
+                   && (entry[startIndex].err == HNF_ERR_NONE)
+                   && slcLookupHit && slcBypass(entry[startIndex]);
+    startValid = found && !sfAliasEvict && !slcFlushWant;
     posStartMask = '0;
     if (startValid)
       posStartMask[startIndex] = 1'b1;
@@ -1040,6 +1227,59 @@ module chi_hnf_top #(
       e.compAckOwed = e.req.expCompAck;
     end
 
+    // System Level Cache (Section 9.10). A start never happens on a line the
+    // SLC has to give up first (slcFlushWant), so a hit here is a line the
+    // entry may use and update.
+    e.slcHit = CFG.slcEn && slcLookupHit;
+    e.slcDirty = CFG.slcEn && slcLookupHit && slcLookupDirty;
+    e.slcKeep = 1'b0;
+    e.slcRemove = 1'b0;
+    if (CFG.slcEn && (e.err == HNF_ERR_NONE) && !slcBypass(e)) begin
+      case (e.kind)
+        HNF_KIND_READ:
+          if (e.slcHit) begin
+            // Exclusive of RN-F caches, a line an RN-F is given leaves the
+            // SLC; otherwise the SLC keeps it.
+            e.slcRemove = CFG.slcInclusion == SLC_EXCLUSIVE_OF_RNF;
+            e.slcKeep = CFG.slcInclusion == SLC_NON_INCLUSIVE;
+          end else begin
+            e.slcKeep = (CFG.slcInclusion == SLC_NON_INCLUSIVE)
+                        && slcAllocHint(e.req) && policy.slcAllocRead;
+          end
+        HNF_KIND_READ_ONCE, HNF_KIND_READ_NOSNP:
+          e.slcKeep = e.slcHit || (slcAllocHint(e.req) && policy.slcAllocRead);
+        HNF_KIND_DATALESS:
+          e.slcKeep = e.slcHit;
+        HNF_KIND_WRITE:
+          // A partial write allocates only on a hit, where the SLC supplies
+          // the rest of the line. A stash with no target may allocate
+          // instead (IHI 0050H B7.4.2).
+          e.slcKeep = !(e.exclStore && !e.exclPass)
+                      && (e.slcHit
+                          || (isFullLineWrite(e.req.opcode)
+                              && ((slcAllocHint(e.req) && policy.slcAllocWrite)
+                                  || (isStashWrite(e.req.opcode)
+                                      && !e.stashValid && slcCacheable(e.req)
+                                      && policy.slcAllocStash))));
+        HNF_KIND_WRITE_ZERO:
+          e.slcKeep = e.slcHit || (slcAllocHint(e.req) && policy.slcAllocWrite);
+        HNF_KIND_COPYBACK:
+          e.slcKeep = e.slcHit
+                      || (isFullLineWrite(e.req.opcode) && slcCacheable(e.req)
+                          && policy.slcAllocEvict);
+        HNF_KIND_ATOMIC:
+          e.slcKeep = e.slcHit || (slcAllocHint(e.req) && policy.slcAllocWrite);
+        HNF_KIND_STASH_ONCE:
+          // A StashOnce with no target to stash into may bring the line into
+          // the SLC instead (IHI 0050H B7.4.2).
+          e.slcKeep = e.slcHit
+                      || (!e.stashValid && !ownerElsewhere && slcCacheable(e.req)
+                          && policy.slcAllocStash);
+        default: begin
+        end
+      endcase
+    end
+
     e.snpTargets = targets;
     e.snpToSend = targets;
     e.snpPending = '0;
@@ -1098,7 +1338,16 @@ module chi_hnf_top #(
                                 && (e.err == HNF_ERR_NONE))
                             || (e.pullValid
                                 && ((e.kind == HNF_KIND_STASH_ONCE)
-                                    || e.dnWriteDone)));
+                                    || e.dnWriteDone))
+                            // An SLC fill for a StashOnce with no target.
+                            || (e.slcKeep && !e.slcHit
+                                && (e.kind == HNF_KIND_STASH_ONCE))
+                            // The SLC line completes a partial update of it.
+                            || (e.slcKeep && e.slcHit
+                                && ((bufWrBe[i] | bufSnpBe[i]) != '0))
+                            // A removal writes the SLC's data back itself.
+                            || (e.slcRemove && e.slcDirty));
+      eNeedSlcRead[i] = eNeedMemRead[i] && e.slcHit && !e.dnBusy;
 
       // Data that has to reach memory: Dirty snoop data the Requester does
       // not take, the data of a write, the result of an atomic.
@@ -1143,6 +1392,17 @@ module chi_hnf_top #(
             eNeedWriteback[i] = 1'b0;
         endcase
       end
+      // Data the SLC keeps does not go to memory now. A line leaving the
+      // SLC with an entry goes to memory with that entry, whole, before the
+      // SLC drops its copy.
+      eRawWriteback[i] = eNeedWriteback[i];
+      if (e.slcKeep)
+        eNeedWriteback[i] = 1'b0;
+      if (e.slcRemove && e.slcDirty && (e.phase == PH_RUN) && !e.dnWriteDone
+          && eSnpDone[i] && eLineComplete[i]) begin
+        eNeedWriteback[i] = 1'b1;
+        eWriteBe[i] = ALL_BYTES;
+      end
 
       // Persist and Storage maintenance is forwarded once any write it must
       // follow has reached memory.
@@ -1160,7 +1420,8 @@ module chi_hnf_top #(
         eDbidReady[i] = eDbidReady[i]
                         && ((e.err != HNF_ERR_NONE)
                             || (eSnpDone[i]
-                                && (e.req.memAttr[0] || e.dnWriteDone)));
+                                && (e.req.memAttr[0] || e.dnWriteDone
+                                    || e.slcKeep)));
 
       // The completion. Nothing completes while a snoop for the location is
       // outstanding (IHI 0050H B4.11.2), and an ordered read's CompData
@@ -1197,8 +1458,10 @@ module chi_hnf_top #(
               // Comp once the write is serialized: snoops done and data
               // received; without Early Write Acknowledge only once memory
               // has it (IHI 0050H B2.8.3.1).
+              // The Home is the point of coherence, so data the SLC keeps
+              // is complete once the Home has it.
               eCompReady[i] = eSnpDone[i] && !e.wrOwed
-                              && (e.req.memAttr[0] || e.dnWriteDone
+                              && (e.req.memAttr[0] || e.dnWriteDone || e.slcKeep
                                   || !eNeedWritebackPossible(e, bufWrBe[i]));
             HNF_KIND_ATOMIC:
               eCompReady[i] = e.atomicDone;
@@ -1465,9 +1728,11 @@ module chi_hnf_top #(
       dnStartWantReceipt[i] = 1'b0;
       if ((e.phase == PH_RUN) && !e.dnBusy && !dnBusy[i]) begin
         if (eNeedMemRead[i]) begin
-          dnStartValid[i] = 1'b1;
+          // An SLC hit is read through the SLC read port instead; a line
+          // the SLC will keep is always read whole.
+          dnStartValid[i] = !e.slcHit;
           dnStartKind[i] = HNF_DN_READ;
-          dnStartGranules[i] = (e.kind == HNF_KIND_READ_NOSNP)
+          dnStartGranules[i] = ((e.kind == HNF_KIND_READ_NOSNP) && !e.slcKeep)
                                ? messageGranules(CFG, e.req.addr, e.req.size)
                                : 4'hf;
         end else if (eNeedWriteback[i]) begin
@@ -1560,7 +1825,7 @@ module chi_hnf_top #(
       case (e.dnKind)
         HNF_DN_READ: begin
           request.opcode = REQ_READ_NO_SNP;
-          if (e.kind == HNF_KIND_READ_NOSNP) begin
+          if ((e.kind == HNF_KIND_READ_NOSNP) && !e.slcKeep) begin
             request.addr = e.req.addr;
             request.size = e.req.size;
           end
@@ -2021,15 +2286,12 @@ module chi_hnf_top #(
   end
 
   always_comb begin
+    // An entry frees once its directory and SLC updates are done.
     posFreeMask = '0;
     for (int unsigned i = 0; i < POS_DEPTH; i++)
-      if (entry[i].phase == PH_RETIRE) begin
-        if (!entry[i].sfUpdOwed)
-          posFreeMask[i] = 1'b1;
-        else if (sfUpdateValid && sfUpdateReady && !sfUpdateEvict
-                 && (sfUpdateEntry == POS_W'(i)))
-          posFreeMask[i] = 1'b1;
-      end
+      if ((entry[i].phase == PH_RETIRE) && !entry[i].sfUpdOwed
+          && !entry[i].slcUpdOwed)
+        posFreeMask[i] = 1'b1;
   end
 
   // ---------------------------------------------------------------------
@@ -2059,10 +2321,19 @@ module chi_hnf_top #(
     .outFlit(datOutFlit), .count(datFifoCount)
   );
 
+  // Maintenance is done once the walk has finished and every write-back it
+  // started has reached memory.
+  always_comb begin
+    slcMaintBusy = slcMaintWalking;
+    for (int unsigned v = 0; v < NUM_VB; v++)
+      if (victim[v].valid)
+        slcMaintBusy = 1'b1;
+  end
+
   always_comb begin
     idle = (posActive == '0) && (reqFifoCount == '0) && (rspFifoCount == '0)
            && (snpFifoCount == '0) && (datFifoCount == '0)
-           && (dnBusy == '0);
+           && (dnBusy == '0) && !slcMaintWalking;
     for (int unsigned v = 0; v < NUM_VB; v++)
       if (victim[v].valid)
         idle = 1'b0;
@@ -2083,6 +2354,7 @@ module chi_hnf_top #(
       rspPointer <= '0;
       datPointer <= '0;
       sfUpdatePointer <= '0;
+      slcUpdatePointer <= '0;
       datTrackerTurn <= 1'b0;
     end else begin
       // Allocation.
@@ -2284,11 +2556,29 @@ module chi_hnf_top #(
 
       // Retirement and free.
       for (int unsigned i = 0; i < POS_DEPTH; i++) begin
-        if (eAllDone[i])
+        if (eAllDone[i]) begin
           entry[i].phase <= PH_RETIRE;
+          // What the SLC is left holding: the latest line, dirty if it was
+          // or if the entry did not write it to memory. Cancelled write data
+          // never reaches the SLC.
+          entry[i].slcKeepDirty <= entry[i].slcDirty || eRawWriteback[i];
+          entry[i].slcUpdOwed <= entry[i].slcRemove
+                                 || (entry[i].slcKeep && !entry[i].wrCancel
+                                     && (!entry[i].slcHit || eRawWriteback[i]));
+        end
         if (posFreeMask[i])
           entry[i].phase <= PH_FREE;
       end
+      if (sfUpdateValid && sfUpdateReady && !sfUpdateEvict)
+        entry[sfUpdateEntry].sfUpdOwed <= 1'b0;
+      if (slcUpdateValid && slcUpdateReady && slcUpdateFromRetire) begin
+        entry[slcUpdateEntry].slcUpdOwed <= 1'b0;
+        slcUpdatePointer <= (int'(slcUpdateEntry) == (POS_DEPTH - 1))
+                            ? '0 : (slcUpdateEntry + 1'b1);
+      end
+      // The SLC read port fills the buffer as memory would.
+      if (slcReadValid)
+        entry[slcReadEntry].dnReadDone <= 1'b1;
       if (sfUpdateValid && sfUpdateReady && !sfUpdateEvict)
         sfUpdatePointer <= (int'(sfUpdateEntry) == (POS_DEPTH - 1))
                            ? '0 : (sfUpdateEntry + 1'b1);
@@ -2313,6 +2603,14 @@ module chi_hnf_top #(
         victim[victimFreeIndex].valid <= 1'b1;
         victim[victimFreeIndex].key <= sfVictimKey;
         victim[victimFreeIndex].snpToSend <= sfVictimSharers;
+      end
+      // A dirty line leaving the SLC is written back by a victim entry,
+      // which holds the location until memory has it.
+      if (slcVictimValid && slcVictimReady) begin
+        victim[victimFreeIndex] <= '0;
+        victim[victimFreeIndex].valid <= 1'b1;
+        victim[victimFreeIndex].key <= slcVictimKey;
+        victim[victimFreeIndex].snpDirty <= 1'b1;
       end
     end
   end
@@ -2349,6 +2647,22 @@ module chi_hnf_top #(
         bufMemBe[POS_DEPTH + victimFreeIndex] <= '0;
         bufPoison[POS_DEPTH + victimFreeIndex] <= '0;
         bufDataErr[POS_DEPTH + victimFreeIndex] <= 1'b0;
+      end
+      if (slcVictimValid && slcVictimReady) begin
+        bufData[POS_DEPTH + victimFreeIndex] <= slcVictimData;
+        bufWrBe[POS_DEPTH + victimFreeIndex] <= '0;
+        bufSnpBe[POS_DEPTH + victimFreeIndex] <= ALL_BYTES;
+        bufMemBe[POS_DEPTH + victimFreeIndex] <= '0;
+        bufPoison[POS_DEPTH + victimFreeIndex] <= slcVictimPoison;
+        bufDataErr[POS_DEPTH + victimFreeIndex] <= 1'b0;
+      end
+      // SLC data lands below anything the Requester or a snoop supplied.
+      if (slcReadValid) begin
+        for (int unsigned b = 0; b < 64; b++)
+          if (!bufWrBe[slcReadEntry][b] && !bufSnpBe[slcReadEntry][b])
+            bufData[slcReadEntry][b*8 +: 8] <= slcReadData[b*8 +: 8];
+        bufMemBe[slcReadEntry] <= ALL_BYTES;
+        bufPoison[slcReadEntry] <= bufPoison[slcReadEntry] | slcReadPoison;
       end
 
       if (wrDatValid && entry[wrDatEntry].wrOwed

@@ -69,6 +69,24 @@ package chi_cfg_pkg;
     SAM_REGION_MMIO     = 2'b10
   } chi_sam_region_kind_e;
 
+  // System Level Cache: victim choice, relation to RN-F caches, and when a
+  // line is allocated.
+  typedef enum logic [1:0] {
+    SLC_REPL_PLRU   = 2'd0,  // tree pseudo-LRU, ways a power of two
+    SLC_REPL_RRIP   = 2'd1,  // static RRIP, two bits per way
+    SLC_REPL_RANDOM = 2'd2   // LFSR
+  } chi_slc_repl_e;
+
+  typedef enum logic {
+    SLC_NON_INCLUSIVE    = 1'b0,  // a line may be in the SLC and in RN-F caches
+    SLC_EXCLUSIVE_OF_RNF = 1'b1   // a line an RN-F is given leaves the SLC
+  } chi_slc_incl_e;
+
+  typedef enum logic {
+    SLC_ALLOC_HINT      = 1'b0,  // allocate when MemAttr.Allocate asks for it
+    SLC_ALLOC_CACHEABLE = 1'b1   // allocate every Cacheable, non-Device line
+  } chi_slc_alloc_e;
+
   // SAM region attributes: [0] valid, [1] reserved (it was the secure-only
   // bit), [3:2] chi_sam_region_kind_e, [11:4] the PASs allowed to access the
   // region, bit 4+p for PAS encoding p (IHI 0050H Table B13.47).
@@ -153,6 +171,16 @@ package chi_cfg_pkg;
     int unsigned        maxOutstandingSnoops;
     // Transactions one HN-I runs at once.
     int unsigned        hniEntries;
+    // System Level Cache, one slice per HN-F.
+    logic               slcEn;
+    int unsigned        slcSizePerHnf;      // bytes
+    int unsigned        slcWays;
+    int unsigned        slcLineBytes;       // must be 64
+    chi_slc_repl_e      slcReplPolicy;
+    chi_slc_incl_e      slcInclusion;
+    chi_slc_alloc_e     slcAllocPolicy;
+    logic               slcEccEn;           // SECDED on the data array
+    int unsigned        slcTagPipelineDepth; // lookup stages; 1 is built
     int unsigned        lcrdDepth;
     int unsigned        exclMonitors;
     int unsigned        interleaveGranule;
@@ -191,6 +219,9 @@ package chi_cfg_pkg;
     snpFilterEntries: 1024, snpFilterWays: 4,
     posEntries: 32, retryRecords: 16, maxOutstandingSnoops: 16,
     hniEntries: 8,
+    slcEn: 1'b0, slcSizePerHnf: 65536, slcWays: 8, slcLineBytes: 64,
+    slcReplPolicy: SLC_REPL_PLRU, slcInclusion: SLC_NON_INCLUSIVE,
+    slcAllocPolicy: SLC_ALLOC_HINT, slcEccEn: 1'b0, slcTagPipelineDepth: 1,
     lcrdDepth: 8, exclMonitors: 32,
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,

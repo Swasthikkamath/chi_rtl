@@ -45,7 +45,8 @@ module chi_hnf_compile (
     .rspOutValid, .rspOutReady(1'b1), .rspOutFlit,
     .snpOutValid, .snpOutReady(1'b1), .snpOutFlit,
     .datOutValid, .datOutReady(1'b1), .datOutFlit,
-    .idle(hnfIdle)
+    .idle(hnfIdle),
+    .slcMaintStart(1'b0), .slcMaintInvalidate(1'b0), .slcMaintBusy()
   );
 
   generate

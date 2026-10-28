@@ -122,6 +122,7 @@ packed flit field by itself is carriage, not implementation.
 | Exclusives | B6 | Partial | Checked when the entry starts, after same-location ordering. Exclusive loads register, `CleanUnique` and `WriteNoSnp` with `Excl` are checked; a failing `CleanUnique` sends no snoop and completes Shared, a failing `WriteNoSnp` writes nothing. The monitor is keyed by SrcID and `{line, PAS}` without LPID and does not re-register on failure (Stage 7). |
 | Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
+| System Level Cache | B2.8.3, B4.2.2.1, B7.4.2 | Implemented | One slice per HN-F when `slcEn`: set-associative, `{line, PAS}` tags, clean and dirty lines, PLRU, RRIP or random replacement, SECDED data with `slcEccEn`. Looked up with the directory when an entry starts; hits are read through a one-line port, fills and dirty data are written when the entry retires, dirty evictions are written back by victim entries that hold the location. Only Cacheable, non-Device lines are kept; CMOs, Combined writes, `ReadOnce*Invalid` and Device or Non-cacheable accesses take the line out first. `slcTagPipelineDepth` other than 1 is rejected. Section 9.10. |
 | `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
 | MultiReq, `NumReq` and `CacheLineID` | B2.8, B13.10 | Not implemented | The fields and the `Size`/`NumReq` slot overlay are carried, but no multi-request expansion or per-line tracking exists. `multiReqEn` is checked metadata. |
 | PBHA | B13.10 | Not implemented | The four-bit field and its REQ, SNP and DAT slot overlays are carried. No page-based hardware attribute behaviour exists. |
@@ -471,6 +472,7 @@ chi_interconnect_top
 │   ├── chi_hazard            (start permission per entry)
 │   ├── chi_snoop_filter      (lookup and update ports, eviction)
 │   ├── chi_excl_mon
+│   ├── chi_slc               (System Level Cache)        [slcEn]
 │   ├── chi_stash_ctrl
 │   ├── chi_retry
 │   ├── chi_atomic_alu
@@ -558,6 +560,15 @@ it is a parameter at all and what choosing it wrong costs.
 | `retryRecords` | 16 | positive | P-Credits a Home may have granted and not yet seen used or returned; each holds a transaction entry in reserve. |
 | `maxOutstandingSnoops` | 16 | positive when `numHnf > 0` | Snoops one HN-F may have in flight across all its transactions. |
 | `hniEntries` | 8 | positive when `numHni > 0`, and within the TxnID space | Transactions one HN-I runs at once, each with its own buffers. |
+| `slcEn` | 0 | needs `numHnf > 0` | Builds one System Level Cache slice per HN-F. |
+| `slcSizePerHnf` | 65536 | whole power-of-two number of sets | Bytes of data per slice. |
+| `slcWays` | 8 | power of two | Associativity. |
+| `slcLineBytes` | 64 | exactly 64 | Line size, the CHI cache line. |
+| `slcReplPolicy` | `SLC_REPL_PLRU` | PLRU, RRIP, RANDOM | Victim choice among the ways no transaction holds. |
+| `slcInclusion` | `SLC_NON_INCLUSIVE` | NON_INCLUSIVE, EXCLUSIVE_OF_RNF | Whether a line given to an RN-F leaves the SLC. |
+| `slcAllocPolicy` | `SLC_ALLOC_HINT` | HINT, CACHEABLE | Allocate on `MemAttr.Allocate`, or for every Cacheable line. |
+| `slcEccEn` | 0 | 0 or 1 | SECDED on each 64-bit word of the data array. |
+| `slcTagPipelineDepth` | 1 | exactly 1 | Tag lookup stages; the lookup shares the directory's stage. |
 | `lcrdDepth` | 8 | 2 or greater | L-Credits advertised per channel and receive-buffer depth. |
 | `exclMonitors` | 32 | positive | Exclusive monitor entries. |
 | `interleaveGranule` | 64 | power of two, at least 64 | HN hash stripe bytes. |
@@ -711,6 +722,7 @@ open, not because interoperability demands it.
 | `posEntries` | Transaction tracking depth is unspecified. | Concurrent transactions per Home against entry state and line-buffer area. |
 | `retryRecords` | The Home decides how many P-Credits it has out at once. | Entries idling in reserve for re-sent requests against how quickly retried Requesters are invited back. |
 | `hniEntries` | Transaction tracking depth is unspecified. | Concurrent HN-I transactions against two 64-byte buffers per entry. |
+| `slc*` | An interconnect cache is optional and invisible to the protocol. | Memory traffic and latency against area; the policies trade hit rate against how much RN-F state the SLC duplicates. |
 | `maxOutstandingSnoops` | CHI bounds snoops only per location and Snoopee (B4.11.2); how many a Home has in flight is its choice. | Snoop latency overlap against the snoop traffic a Home can inject at once. |
 | `lcrdDepth` | CHI fixes the credit protocol, not the pool size. | Receive-buffer area against sustainable throughput. See Section 3.2.3. |
 | `exclMonitors` | Monitor count is unspecified; the architecture permits spurious failure. | Monitor area against the spurious exclusive-failure rate. |
@@ -1230,6 +1242,7 @@ writes return `PSLVERR`.
 | `0x104` | POLICY_STAGED | RW | all features enabled | Stage the selected HN-F's policy: `[0]` DCT, `[1]` DMT, `[2]` DWT, `[3]` SLC read allocate, `[4]` SLC write allocate, `[5]` SLC clean-eviction allocate, `[6]` SLC stash allocate. |
 | `0x108` | POLICY_ACTIVE | RO | all features enabled | The selected HN-F's active policy. |
 | `0x10c` | POLICY_COMMIT | W, reads zero | 0 | With `PSTRB[0]` and `PWDATA[0]` set and traffic quiescent, copy every staged policy into the active set; `PSLVERR` if not quiescent. |
+| `0x110` | SLC_MAINT | RW | 0 | Write `PWDATA[0]=1` to clean the selected HN-F's SLC, with `PWDATA[1]=1` to clean and invalidate it; `PSLVERR` without `slcEn` or while busy. Reads `[0]` busy, which clears once the walk is done and every write-back has completed. |
 
 : Table 7.1b APB4 register map of `chi_hnf_policy_regs` (block 1)
 
@@ -1470,6 +1483,7 @@ The fields of an entry, and who writes them:
 | Atomic | `atomicDone`, `atomicUpdate`, `atomicOrig` | when the ALU runs |
 | Downstream | `dnBusy`, `dnKind`, `dnReadDone`, `dnWriteDone`, `dnCmoDone` | per tracker start and completion |
 | Responses | `receiptOwed`, `dbidOwed`, `dbidWithComp`, `compOwed`, `compGranSent`, `compCmoOwed`, `compAckOwed`, `sfUpdOwed` | plan, then per message sent or received |
+| SLC | `slcHit`, `slcDirty`, `slcKeep`, `slcRemove`, `slcKeepDirty`, `slcUpdOwed` | plan at start; `slcKeepDirty` and `slcUpdOwed` when the entry finishes |
 
 : Table 9.2 POS entry fields
 
@@ -1705,6 +1719,87 @@ SN-F, because the PoPA is at or behind the Subordinate (B2.3.9.5);
 `Comp` follows the SN-F's. The HN-I holds no data: it orders such a request
 against its line in every PAS and forwards it.
 
+## 9.10 System Level Cache
+
+With `slcEn`, each HN-F has a slice `chi_slc` of `slcSizePerHnf` bytes in
+`slcWays` ways of 64-byte lines. A line is keyed by `{PAS, line}` like every
+other Home structure and is clean (memory holds the same data) or dirty (the
+SLC holds the only copy below the RN-F caches). The arrays are written as
+flops with one read and one write port; synthesis maps them to SRAM.
+
+**Lookup and data.** The tag lookup is combinational and shares the stage in
+which an entry reads the directory, so an entry's plan sees both at once. A
+hit is read, whole, through a one-line read port into the entry's line buffer
+at memory precedence: Requester and snoop bytes stay on top of it. The ways
+of every location a transaction or a victim entry holds are locked, so the
+SLC cannot drop or replace a line between an entry's start and its
+retirement, and what the entry learnt stays true.
+
+**Allocation** follows the request. Only Cacheable, non-Device lines
+(MemAttr[2] = 1, MemAttr[1] = 0, B2.8.3) are kept, on `MemAttr.Allocate` or
+for every such line with `SLC_ALLOC_CACHEABLE`, and only where the run-time
+policy bit for the class allows it (Table 7.1b):
+
+| Transaction | On a hit | On a miss |
+|-------------|----------|-----------|
+| Coherent read | Data from the SLC; kept, or removed with `SLC_EXCLUSIVE_OF_RNF` | Filled clean after the memory read (`slcAllocRead`, non-inclusive only) |
+| `ReadOnce`, `ReadNoSnp` | Data from the SLC | Filled clean, the memory read made whole (`slcAllocRead`) |
+| Full-line write, Write Zero, atomic | Line updated and kept dirty; memory is not written | Allocated dirty (`slcAllocWrite`) |
+| Partial write | The SLC supplies the rest of the line; kept dirty | Written through to memory |
+| CopyBack | Updated; dirty data kept dirty | Full lines allocated, dirty or clean (`slcAllocEvict`) |
+| `StashOnce*` with no target, stash write with no target | As above | Prefetched or allocated (`slcAllocStash`, B7.4.2) |
+| CMOs, Combined writes, `ReadOnceCleanInvalid`, `ReadOnceMakeInvalid`, Device or Non-cacheable | The SLC gives the line up before the entry starts | Not allocated |
+
+: Table 9.4 SLC allocation
+
+A write the SLC keeps completes like a write that has reached memory: the
+Home is the point of coherence, so `Comp` follows once the Home has the data.
+A line given up before an entry starts is removed through the update port; a
+dirty one goes to a victim entry, which holds the location until memory has
+it, so the entry starts on a miss. Cancelled write data and failing exclusive
+writes never reach the SLC.
+
+**Eviction.** A write that misses takes an invalid way, else the victim the
+policy chooses among unlocked ways. A dirty victim is written back with
+`WriteNoSnpFull` by a victim entry (B2.3.9.2); each victim entry has its own
+downstream tracker, so an eviction never waits for a resource a transaction
+holds. When no victim entry is free, a clean fill is dropped and a dirty line
+waits; victim entries depend only on the Subordinate, so they always drain.
+
+**Feature interactions.**
+
+- DMT: a hit is always returned by the Home. On a miss a read that would use
+  DMT either fills through the Home or bypasses the SLC; that choice
+  (`slcFillOnDmtMiss`) arrives with DMT in Stage 8.
+- DWT: write data must not bypass a line the SLC holds. A line resident or
+  allocating in the SLC is never written with DWT (Stage 8).
+- DCT: a peer that may hold the line Dirty or Unique is still snooped, because
+  its copy may be newer; the SLC supplies the data only where the directory
+  shows no such owner.
+- Response state: an SLC hit does not change the state a read grants (Table
+  B4.27); the SLC keeps any Dirty responsibility it holds rather than passing
+  it to the Requester.
+- CMOs act on the SLC first: the line is written back if dirty and removed,
+  then the CMO proceeds (B4.2.2.1). Persist, PoPA and Storage CMOs are then
+  forwarded as before.
+- Atomics execute on the SLC copy on a hit, and allocate on a miss when the
+  write policy allows; otherwise the initial value comes from memory and the
+  result goes back to memory.
+- Stash: a stash with no valid target may allocate into the SLC (B7.4.2).
+- Exclusives: the SLC has no effect on exclusive monitor semantics.
+- GPC (Stage 5): the check happens at admission, before any lookup, so a
+  request that fails it never touches the SLC.
+
+**Maintenance.** The Root-only SLC_MAINT register (Table 7.1b) starts a walk
+over every way that writes back every dirty line and, when asked, removes
+every line. The walk uses the update port when transactions leave it idle and
+waits on a way a transaction holds. Busy reads 1 until the walk is done and
+every write-back it started has reached memory.
+
+**ECC.** With `slcEccEn` every 64-bit word of a line has SECDED check bits. A
+single-bit error is corrected on the way out of the array; a double-bit error
+poisons that word (B9.2.3).
+
 # 10 RN-F boundary cache-state model
 
 These tables are the required architectural model for an RN-F cache
@@ -1798,6 +1893,7 @@ or performance guarantees are supplied.
 | `chi_hnf_ordering_sva.sv` | `ENDPOINT_ORDER_RESPECTED`, `ORDERED_REQUEST_STARTS_IN_ARRIVAL_ORDER` | none |
 | `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA`, `HNI_DOWNSTREAM_PAS_PRESERVED` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
 | `chi_pas_sva.sv` | `SAM_PAS_REFUSAL_KEEPS_REGION`, `SAM_ACCEPTED_PAS_ALLOWED`, `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED`, `SF_ONE_WAY_PER_LOCATION` | `SAM_PAS_REFUSED`, `PAS_ALIAS_EVICTED`, `POPA_FORWARDED`, `REFUSED_REQUEST_ALLOCATED` |
+| `chi_slc_sva.sv` | `SLC_ONE_WAY_PER_LOCATION`, `SLC_DIRTY_NEVER_DROPPED`, `SLC_NO_DEVICE_ALLOCATION`, `SLC_DISCARD_ONLY_AFTER_WRITEBACK` | `SLC_HIT`, `SLC_MISS_FILL`, `SLC_DIRTY_EVICTION`, `SLC_EVICTION_HOLDS_REQUEST`, `SLC_CMO_HITS_DIRTY`, `SLC_MAINTENANCE` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
 | `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
@@ -1903,6 +1999,7 @@ rtl/hnf/chi_dmt_ctrl.sv
 rtl/hnf/chi_dwt_ctrl.sv
 rtl/hnf/chi_stash_ctrl.sv
 rtl/hnf/chi_excl_mon.sv
+rtl/hnf/chi_slc.sv
 rtl/hnf/chi_hnf_top.sv
 rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
@@ -1919,6 +2016,7 @@ rtl/sva/chi_snoop_sva.sv
 rtl/sva/chi_hni_sva.sv
 rtl/sva/chi_home_liveness_sva.sv
 rtl/sva/chi_pas_sva.sv
+rtl/sva/chi_slc_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```

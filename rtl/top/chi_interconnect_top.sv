@@ -375,6 +375,9 @@ module chi_interconnect_top #(
   // Run-time policy of each HN-F, from the APB policy block or its reset
   // value when there is no APB access.
   chi_hnf_policy_t hnfPolicy [NUM_HNF_E];
+  logic [NUM_HNF_E-1:0] slcMaintStart;
+  logic [NUM_HNF_E-1:0] slcMaintInvalidate;
+  logic [NUM_HNF_E-1:0] slcMaintBusy;
   // APB register blocks. PADDR[11:8] selects a 256-byte block: 0 is the
   // region editor, 1 the HN-F policy registers.
   logic apbRegionSelect;
@@ -450,6 +453,25 @@ module chi_interconnect_top #(
             || (CFG.snpFilterWays > CFG.snpFilterEntries)
             || ((CFG.snpFilterEntries % CFG.snpFilterWays) != 0))
           $fatal(1, "Invalid snoop-filter geometry");
+        if (CFG.slcEn) begin
+          if (CFG.numHnf == 0)
+            $fatal(1, "slcEn needs an HN-F: the SLC is one slice per HN-F");
+          if (CFG.slcLineBytes != 64)
+            $fatal(1, "slcLineBytes is %0d but must be 64, the CHI cache line size", CFG.slcLineBytes);
+          if ((CFG.slcWays == 0) || ((CFG.slcWays & (CFG.slcWays - 1)) != 0))
+            $fatal(1, "slcWays is %0d but must be a power of two of at least 1", CFG.slcWays);
+          if ((CFG.slcSizePerHnf == 0)
+              || ((CFG.slcSizePerHnf % (64 * CFG.slcWays)) != 0))
+            $fatal(1, "slcSizePerHnf (%0d bytes) must be a whole number of %0d-way sets of 64-byte lines",
+                   CFG.slcSizePerHnf, CFG.slcWays);
+          if (((CFG.slcSizePerHnf / (64 * CFG.slcWays))
+               & ((CFG.slcSizePerHnf / (64 * CFG.slcWays)) - 1)) != 0)
+            $fatal(1, "slcSizePerHnf / (64 * slcWays) = %0d sets must be a power of two",
+                   CFG.slcSizePerHnf / (64 * CFG.slcWays));
+          if (CFG.slcTagPipelineDepth != 1)
+            $fatal(1, "slcTagPipelineDepth is %0d but only a single-stage tag lookup, combined with the snoop filter lookup, is built",
+                   CFG.slcTagPipelineDepth);
+        end
         if ((CFG.numHni > 0) && (CFG.hniEntries == 0))
           $fatal(1, "hniEntries must be at least 1: an HN-I with no entry can never accept a request");
         if ((CFG.numHnf > 0) && (CFG.maxOutstandingSnoops == 0))
@@ -649,7 +671,8 @@ module chi_interconnect_top #(
       .PSEL(apbPolicySelect), .PENABLE, .PWRITE, .PWDATA, .PSTRB, .PPROT,
       .PNSE,
       .PRDATA(apbPolicyRdata), .PREADY(apbPolicyReady),
-      .PSLVERR(apbPolicyError), .trafficQuiescent, .policy(hnfPolicy)
+      .PSLVERR(apbPolicyError), .trafficQuiescent, .policy(hnfPolicy),
+      .slcMaintStart, .slcMaintInvalidate, .slcMaintBusy
     );
 
     always_comb begin
@@ -689,6 +712,9 @@ module chi_interconnect_top #(
     for (genvar i = 0; i < NUM_HNF_E; i++) begin : reset_policy
       assign hnfPolicy[i] = CHI_HNF_POLICY_DEFAULT;
     end
+    // Without APB there is no maintenance register.
+    assign slcMaintStart = '0;
+    assign slcMaintInvalidate = '0;
   end
 
   for (genvar i = 0; i < NUM_REQ; i++) begin : requester_sam
@@ -885,6 +911,10 @@ module chi_interconnect_top #(
     assign linkCreditError[i] = 1'b0;
   end
 
+  for (genvar i = CFG.numHnf; i < NUM_HNF_E; i++) begin : no_hnf_maint
+    assign slcMaintBusy[i] = 1'b0;
+  end
+
   for (genvar i = 0; i < CFG.numHnf; i++) begin : hnf_nodes
     // The SN-F that holds this HN-F's memory, by modulo or by HNF_TO_SNF.
     localparam int unsigned SNF_INDEX = snfIndexOfHnf(CFG, HNF_SNF_TABLE, i);
@@ -912,7 +942,10 @@ module chi_interconnect_top #(
       .snpOutReady(snpInReady[OFF_HNF+i]), .snpOutFlit(snpInFlit[OFF_HNF+i]),
       .datOutValid(datInValid[OFF_HNF+i]),
       .datOutReady(datInReady[OFF_HNF+i]), .datOutFlit(datInFlit[OFF_HNF+i]),
-      .idle(hnfIdle[i])
+      .idle(hnfIdle[i]),
+      .slcMaintStart(slcMaintStart[i]),
+      .slcMaintInvalidate(slcMaintInvalidate[i]),
+      .slcMaintBusy(slcMaintBusy[i])
     );
   end
 
