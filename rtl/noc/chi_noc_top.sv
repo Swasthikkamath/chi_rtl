@@ -18,7 +18,10 @@ module chi_noc_top #(
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0]
     NODE_IDS [NUM_PORTS-1:0] = '{default: '0},
   parameter chi_cfg_pkg::chi_mesh_placement_t
-    PLACEMENTS [NUM_PORTS-1:0] = '{default: '0}
+    PLACEMENTS [NUM_PORTS-1:0] = '{default: '0},
+  // Crosspoints, for the flit counts.
+  parameter int unsigned NUM_XP_OUT =
+    (chi_pkg::numXpOf(CFG) > 0) ? chi_pkg::numXpOf(CFG) : 1
 ) (
   input  logic                                      clk,
   input  logic                                      resetn,
@@ -48,7 +51,11 @@ module chi_noc_top #(
   output chi_pkg::chi_noc_flit_t                    datOutFlit [NUM_PORTS-1:0],
   // A flit named a NodeID with no attached node and was dropped at its first
   // crosspoint rather than blocking the channel.
-  output logic                                      routeError
+  output logic                                      routeError,
+  // Flits each crosspoint took from and gave to its device ports this
+  // cycle, per channel (REQ, RSP, SNP, DAT), for the PMU.
+  output logic [NUM_XP_OUT-1:0][3:0][3:0]           xpInjected,
+  output logic [NUM_XP_OUT-1:0][3:0][3:0]           xpEjected
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -167,6 +174,19 @@ module chi_noc_top #(
         datInReady[node] = devInReady[xp][CHI_CHANNEL_DAT][device];
       end
     end
+  end
+
+  always_comb begin
+    xpInjected = '0;
+    xpEjected = '0;
+    for (int unsigned xp = 0; (xp < NUM_XP) && (xp < NUM_XP_OUT); xp++)
+      for (int unsigned channel = 0; channel < 4; channel++)
+        for (int unsigned device = 0; device < NUM_DEV_PORTS; device++) begin
+          if (devInValid[xp][channel][device] && devInReady[xp][channel][device])
+            xpInjected[xp][channel] = xpInjected[xp][channel] + 4'd1;
+          if (devOutValid[xp][channel][device] && devOutReady[xp][channel][device])
+            xpEjected[xp][channel] = xpEjected[xp][channel] + 4'd1;
+        end
   end
 
   if (CFG.topology == CROSSBAR) begin : crossbarTopology

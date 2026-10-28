@@ -78,7 +78,12 @@ module chi_gpc #(
   input  logic dvmInvalidateByPa,
   input  logic [chi_pkg::CHI_MAX_ADDR_W-1:0] dvmInvalidateAddr,
   output logic walking,
-  output logic eventFault
+  output logic eventFault,
+  // RAS (rasEn): a GPT cache entry corrected or found failing this cycle,
+  // and the address it covers.
+  output logic rasCorrected,
+  output logic rasUncorrected,
+  output logic [chi_pkg::CHI_MAX_ADDR_W-1:0] rasAddr
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -127,13 +132,65 @@ module chi_gpc #(
   logic [CHI_NODEID_SLOT_W-1:0] faultSrcId;
 
   // GPT cache: an entry holds a level 0 block GPI or a level 1 descriptor,
-  // or records that the GPT faulted for that region.
+  // or records that the GPT faulted for that region. With rasEn the stored
+  // {level1, fault, tag, data} carries SECDED check bits; the valid bits,
+  // which invalidation clears in bulk, are not covered. Readers see the
+  // corrected fields. A corrected entry is written back corrected; an entry
+  // that fails is invalidated, so the next check walks the GPT again.
+  localparam int unsigned GENTRY_W = 2 + ADDR_W + 64;
+  localparam int unsigned GCHUNKS = (GENTRY_W + 63) / 64;
+  localparam int unsigned GECC_W = 8 * GCHUNKS;
   logic [ENTRIES-1:0] cacheValid;
+  logic [ENTRIES-1:0] cacheLevel1Raw;
+  logic [ENTRIES-1:0] cacheFaultRaw;
+  logic [ENTRIES-1:0][ADDR_W-1:0] cacheTagRaw;
+  logic [ENTRIES-1:0][63:0] cacheDataRaw;
+  logic [ENTRIES-1:0][GECC_W-1:0] cacheEcc;
   logic [ENTRIES-1:0] cacheLevel1;
   logic [ENTRIES-1:0] cacheFault;
   logic [ENTRIES-1:0][ADDR_W-1:0] cacheTag;
   logic [ENTRIES-1:0][63:0] cacheData;
+  logic [ENTRIES-1:0] cacheCorrected;
+  logic [ENTRIES-1:0] cacheBad;
   logic [EIDX_W-1:0] cacheNext;
+
+  function automatic logic [GECC_W-1:0] entryCheck(input logic [GENTRY_W-1:0] fields);
+    logic [GCHUNKS*64-1:0] bits;
+    logic [GECC_W-1:0] check;
+    bits = '0;
+    bits[GENTRY_W-1:0] = fields;
+    check = '0;
+    if (CFG.rasEn)
+      for (int unsigned c = 0; c < GCHUNKS; c++)
+        check[c*8 +: 8] = secdedEncode(bits[c*64 +: 64]);
+    return check;
+  endfunction
+
+  always_comb
+    for (int unsigned e = 0; e < ENTRIES; e++) begin
+      logic [GCHUNKS*64-1:0] bits;
+      logic [GCHUNKS*64-1:0] fixed;
+      bits = '0;
+      bits[GENTRY_W-1:0] = {cacheLevel1Raw[e], cacheFaultRaw[e], cacheTagRaw[e],
+                            cacheDataRaw[e]};
+      fixed = bits;
+      cacheCorrected[e] = 1'b0;
+      cacheBad[e] = 1'b0;
+      if (CFG.rasEn)
+        for (int unsigned c = 0; c < GCHUNKS; c++) begin
+          logic chunkCorrected;
+          logic chunkBad;
+          fixed[c*64 +: 64] = secdedDecode(bits[c*64 +: 64], cacheEcc[e][c*8 +: 8],
+                                           chunkCorrected, chunkBad);
+          if (chunkCorrected)
+            cacheCorrected[e] = 1'b1;
+          if (chunkBad)
+            cacheBad[e] = 1'b1;
+        end
+      {cacheLevel1[e], cacheFault[e], cacheTag[e], cacheData[e]} = fixed[GENTRY_W-1:0];
+      if (cacheBad[e])
+        cacheCorrected[e] = 1'b0;
+    end
 
   // Walker.
   typedef enum logic [1:0] {
@@ -193,7 +250,7 @@ module chi_gpc #(
           end else begin
             found = 1'b0;
             for (int unsigned e = 0; e < ENTRIES; e++)
-              if (!found && cacheValid[e]
+              if (!found && cacheValid[e] && !cacheBad[e]
                   && (cacheTag[e] == (addr >> (cacheLevel1[e] ? l1Shift : l0Bits)))) begin
                 found = 1'b1;
                 if (cacheFault[e]) begin
@@ -326,10 +383,11 @@ module chi_gpc #(
       faultMalformed <= 1'b0;
       faultSrcId <= '0;
       cacheValid <= '0;
-      cacheLevel1 <= '0;
-      cacheFault <= '0;
-      cacheTag <= '0;
-      cacheData <= '0;
+      cacheLevel1Raw <= '0;
+      cacheFaultRaw <= '0;
+      cacheTagRaw <= '0;
+      cacheDataRaw <= '0;
+      cacheEcc <= '0;
       cacheNext <= '0;
       walkState <= WALK_IDLE;
       walkAddr <= '0;
@@ -392,6 +450,20 @@ module chi_gpc #(
           faultCount <= faultCount + 16'(fails);
       end
 
+      // A corrected cache entry is written back corrected, a failing one is
+      // dropped; a fill below to the same entry takes precedence.
+      for (int unsigned e = 0; e < ENTRIES; e++)
+        if (cacheValid[e] && cacheBad[e]) begin
+          cacheValid[e] <= 1'b0;
+        end else if (cacheValid[e] && cacheCorrected[e]) begin
+          cacheLevel1Raw[e] <= cacheLevel1[e];
+          cacheFaultRaw[e] <= cacheFault[e];
+          cacheTagRaw[e] <= cacheTag[e];
+          cacheDataRaw[e] <= cacheData[e];
+          cacheEcc[e] <= entryCheck({cacheLevel1[e], cacheFault[e], cacheTag[e],
+                                     cacheData[e]});
+        end
+
       // Walker.
       case (walkState)
         WALK_IDLE:
@@ -423,11 +495,14 @@ module chi_gpc #(
               // A block descriptor, or a fault for the whole level 0 region.
               if (!walkStale) begin
                 cacheValid[cacheNext] <= 1'b1;
-                cacheLevel1[cacheNext] <= 1'b0;
-                cacheFault[cacheNext] <= walkReadError
-                                         || (walkDescriptor[3:0] != 4'b0001);
-                cacheTag[cacheNext] <= walkAddr >> l0Bits;
-                cacheData[cacheNext] <= {60'b0, walkDescriptor[7:4]};
+                cacheLevel1Raw[cacheNext] <= 1'b0;
+                cacheFaultRaw[cacheNext] <= walkReadError
+                                            || (walkDescriptor[3:0] != 4'b0001);
+                cacheTagRaw[cacheNext] <= walkAddr >> l0Bits;
+                cacheDataRaw[cacheNext] <= {60'b0, walkDescriptor[7:4]};
+                cacheEcc[cacheNext] <=
+                  entryCheck({1'b0, walkReadError || (walkDescriptor[3:0] != 4'b0001),
+                              ADDR_W'(walkAddr >> l0Bits), {60'b0, walkDescriptor[7:4]}});
                 cacheNext <= (int'(cacheNext) == (ENTRIES - 1)) ? '0 : (cacheNext + 1'b1);
               end
               walkState <= WALK_IDLE;
@@ -437,10 +512,13 @@ module chi_gpc #(
           if (walkReadDone) begin
             if (!walkStale) begin
               cacheValid[cacheNext] <= 1'b1;
-              cacheLevel1[cacheNext] <= 1'b1;
-              cacheFault[cacheNext] <= walkReadError;
-              cacheTag[cacheNext] <= walkAddr >> l1Shift;
-              cacheData[cacheNext] <= walkDescriptor;
+              cacheLevel1Raw[cacheNext] <= 1'b1;
+              cacheFaultRaw[cacheNext] <= walkReadError;
+              cacheTagRaw[cacheNext] <= walkAddr >> l1Shift;
+              cacheDataRaw[cacheNext] <= walkDescriptor;
+              cacheEcc[cacheNext] <=
+                entryCheck({1'b1, walkReadError, ADDR_W'(walkAddr >> l1Shift),
+                            walkDescriptor});
               cacheNext <= (int'(cacheNext) == (ENTRIES - 1)) ? '0 : (cacheNext + 1'b1);
             end
             walkState <= WALK_IDLE;
@@ -472,5 +550,25 @@ module chi_gpc #(
     for (int unsigned home = 0; home < NUM_HOMES; home++)
       if (checkValid[home] && checkDone[home] && checkFail[home])
         eventFault = 1'b1;
+  end
+
+  // RAS events: the first failing entry, else the first corrected one; the
+  // address is the region its tag covers.
+  always_comb begin
+    logic found;
+    rasCorrected = CFG.rasEn && ((cacheValid & cacheCorrected) != '0);
+    rasUncorrected = CFG.rasEn && ((cacheValid & cacheBad) != '0);
+    rasAddr = '0;
+    found = 1'b0;
+    for (int unsigned e = 0; e < ENTRIES; e++)
+      if (!found && cacheValid[e] && cacheBad[e]) begin
+        found = 1'b1;
+        rasAddr = cacheTagRaw[e] << (cacheLevel1Raw[e] ? l1Shift : l0Bits);
+      end
+    for (int unsigned e = 0; e < ENTRIES; e++)
+      if (!found && cacheValid[e] && cacheCorrected[e]) begin
+        found = 1'b1;
+        rasAddr = cacheTag[e] << (cacheLevel1[e] ? l1Shift : l0Bits);
+      end
   end
 endmodule

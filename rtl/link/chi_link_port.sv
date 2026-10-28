@@ -53,7 +53,11 @@ module chi_link_port #(
   input  logic [DAT_FLIT_W-1:0] datTxFlit,
   output logic linkUp,
   output logic parityError,
-  output logic creditError
+  output logic creditError,
+  // System coherency interface (IHI 0050H B15): SYSCOREQ from the node and
+  // the SYSCOACK the interconnect returns.
+  output logic sysCoReq,
+  input  logic sysCoAck
 );
   import chi_pkg::*;
 
@@ -199,7 +203,8 @@ module chi_link_port #(
     chiPort.RESETn = resetn;
     chiPort.TXSACTIVE = resetn;
     chiPort.RXSACTIVE = resetn;
-    chiPort.SYSCOACK = chiPort.SYSCOREQ;
+    sysCoReq = chiPort.SYSCOREQ;
+    chiPort.SYSCOACK = sysCoAck;
     chiPort.TXLINKACTIVEACK = txLinkActiveAck;
     chiPort.RXLINKACTIVEREQ = rxLinkActiveReq;
     chiPort.TXREQLCRDV = nodeReqLcrdV;

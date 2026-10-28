@@ -111,7 +111,21 @@ module chi_hnf_top #(
   input  logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gptReadAddr,
   output logic gptReadDone,
   output logic [511:0] gptReadData,
-  output logic gptReadError
+  output logic gptReadError,
+  // System coherency (IHI 0050H B15): the RN-Fs that may be snooped, and
+  // those of which this Home holds nothing: no snoop outstanding and no
+  // directory bit left.
+  input  logic [NUM_RNF-1:0] rnfSnoopable,
+  output logic [NUM_RNF-1:0] rnfIdle,
+  // RAS: at most one corrected and one uncorrected error a cycle, with the
+  // source and location of the one reported.
+  output logic rasCorrected,
+  output logic rasUncorrected,
+  output logic [3:0] rasSource,
+  output logic [chi_pkg::CHI_MAX_ADDR_W-1:0] rasAddr,
+  output chi_pkg::chi_pas_e rasPas,
+  // PMU: this cycle's count of each event (chi_hnf_pkg::PMU_*).
+  output logic [chi_hnf_pkg::HNF_PMU_EVENTS-1:0][7:0] pmuCount
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -570,7 +584,23 @@ module chi_hnf_top #(
   logic [POS_DEPTH-1:0] eMruFail;
   // Direct transfers.
   logic [POS_DEPTH-1:0] eDmtOk;
+  logic [POS_DEPTH-1:0] eDmtEligible;
   logic [POS_DEPTH-1:0] eDctFwded;
+  logic planDctEligible;
+  logic planDwtEligible;
+  // System coherency, RAS and PMU.
+  logic [NUM_RNF-1:0] rnfSnoopableLast;
+  logic [NUM_REQUESTERS-1:0] exclClearRequester;
+  logic stashTargetValidRaw;
+  logic sfLookupError;
+  logic [NUM_RNF-1:0] sfRnfCleared;
+  logic sfEccCorrected;
+  logic sfEccUncorrected;
+  logic [KEY_W-1:0] sfEccKey;
+  logic slcEventEviction;
+  logic slcTagCorrected;
+  logic slcTagUncorrected;
+  logic [KEY_W-1:0] slcTagKey;
   // The DAT packet arriving this cycle: the Requester bytes inside the
   // write's window, the bytes the Home keeps from it, and its DataCheck.
   logic [63:0] wrWindow;
@@ -822,8 +852,10 @@ module chi_hnf_top #(
     .WAYS(SF_WAYS), .NUM_RNF(NUM_RNF), .KEY_W(KEY_W), .LINE_W(LINE_W)
   ) snoop_filter (
     .clk, .resetn,
+    .liveMask(rnfSnoopable), .cleared(sfRnfCleared),
     .lookupKey(posKey[startIndex]),
-    .lookupHit(sfLookupHit), .lookupSharers(sfLookupSharers),
+    .lookupHit(sfLookupHit), .lookupError(sfLookupError),
+    .lookupSharers(sfLookupSharers),
     .lookupOwnerValid(sfLookupOwnerValid), .lookupOwner(sfLookupOwner),
     .lookupAliasValid(sfLookupAliasValid), .lookupAliasKey(sfLookupAliasKey),
     .updateValid(sfUpdateValid), .updateEvict(sfUpdateEvict),
@@ -835,7 +867,9 @@ module chi_hnf_top #(
     .updateReady(sfUpdateReady),
     .victimValid(sfVictimValid), .victimKey(sfVictimKey),
     .victimSharers(sfVictimSharers), .victimOwnerValid(sfVictimOwnerValid),
-    .victimOwner(sfVictimOwner)
+    .victimOwner(sfVictimOwner),
+    .eccCorrected(sfEccCorrected), .eccUncorrected(sfEccUncorrected),
+    .eccKey(sfEccKey)
   );
 
   // Every location a transaction or a victim entry holds is locked in the
@@ -872,7 +906,10 @@ module chi_hnf_top #(
       .maintStart(slcMaintStart), .maintInvalidate(slcMaintInvalidate),
       .maintWalking(slcMaintWalking),
       .eventFill(slcEventFill), .eventDirtyEviction(slcEventDirtyEviction),
-      .eventUncorrectable(slcEventUncorrectable)
+      .eventUncorrectable(slcEventUncorrectable),
+      .eventEviction(slcEventEviction),
+      .tagCorrected(slcTagCorrected), .tagUncorrected(slcTagUncorrected),
+      .tagKey(slcTagKey)
     );
   end else begin : no_slc
     always_comb begin
@@ -891,6 +928,10 @@ module chi_hnf_top #(
       slcEventFill = 1'b0;
       slcEventDirtyEviction = 1'b0;
       slcEventUncorrectable = 1'b0;
+      slcEventEviction = 1'b0;
+      slcTagCorrected = 1'b0;
+      slcTagUncorrected = 1'b0;
+      slcTagKey = '0;
     end
   end
 
@@ -1028,6 +1069,7 @@ module chi_hnf_top #(
     .commitLpid(entry[startIndex].req.groupIdOrLpid),
     .commitKey(posKey[startIndex]),
     .registerBlocked(exclRegisterBlocked),
+    .clearRequester(exclClearRequester),
     .pass(exclPass), .registered(exclRegistered),
     .lpKnown(exclLpKnown), .lpIndex(exclLpIndex)
   );
@@ -1042,7 +1084,7 @@ module chi_hnf_top #(
     .homeHasLatestCopy(!sfLookupOwnerValid),
     .isStash(stashIsStash), .isIndependentStash(stashIndependent),
     .isSeparateStashDone(stashSeparateDone), .isUniqueStash(stashUniqueDec),
-    .targetValid(stashTargetValidDec), .targetMask(stashTargetMaskDec),
+    .targetValid(stashTargetValidRaw), .targetMask(stashTargetMaskDec),
     .targetSnoopOpcode(stashTargetSnoopDec),
     .stashLpidValid(stashLpidValidDec), .stashLpid(stashLpidDec),
     .dataPullOpcode(stashPullOpcodeDec), .dataPullResp(stashPullRespDec)
@@ -1249,10 +1291,20 @@ module chi_hnf_top #(
       ownerBit[sfLookupOwner] = 1'b1;
     ownerElsewhere = sfLookupHit && sfLookupOwnerValid
                      && !(e.reqIsRnf && (sfLookupOwner == e.reqRnf));
+    // A dead directory way shares the set: any live RN-F may own the line,
+    // so every one is snooped as a possible owner, without RetToSrc, and a
+    // Dirty copy still comes back (IHI 0050H B4.9).
+    if (sfLookupError) begin
+      ownerBit = others;
+      ownerElsewhere = others != '0;
+    end
 
     e.phase = PH_RUN;
     e.sfHit = sfLookupHit;
-    e.sfSharers = sfLookupHit ? sfLookupSharers : '0;
+    // Without a trustworthy entry the Requester is not taken to hold the
+    // line (IHI 0050H B4.7.1.1).
+    e.sfSharers = sfLookupHit ? (sfLookupSharers & ~(sfLookupError ? reqBit : '0))
+                              : '0;
     e.sfOwnerValid = sfLookupHit && sfLookupOwnerValid;
     e.sfOwner = sfLookupOwner;
     e.snpOpcode = snoopForRequest(e.req.opcode, CFG.mteEn);
@@ -1271,12 +1323,13 @@ module chi_hnf_top #(
             // invalidates nothing: Comp_SC if the Requester still holds the
             // line, otherwise its data in SC got with a non-invalidating
             // snoop of a possible owner (IHI 0050H B6.3.1.1).
-            targets = (e.reqIsRnf && sfLookupHit && sfLookupSharers[e.reqRnf])
+            targets = (e.reqIsRnf && sfLookupHit && !sfLookupError
+                       && sfLookupSharers[e.reqRnf])
                       ? '0 : (ownerElsewhere ? ownerBit : '0);
             e.snpOpcode = SNP_SHARED;
             e.snpRetToSrc = 1'b1;
           end else if ((e.req.opcode == REQ_MAKE_READ_UNIQUE) && e.reqIsRnf
-              && sfLookupHit && sfLookupSharers[e.reqRnf]) begin
+              && sfLookupHit && !sfLookupError && sfLookupSharers[e.reqRnf]) begin
             // The Requester still holds the line, so the other copies are
             // invalidated and a Comp without data upgrades it
             // (IHI 0050H B2.3.1.1 alt 6).
@@ -1491,28 +1544,28 @@ module chi_hnf_top #(
     // for an Exclusive Load (B6.3.1), an ordered or partial ReadOnce
     // (Table B2.6), or an allocating read that sends no CompAck; never with
     // MTE, whose tags this Home does not carry.
-    e.dctPlanned = 1'b0;
-    e.dctOpcode = SNP_SHARED;
-    if ((e.err == HNF_ERR_NONE) && CFG.dctEn && policy.dctEn && !CFG.mteEn
-        && ownerElsewhere && RNF_DCT_CAP[sfLookupOwner] && !e.exclLoad
-        && !e.exclStore && !e.stashValid
-        && (fwdSnoopFor(e.req.opcode) != SNP_SHARED)
-        && (e.req.order == ORDER_NONE)
-        && (((e.kind == HNF_KIND_READ) && e.req.expCompAck)
-            || ((e.kind == HNF_KIND_READ_ONCE) && (e.req.size == 3'd6)))
-        && targets[sfLookupOwner]) begin
-      e.dctPlanned = 1'b1;
-      e.dctOpcode = fwdSnoopFor(e.req.opcode);
-    end
+    // Eligible counts what the request and directory allow; the enables,
+    // the policy and the owner's capability decide whether it is planned.
+    planDctEligible = (e.err == HNF_ERR_NONE) && ownerElsewhere && !sfLookupError
+                      && !e.exclLoad && !e.exclStore && !e.stashValid
+                      && (fwdSnoopFor(e.req.opcode) != SNP_SHARED)
+                      && (e.req.order == ORDER_NONE)
+                      && (((e.kind == HNF_KIND_READ) && e.req.expCompAck)
+                          || ((e.kind == HNF_KIND_READ_ONCE) && (e.req.size == 3'd6)))
+                      && targets[sfLookupOwner];
+    e.dctPlanned = planDctEligible && CFG.dctEn && policy.dctEn && !CFG.mteEn
+                   && RNF_DCT_CAP[sfLookupOwner];
+    e.dctOpcode = e.dctPlanned ? fwdSnoopFor(e.req.opcode) : SNP_SHARED;
 
     // DWT: a WriteNoSnp that no exclusive check, SLC line or ordering keeps
     // at the Home sends its data straight to the SN-F (B2.3.2.1 alt 1,
     // B6.3.1). The SN-F asks the Requester for the data; the Home sends Comp.
-    e.dwtUsed = (e.err == HNF_ERR_NONE) && CFG.dwtEn && policy.dwtEn && SN_DWT_CAP
-                && (e.kind == HNF_KIND_WRITE) && !isWriteUnique(e.req.opcode)
-                && (e.cmo == HNF_CMO_NONE) && !e.exclStore && !e.slcHit
-                && !e.slcKeep && (e.req.order == ORDER_NONE)
-                && !e.req.expCompAck && (targets == '0);
+    planDwtEligible = (e.err == HNF_ERR_NONE)
+                      && (e.kind == HNF_KIND_WRITE) && !isWriteUnique(e.req.opcode)
+                      && (e.cmo == HNF_CMO_NONE) && !e.exclStore && !e.slcHit
+                      && !e.slcKeep && (e.req.order == ORDER_NONE)
+                      && !e.req.expCompAck && (targets == '0);
+    e.dwtUsed = planDwtEligible && CFG.dwtEn && policy.dwtEn && SN_DWT_CAP;
     if (e.dwtUsed) begin
       e.dbidOwed = 1'b0;
       e.dbidWithComp = 1'b0;
@@ -1579,13 +1632,14 @@ module chi_hnf_top #(
       // CompAck to close it, no Exclusive (B6.3.1; conservatively also no
       // MakeReadUnique(Excl)), and no SLC copy or fill the policy keeps
       // (slcFillOnDmtMiss).
-      eDmtOk[i] = (e.err == HNF_ERR_NONE) && CFG.dmtEn && policy.dmtEn && SN_DMT_CAP
+      eDmtEligible[i] = (e.err == HNF_ERR_NONE)
                   && (e.kind == HNF_KIND_READ) && !eMruHold[i] && !eMruFail[i]
                   && e.req.expCompAck && (e.req.order == ORDER_NONE)
                   && !e.exclLoad && !e.exclStore && !e.slcHit
                   && (!e.slcKeep || !CFG.slcFillOnDmtMiss)
                   && ((bufWrBe[i] | bufSnpBe[i]) == '0) && !e.snpFwded
                   && !e.pullValid && (eGrant[i] == RESP_UC_UD);
+      eDmtOk[i] = eDmtEligible[i] && CFG.dmtEn && policy.dmtEn && SN_DMT_CAP;
 
       // Memory is read when the snoops did not bring a whole line: for a
       // read, for the initial value of an atomic, and for the line a Data
@@ -1835,7 +1889,8 @@ module chi_hnf_top #(
   // ---------------------------------------------------------------------
   always_comb begin
     for (int unsigned i = 0; i < POS_DEPTH; i++) begin
-      ownerToSend[i] = entry[i].snpToSend;
+      // No new snoop to an RN-F outside system coherency (IHI 0050H B15).
+      ownerToSend[i] = entry[i].snpToSend & rnfSnoopable;
       ownerPending[i] = entry[i].snpPending;
       ownerKey[i] = posKey[i];
       ownerLive[i] = posActive[i];
@@ -1843,7 +1898,7 @@ module chi_hnf_top #(
         ownerDataFrom[i][r] = entry[i].snpGranules[r] != '0;
     end
     for (int unsigned v = 0; v < NUM_VB; v++) begin
-      ownerToSend[POS_DEPTH + v] = victim[v].snpToSend;
+      ownerToSend[POS_DEPTH + v] = victim[v].snpToSend & rnfSnoopable;
       ownerPending[POS_DEPTH + v] = victim[v].snpPending;
       ownerKey[POS_DEPTH + v] = victim[v].key;
       ownerLive[POS_DEPTH + v] = victim[v].valid;
@@ -3091,7 +3146,130 @@ module chi_hnf_top #(
         victim[victimFreeIndex].key <= slcVictimKey;
         victim[victimFreeIndex].snpDirty <= 1'b1;
       end
+
+      // A snoop not yet sent to an RN-F that has left system coherency is
+      // dropped: the RN-F holds no coherent copy (IHI 0050H B15.2.1).
+      for (int unsigned r = 0; r < NUM_RNF; r++)
+        if (!rnfSnoopable[r]) begin
+          for (int unsigned i = 0; i < POS_DEPTH; i++)
+            entry[i].snpToSend[r] <= 1'b0;
+          for (int unsigned v = 0; v < NUM_VB; v++)
+            victim[v].snpToSend[r] <= 1'b0;
+        end
     end
+  end
+
+  // ---------------------------------------------------------------------
+  // System coherency, RAS and PMU (design specification, Section 9.16).
+  // ---------------------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (!resetn)
+      rnfSnoopableLast <= '0;
+    else
+      rnfSnoopableLast <= rnfSnoopable;
+  end
+
+  always_comb begin
+    logic [NUM_RNF-1:0] pending;
+    // The stash target must be inside system coherency to be snooped.
+    stashTargetValidDec = stashTargetValidRaw
+                          && ((stashTargetMaskDec & rnfSnoopable) != '0);
+    pending = '0;
+    for (int unsigned o = 0; o < NUM_OWNERS; o++)
+      pending = pending | ownerPending[o];
+    rnfIdle = sfRnfCleared & ~pending;
+    // An RN-F leaving coherency loses the monitors of its LPs once.
+    for (int unsigned q = 0; q < NUM_REQUESTERS; q++) begin
+      exclClearRequester[q] = 1'b0;
+      for (int unsigned r = 0; r < NUM_RNF; r++)
+        if ((REQUESTER_NODE_IDS[q] == RNF_NODE_IDS[r])
+            && rnfSnoopableLast[r] && !rnfSnoopable[r])
+          exclClearRequester[q] = 1'b1;
+    end
+  end
+
+  // RAS: an uncorrected error is reported in preference to a corrected one;
+  // the directory before the SLC tags before SLC data.
+  always_comb begin
+    logic slcDataCorrected;
+    logic [KEY_W-1:0] key;
+    slcDataCorrected = CFG.slcEn && (slcReadValid || slcReadForVictim)
+                       && slcReadCorrected;
+    // The records exist only with rasEn.
+    rasCorrected = CFG.rasEn
+                   && (sfEccCorrected || slcTagCorrected || slcDataCorrected);
+    rasUncorrected = CFG.rasEn
+                     && (sfEccUncorrected || slcTagUncorrected
+                         || (CFG.slcEn && slcEventUncorrectable));
+    rasSource = '0;
+    key = '0;
+    if (sfEccUncorrected) begin
+      rasSource = RAS_SRC_SF;
+      key = sfEccKey;
+    end else if (slcTagUncorrected) begin
+      rasSource = RAS_SRC_SLC_TAG;
+      key = slcTagKey;
+    end else if (CFG.slcEn && slcEventUncorrectable) begin
+      rasSource = RAS_SRC_SLC_DATA;
+      key = slcVictimValid ? slcVictimKey : slcReadKey;
+    end else if (sfEccCorrected) begin
+      rasSource = RAS_SRC_SF;
+      key = sfEccKey;
+    end else if (slcTagCorrected) begin
+      rasSource = RAS_SRC_SLC_TAG;
+      key = slcTagKey;
+    end else if (slcDataCorrected) begin
+      rasSource = RAS_SRC_SLC_DATA;
+      key = slcReadKey;
+    end
+    rasAddr = '0;
+    rasAddr[CFG.addrW-1:0] = {keyLine(key), 6'b0};
+    rasPas = keyPas(key);
+  end
+
+  // PMU counts of this cycle.
+  always_comb begin
+    int unsigned dmtEligible;
+    int unsigned dmtTaken;
+    int unsigned dctTaken;
+    dmtEligible = 0;
+    dmtTaken = 0;
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      if (dnStartValid[i] && (dnStartKind[i] == HNF_DN_READ)) begin
+        if (eDmtEligible[i])
+          dmtEligible++;
+        if (eDmtOk[i])
+          dmtTaken++;
+      end
+    dctTaken = 0;
+    if (snpRspComplete && (int'(snpRspOwner) < POS_DEPTH)
+        && (incomingRsp.opcode == RSP_SNP_RESP_FWDED)
+        && entry[POS_W'(snpRspOwner)].dctPlanned)
+      dctTaken++;
+    if (snpDatExpected && snpDatLast && (int'(snpDatOwner) < POS_DEPTH)
+        && (incomingDat.opcode == DAT_SNP_RESP_DATA_FWDED)
+        && entry[POS_W'(snpDatOwner)].dctPlanned)
+      dctTaken++;
+    pmuCount = '0;
+    pmuCount[PMU_SLC_HIT] = 8'(startValid && CFG.slcEn && slcLookupHit);
+    pmuCount[PMU_SLC_MISS] = 8'(startValid && CFG.slcEn && !slcLookupHit
+                                && slcCacheable(entry[startIndex].req));
+    pmuCount[PMU_SLC_EVICT] = 8'(slcEventEviction);
+    pmuCount[PMU_SNOOP_SENT] = 8'(snpIssueFire);
+    pmuCount[PMU_DCT_ELIGIBLE] = 8'(startValid && planDctEligible);
+    pmuCount[PMU_DCT_TAKEN] = 8'(dctTaken);
+    pmuCount[PMU_DMT_ELIGIBLE] = 8'(dmtEligible);
+    pmuCount[PMU_DMT_TAKEN] = 8'(dmtTaken);
+    pmuCount[PMU_DWT_ELIGIBLE] = 8'(startValid && planDwtEligible);
+    pmuCount[PMU_DWT_TAKEN] = 8'(startValid && planEntry.dwtUsed);
+    pmuCount[PMU_RETRY] = 8'(retryHandshake);
+    pmuCount[PMU_GPC_FAULT] = 8'(gpcCheckDone && gpcCheckFail
+                                 && ((gpcAllocCheck && posAllocReady)
+                                     || gpcRecheckValid));
+    pmuCount[PMU_EXCL_PASS] = 8'(exclCommitValid && exclCommitStore && exclPass);
+    pmuCount[PMU_EXCL_FAIL] = 8'(exclCommitValid && exclCommitStore && !exclPass);
+    pmuCount[PMU_REQ_ALLOC] = 8'(posAllocValid && posAllocReady);
+    pmuCount[PMU_SLC_FILL] = 8'(slcEventFill);
   end
 
   // Line buffers. One DAT packet arrives per cycle, so one owner is written

@@ -29,6 +29,13 @@
 // With slcEccEn each 64-bit word of a line carries SECDED check bits: a
 // single-bit error is corrected on the way out, a double-bit error poisons
 // that word (IHI 0050H B9.2.3) and is reported.
+//
+// With CFG.rasEn each way's {valid, dirty, tag} carries SECDED check bits
+// too. A single-bit error is corrected wherever the way is read and written
+// back corrected when the update port next writes its set. A double-bit
+// error fences the way: it matches no location and is never replaced or
+// walked, so whatever it held, Dirty data included, is lost; that loss is
+// reported once, on tagUncorrected.
 module chi_slc #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned KEY_W = CFG.addrW - 6,
@@ -71,7 +78,13 @@ module chi_slc #(
   // Events, for the counters of a later stage.
   output logic eventFill,
   output logic eventDirtyEviction,
-  output logic eventUncorrectable
+  output logic eventUncorrectable,
+  // A valid line replaced by a fill.
+  output logic eventEviction,
+  // Tag RAS events and the key the failing access used.
+  output logic tagCorrected,
+  output logic tagUncorrected,
+  output logic [KEY_W-1:0] tagKey
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -165,36 +178,105 @@ module chi_slc #(
     return value;
   endfunction
 
+  // Tag SECDED over each way's {valid, dirty, tag}, and the fenced ways.
+  localparam int unsigned TSTATE_W = TAG_W + 2;
+  localparam int unsigned TCHUNKS = (TSTATE_W + 63) / 64;
+  localparam int unsigned TECC_W = 8 * TCHUNKS;
+  logic [TECC_W-1:0] tagEccRam [SETS][WAYS];
+  logic [WAYS-1:0] fenceRam [SETS];
+
+  function automatic logic [TECC_W-1:0] tagCheck(
+    input logic valid,
+    input logic dirty,
+    input logic [TAG_W-1:0] tag
+  );
+    logic [TCHUNKS*64-1:0] bits;
+    logic [TECC_W-1:0] check;
+    bits = '0;
+    bits[TSTATE_W-1:0] = {valid, dirty, tag};
+    check = '0;
+    if (CFG.rasEn)
+      for (int unsigned c = 0; c < TCHUNKS; c++)
+        check[c*8 +: 8] = secdedEncode(bits[c*64 +: 64]);
+    return check;
+  endfunction
+
+  // A way's {valid, dirty, tag} as stored, corrected.
+  function automatic logic [TSTATE_W-1:0] tagRead(
+    input logic [SET_W-1:0] set,
+    input logic [WAY_W-1:0] way,
+    output logic corrected,
+    output logic bad
+  );
+    logic [TCHUNKS*64-1:0] bits;
+    logic [TCHUNKS*64-1:0] fixed;
+    corrected = 1'b0;
+    bad = 1'b0;
+    bits = '0;
+    bits[TSTATE_W-1:0] = {validRam[set][way], dirtyRam[set][way], tagRam[set][way]};
+    fixed = bits;
+    if (CFG.rasEn)
+      for (int unsigned c = 0; c < TCHUNKS; c++) begin
+        logic chunkCorrected;
+        logic chunkBad;
+        fixed[c*64 +: 64] = secdedDecode(bits[c*64 +: 64],
+                                         tagEccRam[set][way][c*8 +: 8],
+                                         chunkCorrected, chunkBad);
+        if (chunkCorrected)
+          corrected = 1'b1;
+        if (chunkBad)
+          bad = 1'b1;
+      end
+    return fixed[TSTATE_W-1:0];
+  endfunction
+
   // ---------------------------------------------------------------------
-  // Lookup and read.
+  // Lookup and read, over the corrected state; a fenced or failing way
+  // takes no part.
   // ---------------------------------------------------------------------
   logic [SET_W-1:0] lookupSet;
   logic [WAY_W-1:0] lookupWay;
   logic [SET_W-1:0] readSet;
   logic [WAY_W-1:0] readWay;
+  logic [WAYS-1:0] lookupBad;  // newly failing ways
+  logic [WAYS-1:0] readBad;
 
   always_comb begin
     lookupSet = lookupKey[SET_W-1:0];
     lookupHit = 1'b0;
     lookupDirty = 1'b0;
     lookupWay = '0;
-    for (int unsigned way = 0; way < WAYS; way++)
-      if (validRam[lookupSet][way]
-          && (tagRam[lookupSet][way] == lookupKey[KEY_W-1:SET_W])) begin
+    lookupBad = '0;
+    for (int unsigned way = 0; way < WAYS; way++) begin
+      logic [TSTATE_W-1:0] state;
+      logic wayCorrected;
+      logic wayBad;
+      state = tagRead(lookupSet, WAY_W'(way), wayCorrected, wayBad);
+      lookupBad[way] = wayBad && !fenceRam[lookupSet][way];
+      if (!wayBad && !fenceRam[lookupSet][way] && state[TSTATE_W-1]
+          && (state[TAG_W-1:0] == lookupKey[KEY_W-1:SET_W])) begin
         lookupHit = 1'b1;
-        lookupDirty = dirtyRam[lookupSet][way];
+        lookupDirty = state[TAG_W];
         lookupWay = WAY_W'(way);
       end
+    end
 
     readSet = readKey[SET_W-1:0];
     readHit = 1'b0;
     readWay = '0;
-    for (int unsigned way = 0; way < WAYS; way++)
-      if (validRam[readSet][way]
-          && (tagRam[readSet][way] == readKey[KEY_W-1:SET_W])) begin
+    readBad = '0;
+    for (int unsigned way = 0; way < WAYS; way++) begin
+      logic [TSTATE_W-1:0] state;
+      logic wayCorrected;
+      logic wayBad;
+      state = tagRead(readSet, WAY_W'(way), wayCorrected, wayBad);
+      readBad[way] = readValid && wayBad && !fenceRam[readSet][way];
+      if (!wayBad && !fenceRam[readSet][way] && state[TSTATE_W-1]
+          && (state[TAG_W-1:0] == readKey[KEY_W-1:SET_W])) begin
         readHit = 1'b1;
         readWay = WAY_W'(way);
       end
+    end
     readData = lineOut(lineIndex(readSet, readWay), readPoison, readCorrected);
   end
 
@@ -222,6 +304,19 @@ module chi_slc #(
   logic [WAY_W-1:0] opWay;
   logic [7:0] lineOutPoison;
   logic lineOutCorrected;
+  // The corrected state of the update set and of the way the walk is on.
+  logic [WAYS-1:0] upValid;
+  logic [WAYS-1:0] upDirty;
+  logic [TAG_W-1:0] upTag [WAYS];
+  logic [WAYS-1:0] upCorrected;
+  logic [WAYS-1:0] upBad;
+  logic [WAYS-1:0] upDead;
+  logic wkValid;
+  logic wkDirty;
+  logic [TAG_W-1:0] wkTag;
+  logic wkCorrected;
+  logic wkBad;
+  logic wkDead;
   // For the bound assertions: two valid ways of the update set hold one
   // location, or a dirty line is about to leave without a write-back.
   logic setDuplicate;
@@ -234,17 +329,28 @@ module chi_slc #(
     invalidFound = 1'b0;
     invalidWay = '0;
     for (int unsigned way = 0; way < WAYS; way++) begin
-      lockedWays[way] = 1'b0;
+      logic [TSTATE_W-1:0] state;
+      logic wayCorrected;
+      logic wayBad;
+      state = tagRead(updateSet, WAY_W'(way), wayCorrected, wayBad);
+      upValid[way] = state[TSTATE_W-1];
+      upDirty[way] = state[TAG_W];
+      upTag[way] = state[TAG_W-1:0];
+      upCorrected[way] = wayCorrected && !wayBad;
+      upBad[way] = wayBad && !fenceRam[updateSet][way];
+      upDead[way] = wayBad || fenceRam[updateSet][way];
+      // A dead way is never replaced.
+      lockedWays[way] = upDead[way];
       for (int unsigned lock = 0; lock < NUM_LOCKS; lock++)
-        if (lockValid[lock] && validRam[updateSet][way]
-            && (lockKey[lock] == {tagRam[updateSet][way], updateSet}))
+        if (lockValid[lock] && !upDead[way] && upValid[way]
+            && (lockKey[lock] == {upTag[way], updateSet}))
           lockedWays[way] = 1'b1;
-      if (validRam[updateSet][way]
-          && (tagRam[updateSet][way] == updateKey[KEY_W-1:SET_W])) begin
+      if (!upDead[way] && upValid[way]
+          && (upTag[way] == updateKey[KEY_W-1:SET_W])) begin
         updateHit = 1'b1;
         updateHitWay = WAY_W'(way);
       end
-      if (!invalidFound && !validRam[updateSet][way]) begin
+      if (!invalidFound && !upDead[way] && !upValid[way]) begin
         invalidFound = 1'b1;
         invalidWay = WAY_W'(way);
       end
@@ -288,8 +394,7 @@ module chi_slc #(
     updateReady = 1'b0;
     if (updateRemove) begin
       targetWay = updateHitWay;
-      evictDirty = updateHit && dirtyRam[updateSet][updateHitWay]
-                   && !updateDiscard;
+      evictDirty = updateHit && upDirty[updateHitWay] && !updateDiscard;
       updateReady = !evictDirty || victimReady;
       doRemove = updateHit;
     end else if (updateHit) begin
@@ -302,7 +407,7 @@ module chi_slc #(
       doWrite = 1'b1;
     end else if (replaceFound) begin
       targetWay = replaceWay;
-      evictDirty = dirtyRam[updateSet][replaceWay];
+      evictDirty = upValid[replaceWay] && upDirty[replaceWay];
       updateReady = !evictDirty || victimReady;
       doWrite = 1'b1;
     end else begin
@@ -315,46 +420,83 @@ module chi_slc #(
       evictDirty = 1'b0;
     end
 
-    // The walk takes the update port when the HN-F leaves it idle.
+    // The walk takes the update port when the HN-F leaves it idle, and
+    // passes over a dead way.
     walkActive = walking && !updateValid;
+    begin
+      logic [TSTATE_W-1:0] state;
+      logic wayBad;
+      state = tagRead(walkSet, walkWay, wkCorrected, wayBad);
+      wkValid = state[TSTATE_W-1];
+      wkDirty = state[TAG_W];
+      wkTag = state[TAG_W-1:0];
+      wkBad = walking && wayBad && !fenceRam[walkSet][walkWay];
+      wkDead = wayBad || fenceRam[walkSet][walkWay];
+    end
     walkLocked = 1'b0;
     for (int unsigned lock = 0; lock < NUM_LOCKS; lock++)
-      if (lockValid[lock] && validRam[walkSet][walkWay]
-          && (lockKey[lock] == {tagRam[walkSet][walkWay], walkSet}))
+      if (lockValid[lock] && !wkDead && wkValid
+          && (lockKey[lock] == {wkTag, walkSet}))
         walkLocked = 1'b1;
-    walkClean = walkActive && !walkLocked && validRam[walkSet][walkWay]
-                && dirtyRam[walkSet][walkWay];
-    walkRemove = walkActive && !walkLocked && validRam[walkSet][walkWay]
+    walkClean = walkActive && !walkLocked && !wkDead && wkValid && wkDirty;
+    walkRemove = walkActive && !walkLocked && !wkDead && wkValid
                  && walkInvalidate;
-    walkAdvance = walkActive && !walkLocked && (!walkClean || victimReady);
+    walkAdvance = walkActive && (wkDead || (!walkLocked && (!walkClean || victimReady)));
 
     opSet = (walkActive) ? walkSet : updateSet;
     opWay = (walkActive) ? walkWay : targetWay;
     victimValid = evictDirty || (walkClean && walkAdvance);
-    victimKey = {tagRam[opSet][opWay], opSet};
+    victimKey = {(walkActive ? wkTag : upTag[targetWay]), opSet};
     victimData = lineOut(lineIndex(opSet, opWay), lineOutPoison, lineOutCorrected);
     victimPoison = lineOutPoison;
     maintWalking = walking;
 
     eventFill = updateReady && doWrite && !updateHit;
+    eventEviction = updateReady && doWrite && !updateHit && upValid[targetWay];
 
     setDuplicate = 1'b0;
     for (int unsigned first = 0; first < WAYS; first++)
       for (int unsigned second = first + 1; second < WAYS; second++)
-        if (validRam[updateSet][first] && validRam[updateSet][second]
-            && (tagRam[updateSet][first] == tagRam[updateSet][second]))
+        if (!upDead[first] && !upDead[second] && upValid[first]
+            && upValid[second] && (upTag[first] == upTag[second]))
           setDuplicate = 1'b1;
     droppingDirty = (updateValid && updateReady
                      && ((doWrite && !updateHit
-                          && validRam[updateSet][targetWay]
-                          && dirtyRam[updateSet][targetWay])
-                         || (doRemove && dirtyRam[updateSet][targetWay]
+                          && upValid[targetWay] && upDirty[targetWay])
+                         || (doRemove && upDirty[targetWay]
                              && !updateDiscard)))
-                    || (walkRemove && walkAdvance && dirtyRam[walkSet][walkWay]);
+                    || (walkRemove && walkAdvance && wkDirty);
     eventDirtyEviction = victimValid;
     eventUncorrectable = (readValid && (readPoison != poisonRam[lineIndex(readSet, readWay)]))
                          || (victimValid && (victimPoison
                                              != poisonRam[lineIndex(opSet, opWay)]));
+  end
+
+  // Tag RAS events: a way newly found failing, else a corrected way being
+  // written back.
+  always_comb begin
+    logic [WAY_W-1:0] badWay;
+    tagUncorrected = CFG.rasEn && ((lookupBad != '0) || (readBad != '0)
+                                   || (upBad != '0) || wkBad);
+    tagCorrected = CFG.rasEn
+                   && ((updateValid && updateReady && (upCorrected != '0))
+                       || ((walkClean || walkRemove) && walkAdvance && wkCorrected));
+    badWay = '0;
+    for (int unsigned way = WAYS; way > 0; way--)
+      if (lookupBad[way-1] || readBad[way-1] || upBad[way-1])
+        badWay = WAY_W'(way - 1);
+    if (lookupBad != '0)
+      tagKey = {tagRam[lookupSet][badWay], lookupSet};
+    else if (readBad != '0)
+      tagKey = {tagRam[readSet][badWay], readSet};
+    else if (upBad != '0)
+      tagKey = {tagRam[updateSet][badWay], updateSet};
+    else if (wkBad)
+      tagKey = {tagRam[walkSet][walkWay], walkSet};
+    else if (updateValid && updateReady && (upCorrected != '0))
+      tagKey = updateKey;
+    else
+      tagKey = {wkTag, walkSet};
   end
 
   always_ff @(posedge clk) begin
@@ -362,10 +504,13 @@ module chi_slc #(
       for (int unsigned set = 0; set < SETS; set++) begin
         validRam[set] <= '0;
         dirtyRam[set] <= '0;
+        fenceRam[set] <= '0;
         plruRam[set] <= '0;
         rrpvRam[set] <= '1;
-        for (int unsigned way = 0; way < WAYS; way++)
+        for (int unsigned way = 0; way < WAYS; way++) begin
           tagRam[set][way] <= '0;
+          tagEccRam[set][way] <= '0;
+        end
       end
       for (int unsigned line = 0; line < LINES; line++) begin
         dataRam[line] <= '0;
@@ -380,12 +525,39 @@ module chi_slc #(
     end else begin
       lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
 
+      // A newly failing way is fenced.
+      for (int unsigned way = 0; way < WAYS; way++) begin
+        if (lookupBad[way])
+          fenceRam[lookupSet][way] <= 1'b1;
+        if (readBad[way])
+          fenceRam[readSet][way] <= 1'b1;
+        if (upBad[way])
+          fenceRam[updateSet][way] <= 1'b1;
+      end
+      if (wkBad)
+        fenceRam[walkSet][walkWay] <= 1'b1;
+
+      // The ways of the update set an update does not write go back
+      // corrected.
+      if (updateValid && updateReady)
+        for (int unsigned way = 0; way < WAYS; way++)
+          if ((!(doWrite || doRemove) || (WAY_W'(way) != targetWay))
+              && upCorrected[way]) begin
+            validRam[updateSet][way] <= upValid[way];
+            dirtyRam[updateSet][way] <= upDirty[way];
+            tagRam[updateSet][way] <= upTag[way];
+            tagEccRam[updateSet][way] <= tagCheck(upValid[way], upDirty[way], upTag[way]);
+          end
+
       if (updateValid && updateReady && doWrite) begin
         validRam[updateSet][targetWay] <= 1'b1;
         // A line that was dirty stays dirty until it is written back.
         dirtyRam[updateSet][targetWay] <= updateDirty
-                                          || (updateHit && dirtyRam[updateSet][targetWay]);
+                                          || (updateHit && upDirty[targetWay]);
         tagRam[updateSet][targetWay] <= updateKey[KEY_W-1:SET_W];
+        tagEccRam[updateSet][targetWay] <=
+          tagCheck(1'b1, updateDirty || (updateHit && upDirty[targetWay]),
+                   updateKey[KEY_W-1:SET_W]);
         dataRam[lineIndex(updateSet, targetWay)] <= updateData;
         eccRam[lineIndex(updateSet, targetWay)] <= eccOf(updateData);
         poisonRam[lineIndex(updateSet, targetWay)] <= updatePoison;
@@ -404,6 +576,8 @@ module chi_slc #(
       if (updateValid && updateReady && doRemove) begin
         validRam[updateSet][targetWay] <= 1'b0;
         dirtyRam[updateSet][targetWay] <= 1'b0;
+        tagRam[updateSet][targetWay] <= upTag[targetWay];
+        tagEccRam[updateSet][targetWay] <= tagCheck(1'b0, 1'b0, upTag[targetWay]);
       end
 
       // A lookup that hits marks the line recently used.
@@ -419,10 +593,13 @@ module chi_slc #(
         walkSet <= '0;
         walkWay <= '0;
       end else if (walkAdvance) begin
-        if (walkClean)
-          dirtyRam[walkSet][walkWay] <= 1'b0;
-        if (walkRemove)
-          validRam[walkSet][walkWay] <= 1'b0;
+        if (walkClean || walkRemove) begin
+          validRam[walkSet][walkWay] <= wkValid && !walkRemove;
+          dirtyRam[walkSet][walkWay] <= wkDirty && !walkClean;
+          tagRam[walkSet][walkWay] <= wkTag;
+          tagEccRam[walkSet][walkWay] <=
+            tagCheck(wkValid && !walkRemove, wkDirty && !walkClean, wkTag);
+        end
         if (int'(walkWay) == (WAYS - 1)) begin
           walkWay <= '0;
           if (int'(walkSet) == (SETS - 1))

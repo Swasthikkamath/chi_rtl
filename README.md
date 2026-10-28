@@ -19,8 +19,9 @@ per HN-F, a completer-side Granule Protection Check (on-chip table or GPT
 walk), concurrent DVM operations at the MN with Sync ordering, per-LP exclusive
 monitors with optional address comparison at both Homes, direct cache, memory and write transfers (DCT with every
 forwarding snoop, DMT by `ReadNoSnp` or `ReadNoSnpSep`, DWT) at the HN-F, a directory with dirty-safe eviction that
-keeps the SLC coherent, DataCheck checking with Poison or DERR, atomic transactions, cache stashing with Data Pull, and
-`PrefetchTgt` routing.
+keeps the SLC coherent, DataCheck checking with Poison or DERR, the SYSCOREQ/SYSCOACK coherency handshake, optional
+SECDED RAS with error records and interrupts, HN-F performance and crosspoint flit counters, a per-port REQ token-bucket
+QoS regulator, atomic transactions, cache stashing with Data Pull, and `PrefetchTgt` routing.
 
 Behaviour that is deliberately partial or absent includes multiple interfaces
 per node, replicated channels, per-hop L-Credits inside the fabric, an RN-side

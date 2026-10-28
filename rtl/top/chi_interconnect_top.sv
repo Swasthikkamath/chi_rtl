@@ -67,7 +67,11 @@ module chi_interconnect_top #(
   // endpoints read zero because those have no external link.
   output logic [NUM_NODES-1:0] linkUp,
   output logic [NUM_NODES-1:0] linkParityError,
-  output logic [NUM_NODES-1:0] linkCreditError
+  output logic [NUM_NODES-1:0] linkCreditError,
+  // RAS interrupt of each HN-F and of the GPC's GPT cache, HIGH while an
+  // uncorrected error is recorded (rasEn; design specification, 9.16).
+  output logic [(CFG.numHnf > 0 ? CFG.numHnf : 1)-1:0] rasIrq,
+  output logic gpcRasIrq
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -436,6 +440,50 @@ module chi_interconnect_top #(
   logic apbRegionError;
   logic apbPolicyError;
   logic fabricRouteError;
+  // System coherency (IHI 0050H B15): the RN-F and RN-D ports, RN-Fs first,
+  // as Requester ordinals.
+  localparam int unsigned NUM_COH = CFG.numRnf + CFG.numRnd;
+  localparam int unsigned RNF_E = (CFG.numRnf > 0) ? CFG.numRnf : 1;
+  logic [NUM_REQ_E-1:0] reqCoReq;
+  logic [NUM_REQ_E-1:0] reqCoAck;
+  logic [NUM_DVM_TGT_E-1:0] cohReq;
+  logic [NUM_DVM_TGT_E-1:0] cohAck;
+  logic [NUM_DVM_TGT_E-1:0] cohSnoopable;
+  logic [NUM_DVM_TGT_E-1:0] cohDrained;
+  logic [NUM_HNF_E-1:0][RNF_E-1:0] hnfRnfIdle;
+  logic [NUM_MN_E-1:0][NUM_DVM_TGT_E-1:0] mnNodeIdle;
+  // REQ injection of the Request Node ports, through the QoS regulator.
+  logic [NUM_REQ_E-1:0] reqPortValid;
+  logic [NUM_REQ_E-1:0] reqPortReady;
+  logic [NUM_REQ_E-1:0] qosReqValid;
+  logic [NUM_REQ_E-1:0] qosReqReady;
+  logic [NUM_REQ_E-1:0][7:0] qosTokens;
+  // RAS records: every HN-F, then the GPC's GPT cache when it walks.
+  localparam int unsigned NUM_REC = NUM_HNF_E + ((CFG.gpcMode == GPC_WALK) ? 1 : 0);
+  logic [NUM_HNF_E-1:0] hnfRasCorrected;
+  logic [NUM_HNF_E-1:0] hnfRasUncorrected;
+  logic [NUM_HNF_E-1:0][3:0] hnfRasSource;
+  logic [NUM_HNF_E-1:0][CHI_MAX_ADDR_W-1:0] hnfRasAddr;
+  logic [NUM_HNF_E-1:0][2:0] hnfRasPas;
+  logic gpcRasCorrected;
+  logic gpcRasUncorrected;
+  logic [CHI_MAX_ADDR_W-1:0] gpcRasAddr;
+  logic [NUM_REC-1:0] recCorrected;
+  logic [NUM_REC-1:0] recUncorrected;
+  logic [NUM_REC-1:0][3:0] recSource;
+  logic [NUM_REC-1:0][CHI_MAX_ADDR_W-1:0] recAddr;
+  logic [NUM_REC-1:0][2:0] recPas;
+  logic [NUM_REC-1:0] recIrq;
+  // PMU: per-HN-F event counts and per-crosspoint flit counts.
+  localparam int unsigned NUM_XP_E = (numXpOf(CFG) > 0) ? numXpOf(CFG) : 1;
+  logic [NUM_HNF_E-1:0][chi_hnf_pkg::HNF_PMU_EVENTS-1:0][7:0] hnfPmuCount;
+  logic [NUM_XP_E-1:0][3:0][3:0] xpInjected;
+  logic [NUM_XP_E-1:0][3:0][3:0] xpEjected;
+  // APB block 3: RAS records and counters.
+  logic apbObsSelect;
+  logic [31:0] apbObsRdata;
+  logic apbObsReady;
+  logic apbObsError;
 
   generate
     begin : chi_cfg_check
@@ -557,6 +605,16 @@ module chi_interconnect_top #(
           $fatal(1, "DMT/DWT require a Home Node and SN-F");
         if (CFG.dmtSepEn && !CFG.dmtEn)
           $fatal(1, "dmtSepEn selects ReadNoSnpSep for DMT reads, so it needs dmtEn");
+        if ((CFG.rasEn || CFG.pmuEn) && (CFG.cfgAccess != CFG_APB))
+          $fatal(1, "rasEn and pmuEn need cfgAccess APB: the error records and counters are APB registers");
+        if (CFG.rasEn && (CFG.numHnf == 0))
+          $fatal(1, "rasEn needs an HN-F: the error records are kept per HN-F");
+        if (CFG.qosRegEn && ((CFG.qosRegRate == 0) || (CFG.qosRegRate > 256)))
+          $fatal(1, "qosRegRate is %0d but must be 1 to 256 tokens per 256 cycles", CFG.qosRegRate);
+        if (CFG.qosRegEn && ((CFG.qosRegBurst == 0) || (CFG.qosRegBurst > 255)))
+          $fatal(1, "qosRegBurst is %0d but must be 1 to 255 tokens", CFG.qosRegBurst);
+        if (CFG.qosRegEn && (NUM_REQ == 0))
+          $fatal(1, "qosRegEn needs a Request Node port to regulate");
         if (CFG.stashEn && ((CFG.numRnf == 0) || (CFG.numHnf == 0)))
           $fatal(1, "Stash requires RN-F and HN-F endpoints");
         if (CFG.dvmEn && ((CFG.numMn == 0) || (NUM_REQ == 0)))
@@ -711,6 +769,7 @@ module chi_interconnect_top #(
       apbRegionSelect = PSEL && (PADDR[11:8] == 4'h0);
       apbPolicySelect = PSEL && (PADDR[11:8] == 4'h1);
       apbGpcSelect = PSEL && (PADDR[11:8] == 4'h2) && (CFG.gpcMode != GPC_NONE);
+      apbObsSelect = PSEL && (PADDR[11:8] == 4'h3) && (CFG.rasEn || CFG.pmuEn);
     end
 
     chi_cfg_slave #(
@@ -742,6 +801,27 @@ module chi_interconnect_top #(
       .slcMaintStart, .slcMaintInvalidate, .slcMaintBusy
     );
 
+    if (CFG.rasEn || CFG.pmuEn) begin : observability
+      chi_obs_regs #(
+        .CFG(CFG), .NUM_HNF(NUM_HNF_E), .NUM_REC(NUM_REC), .NUM_XP(NUM_XP_E)
+      ) obs_regs (
+        .PCLK(clk), .PRESETn(resetn), .PADDR(PADDR[7:0]), .PSEL(apbObsSelect),
+        .PENABLE, .PWRITE, .PWDATA, .PSTRB, .PPROT, .PNSE,
+        .PRDATA(apbObsRdata), .PREADY(apbObsReady), .PSLVERR(apbObsError),
+        .rasCorrected(recCorrected), .rasUncorrected(recUncorrected),
+        .rasSource(recSource), .rasAddr(recAddr), .rasPas(recPas),
+        .rasIrq(recIrq), .pmuCount(hnfPmuCount),
+        .xpInjected(xpInjected), .xpEjected(xpEjected)
+      );
+    end else begin : no_observability
+      always_comb begin
+        apbObsRdata = '0;
+        apbObsReady = 1'b1;
+        apbObsError = 1'b1;
+        recIrq = '0;
+      end
+    end
+
     always_comb begin
       PRDATA = '0;
       PREADY = 1'b1;
@@ -758,6 +838,10 @@ module chi_interconnect_top #(
         PRDATA = apbGpcRdata;
         PREADY = apbGpcReady;
         PSLVERR = apbGpcError;
+      end else if (apbObsSelect) begin
+        PRDATA = apbObsRdata;
+        PREADY = apbObsReady;
+        PSLVERR = apbObsError;
       end
     end
   end else begin : no_apb_cfg
@@ -780,6 +864,11 @@ module chi_interconnect_top #(
       apbPolicyReady = 1'b1;
       apbRegionError = 1'b0;
       apbPolicyError = 1'b0;
+      apbObsSelect = 1'b0;
+      apbObsRdata = '0;
+      apbObsReady = 1'b1;
+      apbObsError = 1'b1;
+      recIrq = '0;
     end
     for (genvar i = 0; i < NUM_HNF_E; i++) begin : reset_policy
       assign hnfPolicy[i] = CHI_HNF_POLICY_DEFAULT;
@@ -898,6 +987,7 @@ module chi_interconnect_top #(
     logic portDatTxValid, portDatTxReady; \
     logic [datFlitWidth(CFG)-1:0] portDatTxFlit; \
     logic portLinkUp, portParityError, portCreditError; \
+    logic portSysCoReq, portSysCoAck, portReqReadyIn; \
     chi_link_port #(.CFG(CFG), .REQUESTER_PORT(IS_REQUESTER)) link ( \
       .clk, .resetn, .chiPort(PORT[i]), \
       .reqRxValid(portReqRxValid), .reqRxReady(portReqRxReady), \
@@ -911,7 +1001,8 @@ module chi_interconnect_top #(
       .snpTxReady(portSnpTxReady), .snpTxFlit(portSnpTxFlit), \
       .datTxValid(portDatTxValid), .datTxReady(portDatTxReady), \
       .datTxFlit(portDatTxFlit), .linkUp(portLinkUp), \
-      .parityError(portParityError), .creditError(portCreditError) \
+      .parityError(portParityError), .creditError(portCreditError), \
+      .sysCoReq(portSysCoReq), .sysCoAck(portSysCoAck) \
     ); \
     always_comb begin \
       portRspTxFlit = '0; portDatTxFlit = '0; \
@@ -920,7 +1011,7 @@ module chi_interconnect_top #(
       portReqTxValid = 1'b0; portSnpTxValid = 1'b0; \
       portReqRxReady = 1'b0; portRspRxReady = 1'b0; portDatRxReady = 1'b0; \
       if (i < COUNT) begin \
-        portReqRxReady = reqInReady[OFFSET+i]; \
+        portReqRxReady = portReqReadyIn; \
         portRspRxReady = rspInReady[OFFSET+i]; \
         portDatRxReady = datInReady[OFFSET+i]; \
         portRspTxValid = rspOutValid[OFFSET+i]; \
@@ -938,7 +1029,10 @@ module chi_interconnect_top #(
     end \
     if (i < COUNT) begin : active \
       if (IS_REQUESTER) begin : requester_ingress \
-        assign reqInValid[OFFSET+i] = portReqRxValid; \
+        assign reqPortValid[OFFSET+i] = portReqRxValid; \
+        assign portReqReadyIn = reqPortReady[OFFSET+i]; \
+        assign reqCoReq[OFFSET+i] = portSysCoReq; \
+        assign portSysCoAck = reqCoAck[OFFSET+i]; \
         assign requesterRawReq[OFFSET+i] = \
           {{(CHI_MAX_REQ_FLIT_W-reqFlitWidth(CFG)){1'b0}}, portReqRxFlit}; \
         assign reqInFlit[OFFSET+i] = \
@@ -949,6 +1043,8 @@ module chi_interconnect_top #(
       end else begin : subordinate_ingress \
         assign reqInValid[OFFSET+i] = 1'b0; \
         assign reqInFlit[OFFSET+i] = '0; \
+        assign portReqReadyIn = reqInReady[OFFSET+i]; \
+        assign portSysCoAck = portSysCoReq; \
         assign reqOutReady[OFFSET+i] = portReqTxReady; \
         assign snpOutReady[OFFSET+i] = 1'b1; \
       end \
@@ -976,6 +1072,69 @@ module chi_interconnect_top #(
   `CHI_CONNECT_PORT(snf, CFG.numSnf, OFF_SNF, 1'b0)
   `CHI_CONNECT_PORT(sni, CFG.numSni, OFF_SNI, 1'b0)
 `undef CHI_CONNECT_PORT
+
+  // REQ injection of every Request Node port passes the QoS regulator.
+  chi_qos_reg #(
+    .CFG(CFG), .NUM_PORTS(NUM_REQ_E)
+  ) qos_regulator (
+    .clk, .resetn, .inValid(reqPortValid), .inReady(reqPortReady),
+    .outValid(qosReqValid), .outReady(qosReqReady), .tokens(qosTokens)
+  );
+  for (genvar k = 0; k < NUM_REQ; k++) begin : requester_injection
+    assign reqInValid[k] = qosReqValid[k];
+    assign qosReqReady[k] = reqInReady[k];
+  end
+  for (genvar k = NUM_REQ; k < NUM_REQ_E; k++) begin : no_requester
+    assign reqPortValid[k] = 1'b0;
+    assign reqCoReq[k] = 1'b0;
+    assign qosReqReady[k] = 1'b0;
+  end
+
+  // System coherency: RN-F and RN-D ports handshake in chi_sysco; an RN-I
+  // has no snoop channel, so its SYSCOACK echoes SYSCOREQ. A node is
+  // drained once every HN-F and MN reports it so.
+  chi_sysco #(
+    .CFG(CFG), .NUM_COH(NUM_DVM_TGT_E)
+  ) system_coherency (
+    .clk, .resetn, .coReq(cohReq), .coAck(cohAck), .snoopable(cohSnoopable),
+    .drained(cohDrained)
+  );
+  always_comb begin
+    for (int unsigned k = 0; k < NUM_DVM_TGT_E; k++) begin
+      cohReq[k] = (k < NUM_COH) ? reqCoReq[k] : 1'b0;
+      cohDrained[k] = 1'b1;
+      if (k < CFG.numRnf)
+        for (int unsigned h = 0; h < CFG.numHnf; h++)
+          cohDrained[k] = cohDrained[k] && hnfRnfIdle[h][k];
+      for (int unsigned m = 0; m < CFG.numMn; m++)
+        cohDrained[k] = cohDrained[k] && mnNodeIdle[m][k];
+    end
+    for (int unsigned k = 0; k < NUM_REQ_E; k++) begin
+      reqCoAck[k] = reqCoReq[k];
+      if ((k < NUM_COH) && (k < NUM_DVM_TGT_E))
+        reqCoAck[k] = cohAck[k];
+    end
+  end
+
+  // RAS records for the observability block, and the interrupts.
+  always_comb begin
+    for (int unsigned h = 0; h < NUM_HNF_E; h++) begin
+      recCorrected[h] = hnfRasCorrected[h];
+      recUncorrected[h] = hnfRasUncorrected[h];
+      recSource[h] = hnfRasSource[h];
+      recAddr[h] = hnfRasAddr[h];
+      recPas[h] = hnfRasPas[h];
+    end
+    if (NUM_REC > NUM_HNF_E) begin
+      recCorrected[NUM_REC-1] = gpcRasCorrected;
+      recUncorrected[NUM_REC-1] = gpcRasUncorrected;
+      recSource[NUM_REC-1] = chi_hnf_pkg::RAS_SRC_GPT;
+      recAddr[NUM_REC-1] = gpcRasAddr;
+      recPas[NUM_REC-1] = PAS_ROOT;
+    end
+    rasIrq = recIrq[NUM_HNF_E-1:0];
+    gpcRasIrq = (NUM_REC > NUM_HNF_E) ? recIrq[NUM_REC-1] : 1'b0;
+  end
 
   for (genvar i = OFF_HNF; i < NUM_NODES; i++) begin : internal_node_status
     assign linkUp[i] = 1'b0;
@@ -1006,6 +1165,7 @@ module chi_interconnect_top #(
   end
 
   for (genvar i = CFG.numMn; i < NUM_MN_E; i++) begin : no_mn_gpt
+    assign mnNodeIdle[i] = '1;
     assign mnGptInvalidateAll[i] = 1'b0;
     assign mnGptInvalidateByPa[i] = 1'b0;
     assign mnGptInvalidateAddr[i] = '0;
@@ -1026,7 +1186,9 @@ module chi_interconnect_top #(
       .dvmInvalidateAll(dvmGptInvalidateAll),
       .dvmInvalidateByPa(dvmGptInvalidateByPa),
       .dvmInvalidateAddr(dvmGptInvalidateAddr),
-      .walking(gpcWalking), .eventFault(gpcEventFault)
+      .walking(gpcWalking), .eventFault(gpcEventFault),
+      .rasCorrected(gpcRasCorrected), .rasUncorrected(gpcRasUncorrected),
+      .rasAddr(gpcRasAddr)
     );
   end else begin : no_gpc
     always_comb begin
@@ -1039,6 +1201,9 @@ module chi_interconnect_top #(
       apbGpcError = 1'b1;
       gpcWalking = 1'b0;
       gpcEventFault = 1'b0;
+      gpcRasCorrected = 1'b0;
+      gpcRasUncorrected = 1'b0;
+      gpcRasAddr = '0;
     end
   end
 
@@ -1047,6 +1212,13 @@ module chi_interconnect_top #(
     assign gptReadDone[i] = 1'b0;
     assign gptReadData[i] = '0;
     assign gptReadError[i] = 1'b0;
+    assign hnfRnfIdle[i] = '1;
+    assign hnfRasCorrected[i] = 1'b0;
+    assign hnfRasUncorrected[i] = 1'b0;
+    assign hnfRasSource[i] = '0;
+    assign hnfRasAddr[i] = '0;
+    assign hnfRasPas[i] = '0;
+    assign hnfPmuCount[i] = '0;
   end
   for (genvar i = CFG.numHnf + CFG.numHni; i < NUM_HOMES_E; i++) begin : no_home_check
     assign gpcCheckValid[i] = 1'b0;
@@ -1058,6 +1230,7 @@ module chi_interconnect_top #(
   for (genvar i = 0; i < CFG.numHnf; i++) begin : hnf_nodes
     // The SN-F that holds this HN-F's memory, by modulo or by HNF_TO_SNF.
     localparam int unsigned SNF_INDEX = snfIndexOfHnf(CFG, HNF_SNF_TABLE, i);
+    chi_pas_e rasPasOut;
     chi_hnf_top #(
       .CFG(CFG), .HN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_HNF+i]),
       .SN_NODE_ID(EFFECTIVE_NODE_IDS[OFF_SNF+SNF_INDEX]),
@@ -1092,8 +1265,13 @@ module chi_interconnect_top #(
       .gpcCheckDone(gpcCheckDone[i]), .gpcCheckFail(gpcCheckFail[i]),
       .gptReadValid(gptReadValid[i]), .gptReadAddr(gptReadAddr),
       .gptReadDone(gptReadDone[i]), .gptReadData(gptReadData[i]),
-      .gptReadError(gptReadError[i])
+      .gptReadError(gptReadError[i]),
+      .rnfSnoopable(cohSnoopable[RNF_E-1:0]), .rnfIdle(hnfRnfIdle[i]),
+      .rasCorrected(hnfRasCorrected[i]), .rasUncorrected(hnfRasUncorrected[i]),
+      .rasSource(hnfRasSource[i]), .rasAddr(hnfRasAddr[i]),
+      .rasPas(rasPasOut), .pmuCount(hnfPmuCount[i])
     );
+    assign hnfRasPas[i] = rasPasOut;
   end
 
   for (genvar i = 0; i < CFG.numHni; i++) begin : hni_nodes
@@ -1164,6 +1342,7 @@ module chi_interconnect_top #(
       .gptInvalidateAll(mnGptInvalidateAll[i]),
       .gptInvalidateByPa(mnGptInvalidateByPa[i]),
       .gptInvalidateAddr(mnGptInvalidateAddr[i]),
+      .nodeSnoopable(cohSnoopable), .nodeIdle(mnNodeIdle[i]),
       .idle(mnIdle[i])
     );
     assign reqInValid[OFF_MN+i] = 1'b0;
@@ -1175,7 +1354,8 @@ module chi_interconnect_top #(
 
   chi_noc_top #(
     .CFG(CFG), .NUM_PORTS(NUM_NODES), .AGE_LIMIT(AGE_LIMIT),
-    .NODE_IDS(EFFECTIVE_NODE_IDS), .PLACEMENTS(EFFECTIVE_PLACEMENTS)
+    .NODE_IDS(EFFECTIVE_NODE_IDS), .PLACEMENTS(EFFECTIVE_PLACEMENTS),
+    .NUM_XP_OUT(NUM_XP_E)
   ) noc (
     .clk, .resetn, .reqInValid, .reqInReady, .reqInFlit,
     .reqOutValid, .reqOutReady, .reqOutFlit,
@@ -1185,6 +1365,7 @@ module chi_interconnect_top #(
     .snpOutValid, .snpOutReady, .snpOutFlit,
     .datInValid, .datInReady, .datInFlit,
     .datOutValid, .datOutReady, .datOutFlit,
-    .routeError(fabricRouteError)
+    .routeError(fabricRouteError),
+    .xpInjected(xpInjected), .xpEjected(xpEjected)
   );
 endmodule

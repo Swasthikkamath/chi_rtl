@@ -50,7 +50,10 @@ module chi_hnf_compile (
     .gpcCheckValid(), .gpcCheckAddr(), .gpcCheckPas(), .gpcCheckSrcId(),
     .gpcCheckDone(1'b1), .gpcCheckFail(1'b0),
     .gptReadValid(1'b0), .gptReadAddr('0), .gptReadDone(), .gptReadData(),
-    .gptReadError()
+    .gptReadError(),
+    .rnfSnoopable('1), .rnfIdle(),
+    .rasCorrected(), .rasUncorrected(), .rasSource(), .rasAddr(), .rasPas(),
+    .pmuCount()
   );
 
   generate

@@ -41,6 +41,8 @@ module chi_sva_compile (
     .gptInvalidateAll(),
     .gptInvalidateByPa(),
     .gptInvalidateAddr(),
+    .nodeSnoopable('1),
+    .nodeIdle(),
     .idle(mnIdle)
   );
 endmodule

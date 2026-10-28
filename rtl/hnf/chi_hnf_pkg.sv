@@ -63,6 +63,31 @@ package chi_hnf_pkg;
     HNF_ERR_UNSUPPORTED = 3'd4   // the HN-F does not support the opcode
   } chi_hnf_err_e;
 
+  // PMU events of an HN-F; chi_obs_regs keeps a counter for each.
+  localparam int unsigned HNF_PMU_EVENTS = 16;
+  localparam int unsigned PMU_SLC_HIT      = 0;   // a starting access hits
+  localparam int unsigned PMU_SLC_MISS     = 1;   // a cacheable start misses
+  localparam int unsigned PMU_SLC_EVICT    = 2;   // a fill replaces a line
+  localparam int unsigned PMU_SNOOP_SENT   = 3;
+  localparam int unsigned PMU_DCT_ELIGIBLE = 4;   // DCT but for enable, policy, capability
+  localparam int unsigned PMU_DCT_TAKEN    = 5;   // a forwarding snoop forwarded
+  localparam int unsigned PMU_DMT_ELIGIBLE = 6;
+  localparam int unsigned PMU_DMT_TAKEN    = 7;
+  localparam int unsigned PMU_DWT_ELIGIBLE = 8;
+  localparam int unsigned PMU_DWT_TAKEN    = 9;
+  localparam int unsigned PMU_RETRY        = 10;  // RetryAck sent
+  localparam int unsigned PMU_GPC_FAULT    = 11;
+  localparam int unsigned PMU_EXCL_PASS    = 12;
+  localparam int unsigned PMU_EXCL_FAIL    = 13;
+  localparam int unsigned PMU_REQ_ALLOC    = 14;  // a request takes a POS entry
+  localparam int unsigned PMU_SLC_FILL     = 15;
+
+  // RAS error sources.
+  localparam logic [3:0] RAS_SRC_SF       = 4'd1;  // directory way
+  localparam logic [3:0] RAS_SRC_SLC_TAG  = 4'd2;
+  localparam logic [3:0] RAS_SRC_SLC_DATA = 4'd3;
+  localparam logic [3:0] RAS_SRC_GPT      = 4'd4;  // GPT cache entry
+
   // Downstream operation an owner asks the SN tracker for.
   typedef enum logic [1:0] {
     HNF_DN_READ   = 2'd0,  // ReadNoSnp into the owner's line buffer

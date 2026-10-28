@@ -82,6 +82,8 @@ module chi_noc_compile #(
     .NODE_IDS(NODE_IDS),
     .PLACEMENTS(PLACEMENTS)
   ) noc (
-    .*
+    .*,
+    .xpInjected(),
+    .xpEjected()
   );
 endmodule

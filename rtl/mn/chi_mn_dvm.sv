@@ -68,6 +68,10 @@ module chi_mn_dvm #(
   output logic gptInvalidateAll,
   output logic gptInvalidateByPa,
   output logic [chi_pkg::CHI_MAX_ADDR_W-1:0] gptInvalidateAddr,
+  // System coherency (IHI 0050H B15): a node outside the DVM domain gets no
+  // new SnpDVMOp, and is idle once none to it is outstanding.
+  input  logic [NUM_DVM_NODES-1:0] nodeSnoopable,
+  output logic [NUM_DVM_NODES-1:0] nodeIdle,
   output logic idle
 );
   import chi_cfg_pkg::*;
@@ -302,7 +306,7 @@ module chi_mn_dvm #(
             olderEligible = 1'b1;
         if (!snpValid && eMaySnoop[i] && !olderEligible)
           for (int unsigned t = 0; t < NUM_DVM_NODES; t++)
-            if (!snpValid && entry[i].toSend[t]
+            if (!snpValid && entry[i].toSend[t] && nodeSnoopable[t]
                 && !(entry[i].sync ? syncOut[t] : nonSyncOut[t])) begin
               snpValid = 1'b1;
               snpEntry = IDX_W'(i);
@@ -522,7 +526,8 @@ module chi_mn_dvm #(
         entry[payloadEntry].dataOwed <= 1'b0;
         entry[payloadEntry].payload <= incomingDat.data[63:0];
         if (entry[payloadEntry].supported)
-          entry[payloadEntry].toSend <= targetsFor(entry[payloadEntry].req);
+          entry[payloadEntry].toSend <= targetsFor(entry[payloadEntry].req)
+                                        & nodeSnoopable;
       end
 
       if (snpFire) begin
@@ -560,6 +565,17 @@ module chi_mn_dvm #(
         end
         rspPointer <= (int'(rspEntry) == (DEPTH - 1)) ? '0 : (rspEntry + 1'b1);
       end
+
+      // A SnpDVMOp not yet sent to a node that has left the DVM domain is
+      // dropped; a part 2 still follows its part 1.
+      for (int unsigned t = 0; t < NUM_DVM_NODES; t++)
+        if (!nodeSnoopable[t])
+          for (int unsigned i = 0; i < DEPTH; i++)
+            entry[i].toSend[t] <= 1'b0;
     end
   end
+
+  always_comb
+    for (int unsigned t = 0; t < NUM_DVM_NODES; t++)
+      nodeIdle[t] = !syncOut[t] && !nonSyncOut[t];
 endmodule

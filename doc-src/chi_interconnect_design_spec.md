@@ -87,7 +87,10 @@ packed flit field by itself is carriage, not implementation.
 | L-Credit manager, link TX and link RX | B13.11, B14.2 | Implemented | `chi_lcrd_mgr`, `chi_link_tx` and `chi_link_rx` implement finite credit accounting, receive buffering, and the `LCrdReturn` exchange in both directions: the transmitter spends its remaining credits on `LCrdReturn` flits when it deactivates, and the receiver recognises a zero `Opcode`, extinguishes the credit and waits for all of them before it releases `LINKACTIVEACK`. |
 | Link layer integrated at every node port | B13.11, B14.2 | Implemented | `chi_link_port` instantiates three receivers and three or four transmitters per port, and `chi_interconnect_top` instantiates one per RN-F, RN-D, RN-I, SN-F and SN-I interface. `*LCRDV` are real credit pulses, not ready echoes. |
 | Link activation and deactivation FSM | B14.5--B14.6 | Implemented | `chi_link_fsm` implements STOP, ACTIVATE, RUN and DEACTIVATE with credit-drain conditions, and is instantiated per channel per direction inside every port. |
-| System coherency interface | B15 | Partial | `TXSACTIVE` and `RXSACTIVE` follow reset and `SYSCOACK` echoes `SYSCOREQ`. There is no power-domain or coherency-entry sequencing. |
+| System coherency interface | B15 | Implemented (`syscoEn`) | Every RN-F and RN-D port runs the four-phase `SYSCOREQ`/`SYSCOACK` handshake in `chi_sysco`. `SYSCOACK` rises the cycle after `SYSCOREQ`. From the moment `SYSCOREQ` falls the node gets no new snoop or `SnpDVMOp`, unsent ones are dropped, its directory bits are hidden and then removed by a walk, and its exclusive monitors at the HN-F are cleared. `SYSCOACK` falls once every HN-F and MN reports it drained. An RN-I's `SYSCOACK` echoes `SYSCOREQ`; `TXSACTIVE` and `RXSACTIVE` still follow reset. Section 9.16. |
+| RAS: ECC, error records, interrupts | (implementation defined) | Implemented (`rasEn`) | SECDED on every directory way, every SLC way's tag and state, and every GPT cache entry, beside the SLC data SECDED of `slcEccEn`. Single-bit errors are corrected and written back; a double-bit error kills a directory way (its set is then snooped by broadcast), fences an SLC way, or drops a GPT cache entry. Each HN-F and the GPC keep an error record with counts, address and PAS, and raise an interrupt on an uncorrected error. Poisoned data stays poisoned. Section 9.16. |
+| Performance counters | (implementation defined) | Implemented (`pmuEn`) | Per HN-F: SLC hit, miss, eviction and fill; snoops sent; DCT, DMT and DWT eligible and taken; RetryAck; GPC faults; exclusive pass and fail; requests allocated. Per crosspoint and channel: flits injected and ejected. All 32-bit, readable over APB. Section 9.16. |
+| QoS regulator | (implementation defined) | Implemented (`qosRegEn`) | A token bucket per Request Node port on REQ injection: `qosRegRate` tokens per 256 cycles, up to `qosRegBurst`. Section 9.16. |
 | Flit parity | B9.3 | Implemented | `chi_link_tx` generates per-byte flit parity and `chi_link_rx` checks it. `parityEn` is accepted at the top and a mismatch raises `linkParityError` for that node. |
 | Control and credit signal checks | B9.3 | Not implemented | The `*CHK` scalars beside control, valid and credit signals are declared in the interface and driven to zero. Only the flit parity vectors are live. |
 | Link error reporting | B9 | Implemented | `linkUp`, `linkParityError` and `linkCreditError` are per-node-ordinal top-level outputs. Credit error covers receive-buffer overflow and L-Credit overflow or underflow. |
@@ -448,10 +451,12 @@ half of an old map and half of a new one. When `cfgAccess` is
 `REGION_*` parameters set at elaboration; the APB pins are then tied off and
 a transfer attempted on them raises `PSLVERR`.
 
-Status leaves through the three per-ordinal vectors already described:
-`linkUp`, `linkParityError` and `linkCreditError`. They are the only
-observability the design exports, and they are all link-layer facts. There is
-no transaction counter, no error-cause register and no interrupt.
+Status leaves through the three per-ordinal vectors already described,
+`linkUp`, `linkParityError` and `linkCreditError`, which are link-layer facts.
+With `rasEn` each HN-F and a walking GPC also raise an interrupt, `rasIrq` and
+`gpcRasIrq`, and APB block 3 holds their error records; with `pmuEn` the same
+block holds the HN-F event counters and the crosspoint flit counters (Section
+9.16).
 
 ## 2.7 RTL hierarchy
 
@@ -604,6 +609,12 @@ it is a parameter at all and what choosing it wrong costs.
 | `dvmEn` | 1 | if 1, an MN and a Requester must exist | Enables the MN sequencer. |
 | `stashEn` | 1 | if 1, RN-F and HN-F must exist | Enables stash decode, stash snoops and Data Pull. |
 | `exclEn` | 1 | if 1, a Home and monitors must exist | Enables exclusive monitors. |
+| `syscoEn` | 1 | 0 or 1 | RN-Fs and RN-Ds are snooped only while their `SYSCOREQ` is HIGH, and `SYSCOACK` follows the B15 handshake. 0 treats every node as always coherent and echoes `SYSCOREQ`. |
+| `rasEn` | 0 | needs `cfgAccess` APB and an HN-F | SECDED on directory ways, SLC tags and GPT cache entries; error records and interrupts. |
+| `pmuEn` | 0 | needs `cfgAccess` APB | HN-F event counters and crosspoint flit counters. |
+| `qosRegEn` | 0 | needs a Request Node | REQ injection token bucket per Request Node port. |
+| `qosRegRate` | 256 | 1 to 256 | Tokens added per 256 cycles; 256 is one flit per cycle. |
+| `qosRegBurst` | 8 | 1 to 255 | Tokens a bucket holds; each port starts full. |
 | `cfgAccess` | `CFG_PARAM_ONLY` | enum; CHI MMIO also requires HN-I | Selects no runtime writes, APB, or CHI MMIO. |
 | `hnfSnfMap` | `HNF_SNF_MAP_MODULO` | MODULO or TABLE; TABLE entries must name existing SN-Fs | HN-F to SN-F pairing, and the SN-F anchor of automatic placement. |
 
@@ -861,6 +872,8 @@ because every Home needs a Subordinate to pair with.
 | `linkUp` | out | `NUM_NODES` | Set while any receive channel of that node's link is in RUN. |
 | `linkParityError` | out | `NUM_NODES` | Flit parity mismatch observed on that node's link. |
 | `linkCreditError` | out | `NUM_NODES` | Receive-buffer overflow or L-Credit overflow or underflow on that node's link. |
+| `rasIrq` | out | `numHnf` (at least 1) | HN-F `i` has an uncorrected error recorded (`rasEn`); cleared through RAS_CLEAR. |
+| `gpcRasIrq` | out | 1 | The GPC's GPT cache has an uncorrected error recorded (`rasEn`, `gpcMode` WALK). |
 
 : Table 3.7 Top-level ports outside the node interfaces
 
@@ -896,7 +909,7 @@ Let `RW=reqFlitWidth(CFG)`, `SW=rspFlitWidth(CFG)`, `NW=snpFlitWidth(CFG)`,
 | `RXLINKACTIVEACK` | 1 | Node | IC | All classes; gates IC credit acceptance and flit transmission. |
 | `TXSACTIVE`, `RXSACTIVE` | 1 each | IC | Node | All classes; follow reset. |
 | `SYSCOREQ` | 1 | Node | IC | All classes. |
-| `SYSCOACK` | 1 | IC | Node | All classes; echoes `SYSCOREQ`. |
+| `SYSCOACK` | 1 | IC | Node | RN-F and RN-D: the B15 handshake of `chi_sysco` with `syscoEn`, else it echoes `SYSCOREQ`; every other class echoes `SYSCOREQ`. |
 | `TXREQFLITPEND`, `TXREQFLITV`, `TXREQFLIT[RW-1:0]` | 1, 1, RW | Node | IC | RN-F, RN-D, RN-I. `PEND` is accepted and not used for early arbitration. |
 | `TXREQLCRDV` | 1 | IC | Node | Requesters; one pulse per REQ L-Credit granted by the IC receiver. |
 | `RXREQFLITPEND`, `RXREQFLITV`, `RXREQFLIT[RW-1:0]` | 1, 1, RW | IC | Node | SN-F, SN-I. |
@@ -1230,9 +1243,10 @@ security policy and commit protocol in this section are
 
 APB runs on `clk` and `PREADY` is always 1. Addresses are 12-bit and word
 aligned. `PADDR[11:8]` selects a 256-byte block: block 0 is the region editor
-below, block 1 the HN-F policy registers of Table 7.1b, and every other block
-returns `PSLVERR`; block 2 holds the GPC registers of Table 7.1c when `gpcMode`
-is not NONE. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
+below, block 1 the HN-F policy registers of Table 7.1b, block 2 the GPC
+registers of Table 7.1c when `gpcMode` is not NONE, and block 3 the RAS and
+performance registers of Table 7.1d when `rasEn` or `pmuEn` is set; every other
+block returns `PSLVERR`. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
 A write must be a Root access with `rmeEn` (`PNSE=1`, `PPROT[1]=0`, the AMBA
 APB5 encoding) and a Secure access without it (`PPROT[1]=0`); anything else
 returns `PSLVERR`. Unsupported or
@@ -1277,6 +1291,22 @@ writes return `PSLVERR`.
 | `0x238` | STATUS | RO | `[0]` a walk is in progress. |
 
 : Table 7.1c GPC registers of `chi_gpc` (block 2); writes need the Root PAS
+
+| Offset | Name | Access | Function |
+|--------|------|--------|----------|
+| `0x300` | SELECT | RW | Error record or HN-F the next registers refer to: HN-F `i` is `i`, the GPC's record follows the HN-Fs when `gpcMode` is WALK. |
+| `0x304` | RAS_STATUS | RO | `[0]` an uncorrected error is recorded (the interrupt), `[1]` another uncorrected error came since, `[2]` the recorded error is a corrected one, `[7:4]` its source: 1 directory, 2 SLC tag, 3 SLC data, 4 GPT cache. |
+| `0x308` | RAS_CE_COUNT | RO | Corrected errors, saturating. |
+| `0x30c` | RAS_UE_COUNT | RO | Uncorrected errors, saturating. |
+| `0x310` | RAS_ADDR_LO | RO | Address `[31:0]` of the recorded error. |
+| `0x314` | RAS_ADDR_HI | RO | `[19:0]` address `[51:32]`, `[26:24]` its PAS. |
+| `0x318` | RAS_CLEAR | W | `[0]` clears the record and its interrupt, `[1]` zeroes both counts. |
+| `0x320` | PMU_CONTROL | RW | `[0]` counters run; writing `[1]` = 1 zeroes every counter. |
+| `0x340` + 4n | PMU_EVENT | RO | Counter `n` of the selected HN-F (Table 9.10), 32 bits, wrapping. |
+| `0x380` | XP_SELECT | RW | `[7:0]` crosspoint, `[9:8]` channel (REQ, RSP, SNP, DAT), `[10]` 0 flits injected, 1 flits ejected. |
+| `0x384` | XP_FLITS | RO | The selected crosspoint count, 32 bits, wrapping. |
+
+: Table 7.1d RAS and performance registers of `chi_obs_regs` (block 3); RAS registers exist with `rasEn`, counters with `pmuEn`
 
 A policy bit only narrows what the configuration allows: the HN-F ANDs it with
 the global enable in `chi_cfg_t` and with the capability of the node involved.
@@ -1623,6 +1653,10 @@ The owner is the one RN-F that may hold the line Unique or Dirty; the
 directory does not separate those states, so it snoops the owner whenever a
 transaction needs the newest data or an invalidation. I is always possible for
 a recorded RN-F because clean lines are evicted silently (B4.6).
+
+The directory hides every RN-F outside system coherency from lookups,
+updates and evictions, and with `rasEn` protects every way with SECDED
+(Section 9.16).
 
 A back-invalidation that collects Dirty data reconciles it with the SLC
 before memory (Section 9.10): the victim entry reads the SLC line and, on a
@@ -2179,6 +2213,75 @@ turns an uncorrectable ECC error into Poison on that word.
 A request with an error uses no DMT or DCT (B9.1.3), changes no directory
 entry, and still sends every data packet, with values that need not be valid.
 
+## 9.16 System coherency, RAS, performance counters and QoS
+
+**System coherency (B15).** `chi_sysco` runs the four-phase handshake of
+every RN-F and RN-D port. A node may be snooped while its `SYSCOREQ` is HIGH.
+`SYSCOACK` rises the cycle after `SYSCOREQ` does, without waiting for earlier
+snoops (B15.2.2). When `SYSCOREQ` falls:
+
+- every HN-F stops issuing snoops to the RN-F and drops the snoops it had
+  planned but not sent, since the node holds no coherent copy (B15.2.1);
+- the directory hides the RN-F from every lookup, update and eviction at
+  once, and a walk over every set then removes its bits;
+- the exclusive monitors of its LPs at the HN-F are cleared, once (the HN-I's
+  System monitors serve Non-snoopable memory and are kept);
+- every MN stops sending it `SnpDVMOp` part 1 and drops unsent ones; a part 2
+  still follows its part 1.
+
+`SYSCOACK` falls once every HN-F reports no snoop outstanding to the node
+and its directory walk done, and every MN reports no `SnpDVMOp` outstanding.
+With `syscoEn` 0 every node is always snoopable and `SYSCOACK` echoes
+`SYSCOREQ`. Bound SVA checks the handshake and that no snoop reaches a node
+outside coherency, and reports an RN-F that asks to cache a line from
+outside it.
+
+**RAS.** With `rasEn`:
+
+| Structure | Protection | Single-bit error | Double-bit error |
+|-----------|------------|------------------|------------------|
+| Directory way | SECDED over valid, tag, sharers and owner | corrected when read; written back by the next update of the set or by the patrol walk, which runs continuously | the way is dead: it matches nothing and is never replaced, and every lookup of its set snoops every live RN-F other than the Requester as a possible owner, without RetToSrc (Dirty data still returns, B4.9) |
+| SLC way state | SECDED over valid, dirty and tag | corrected when read; written back by the next update of the set | the way is fenced: it matches nothing and is never replaced or walked; its data, Dirty or not, is lost and reported |
+| SLC data (`slcEccEn`) | SECDED per 64-bit word | corrected on the way out | the word is returned poisoned (B9.2.3) |
+| GPT cache entry | SECDED over level, fault, tag and descriptor | corrected when read and written back | the entry is dropped and the next check walks the GPT again |
+
+: Table 9.9 RAS protection
+
+Each HN-F and, with a walking GPC, the GPC keep an error record (Table
+7.1d). It counts corrected and uncorrected errors and keeps the first
+uncorrected error since it was cleared or, while there is none, the latest
+corrected one, with its address and PAS. An uncorrected error raises the
+record's interrupt, `rasIrq[i]` or `gpcRasIrq`, until software clears it. One
+corrected and one uncorrected error are counted per HN-F per cycle at most.
+
+**Performance counters.** With `pmuEn`, `chi_obs_regs` keeps a 32-bit
+counter per HN-F event and per crosspoint, channel and direction.
+
+| n | Event | n | Event |
+|---|-------|---|-------|
+| 0 | SLC hit at start | 8 | DWT eligible |
+| 1 | SLC miss of a Cacheable start | 9 | DWT taken |
+| 2 | SLC eviction by a fill | 10 | `RetryAck` sent |
+| 3 | Snoop sent | 11 | GPC fault |
+| 4 | DCT eligible | 12 | Exclusive store passed |
+| 5 | DCT taken: the owner forwarded | 13 | Exclusive store failed |
+| 6 | DMT eligible | 14 | Request allocated |
+| 7 | DMT taken | 15 | SLC fill |
+
+: Table 9.10 HN-F performance events
+
+Eligible counts a request that the transaction rules and directory state
+allow a direct transfer for, before the enables, the policy and the
+capability are applied (Table 9.6). A crosspoint counts the flits it took
+from and gave to its device ports on each channel.
+
+**QoS regulator.** With `qosRegEn`, `chi_qos_reg` gives each Request Node
+port a token bucket: `qosRegRate` tokens arrive every 256 cycles, up to
+`qosRegBurst`, and a REQ flit enters the fabric only by taking one. A held
+REQ waits in the link receiver and back-pressures the Requester through
+L-Credits. Only requests are regulated, so a held request never blocks a
+response and the regulator cannot deadlock the fabric (Section 9.7).
+
 # 10 RN-F boundary cache-state model
 
 These tables are the required architectural model for an RN-F cache
@@ -2276,6 +2379,7 @@ or performance guarantees are supplied.
 | `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
 | `chi_direct_sva.sv` | `DIRECT_DATA_BYPASSES_HOME`, `RESP_SEP_DATA_FOR_DMT_SEP`, `DWT_NO_DATA_REQUEST_FROM_HOME`, per-entry `DMT_AFTER_SNOOPS`, `EXCLUSIVE_NOT_DIRECT`, `DWT_NOT_ON_SLC_LINE` | `FORWARDING_SNOOP_SENT` per forwarding snoop, `DCT_FORWARDED`, `DCT_FALLBACK`, `DMT_COMBINED`, `DMT_SEPARATE`, `DWT_USED`, `DWT_COMP_FROM_SUBORDINATE`, `WRITE_COMP_DBID_RESP`, `WRITE_SEPARATE_DBID_RESP`, `WRITE_SEPARATE_COMP`, `WRITE_DATA_CANCEL_AT_HOME` |
 | `chi_correctness_sva.sv` (HN-F and HN-I) | `READ_DATA_STATE_LEGAL`, `MAKE_READ_UNIQUE_COMP_STATE_LEGAL`, `WRITE_DATA_ZERO_WHERE_DISABLED`, `REQUESTER_BE_IN_WINDOW`, `WRITE_DATA_CANCEL_PERMITTED`, per-word `POISON_KEPT_UNDER_PARTIAL_WRITE` and `DATACHECK_ERROR_KEPT`, per-victim `DIRECTORY_EVICTION_RECONCILES_SLC`; HN-I `WRITE_DATA_ZERO_WHERE_DISABLED` | `READ_SHARED_SD_PD`, `READ_PREFER_UNIQUE_UD_PD`, `MAKE_READ_UNIQUE_COMP_UD_PD`, `PARTIAL_WRITE_OVER_POISON`, `DATACHECK_ERROR_SEEN`, `DIRECTORY_EVICTION_INTO_SLC`; HN-I `DATACHECK_ERROR_SEEN` |
+| `chi_system_sva.sv` (`chi_sysco`, HN-F, MN, directory, SLC, `chi_qos_reg`, `chi_obs_regs`) | `SYSCO_REQ_FOUR_PHASE`, `SYSCO_ACK_FOUR_PHASE`, `SYSCO_CONNECT_AT_ONCE`, `SYSCO_DISCONNECT_DRAINED`, `NO_SNOOP_OUTSIDE_COHERENCY`, `RNF_IDLE_MEANS_DRAINED`, `CACHEABLE_REQUEST_INSIDE_COHERENCY`, `NO_DVM_SNOOP_OUTSIDE_COHERENCY`, `SF_HIDES_NODES_OUTSIDE_COHERENCY`, `QOS_INJECTION_TAKES_A_TOKEN`, `QOS_TOKENS_BOUNDED`, `RAS_UNCORRECTED_RAISES_IRQ`, `RAS_IRQ_HOLDS_UNTIL_CLEARED` | `SYSCO_CONNECT_DISCONNECT`, `SYSCO_DISCONNECT_WAITS`, `SNOOP_DROPPED_AT_DISCONNECT`, `SF_ECC_CORRECTED`, `SF_ECC_UNCORRECTED`, `SF_LOOKUP_OF_DEAD_SET`, `SLC_TAG_CORRECTED`, `SLC_TAG_UNCORRECTED`, `QOS_PORT_HELD`, `RAS_IRQ_RAISED_AND_CLEARED` |
 | `chi_excl_sva.sv` | `EXCL_SECOND_PASS_NEEDS_REGISTRATION`, `EXCL_PASS_CLEARS_SAME_LOCATION`, `EXCL_PASS_KEEPS_OTHER_LOCATIONS`, `EXCL_FAIL_REREGISTERS`, `EXCL_ONE_MONITOR_PER_LP`, `EXCL_LPID_IN_RANGE` | `EXCL_PASS`, `EXCL_FAIL_REGISTERS`, `EXCL_FAIL_THEN_PASS`, `EXCL_TWO_LPS_ONE_LOCATION`, `EXCL_TWO_LPS_TWO_LOCATIONS_PASS`, `EXCL_ADDRESS_MISMATCH_FAIL` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
@@ -2368,6 +2472,7 @@ rtl/sam/chi_sam.sv
 rtl/sam/chi_prefetch_map.sv
 rtl/hni/chi_cfg_slave.sv
 rtl/hni/chi_hnf_policy_regs.sv
+rtl/hni/chi_obs_regs.sv
 rtl/hni/chi_hni_top.sv
 rtl/mn/chi_mn_dvm.sv
 rtl/hnf/chi_pos.sv
@@ -2382,6 +2487,8 @@ rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_slc.sv
 rtl/hnf/chi_gpc.sv
 rtl/hnf/chi_hnf_top.sv
+rtl/top/chi_sysco.sv
+rtl/top/chi_qos_reg.sv
 rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
 rtl/top/chi_link_compile.sv
@@ -2402,6 +2509,7 @@ rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_excl_sva.sv
 rtl/sva/chi_direct_sva.sv
 rtl/sva/chi_correctness_sva.sv
+rtl/sva/chi_system_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```
@@ -2604,10 +2712,11 @@ the cross-references in the prose stay correct in every output format.
     crosspoint and flagged on the internal `routeError` signal; it is not
     answered with an error response, so the transaction it belongs to does not
     complete.
-11. System coherency and link power sequencing are placeholders. Nothing in
-    the design asserts `deactivate`, so although the link layer now implements
-    the `LCrdReturn` exchange in both directions, the deactivation path has
-    never been walked.
+11. Link power sequencing is a placeholder: `TXSACTIVE` and `RXSACTIVE`
+    follow reset, and nothing in the design asserts `deactivate`, so although
+    the link layer implements the `LCrdReturn` exchange in both directions,
+    the deactivation path has never been walked. The system coherency
+    handshake is implemented (Section 9.16).
 12. A request from a node outside the Home's Requester list, or one that
     claims a P-Credit it was never granted, cannot be retried and is held with
     back-pressure; every request from a well-behaved Requester is allocated,
@@ -2616,10 +2725,17 @@ the cross-references in the prose stay correct in every output format.
     the endpoint range. Two HN-Fs that share an SN-F do not order
     Endpoint-ordered requests against each other, so a Requester that needs
     that across interleaved Homes must wait for completion.
-14. DataCheck is not checked on the GPT walker's reads, on atomic operands
+14. RAS limits: a dead directory way and a fenced SLC way stay out of use
+    until reset; the GPT cache's valid bits are outside its SECDED; a
+    corrected SLC way is written back only when the update port next writes
+    its set; and the address recorded for an uncorrectable directory or SLC
+    tag error is the access that found it, or the stored tag, which may be
+    the corrupted one. The QoS regulator's rate and burst are fixed at
+    elaboration and shared by every port.
+15. DataCheck is not checked on the GPT walker's reads, on atomic operands
     the HN-F executes, or on DVM payloads at the MN, and a snoop error from a Snoopee the directory did not record as
     owner is ignored, because a clean copy loses nothing.
-15. There is no full protocol testbench, no formal proof closure, no
+16. There is no full protocol testbench, no formal proof closure, no
     interoperability evidence, no CDC signoff, no synthesis signoff and no
     performance characterization. The smoke run in Section 12.7 drives no
     traffic at all: it brings the links up and then asserts that no flit is
@@ -2650,6 +2766,10 @@ the cross-references in the prose stay correct in every output format.
 | Home concurrency | One transaction per POS entry, one per location at a time | Throughput scales with `posEntries`; same-location requests queue in arrival order. |
 | Directory eviction | Victim buffer snoops with `SnpCleanInvalid` and writes back, into the SLC's copy when it holds the line | Dirty data is never lost to a capacity eviction, and no stale SLC copy survives one. |
 | DataCheck errors | Converted to Poison on the word, DERR without Poison | Errors survive the buffers, which keep no DataCheck. |
+| Coherency exit | Snoops stop and unsent ones drop when `SYSCOREQ` falls; `SYSCOACK` waits for outstanding snoops and the directory walk | A node is never snooped outside coherency and leaves no directory state behind. |
+| Uncorrectable directory way | The way dies and its set is snooped by broadcast | Coherence is kept at the cost of snoop traffic for that set. |
+| RAS reporting | One record per HN-F and one for the GPC, in APB block 3, with a level interrupt | Software sees the first uncorrected error and the counts. |
+| QoS regulation | Token bucket on REQ injection only | Requests are shaped; responses are never held. |
 | Requester BE outside the write window | Not taken; reported by SVA | A bad Requester cannot corrupt bytes it did not address. |
 | Snoop fanout | A transaction's snoops in flight together, `maxOutstandingSnoops` per Home | One snoop round trip per transaction; SNP traffic bounded per Home. |
 | DVM fanout | `dvmMaxOps` DVMOps; per Request Node one Sync and one Non-sync `SnpDVMOp` | Overlapped DVM latency within what every Request Node must accept. |

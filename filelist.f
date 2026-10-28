@@ -22,6 +22,7 @@ rtl/sam/chi_sam.sv
 rtl/sam/chi_prefetch_map.sv
 rtl/hni/chi_cfg_slave.sv
 rtl/hni/chi_hnf_policy_regs.sv
+rtl/hni/chi_obs_regs.sv
 rtl/hni/chi_hni_top.sv
 rtl/mn/chi_mn_dvm.sv
 rtl/hnf/chi_pos.sv
@@ -36,6 +37,8 @@ rtl/hnf/chi_excl_mon.sv
 rtl/hnf/chi_slc.sv
 rtl/hnf/chi_gpc.sv
 rtl/hnf/chi_hnf_top.sv
+rtl/top/chi_sysco.sv
+rtl/top/chi_qos_reg.sv
 rtl/top/chi_interconnect_top.sv
 rtl/top/chi_interconnect_compile.sv
 rtl/top/chi_link_compile.sv
@@ -56,5 +59,6 @@ rtl/sva/chi_gpc_sva.sv
 rtl/sva/chi_excl_sva.sv
 rtl/sva/chi_direct_sva.sv
 rtl/sva/chi_correctness_sva.sv
+rtl/sva/chi_system_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv

@@ -32,7 +32,7 @@ digraph chiHnf {
   subgraph cluster_coh {
     label="Coherence";
     style="rounded"; color="#7799bb"; fontcolor="#224466";
-    sf     [label="chi_snoop_filter\nlookup port, update port,\nlocked-way eviction", fillcolor="#dce9f7"];
+    sf     [label="chi_snoop_filter\nlookup port, update port,\nlocked-way eviction,\ncoherency walk, SECDED", fillcolor="#dce9f7"];
     snpgen [label="chi_snp_gen\nsnoop issue, TxnID = owner\nSnp*Fwd for DCT", fillcolor="#dce9f7"];
     vb     [label="victim buffer\nSnpCleanInvalid + writeback", fillcolor="#dce9f7"];
   }

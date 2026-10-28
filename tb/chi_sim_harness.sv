@@ -54,7 +54,8 @@ module chi_sim_harness #(
     .PADDR('0), .PSEL(1'b0), .PENABLE(1'b0), .PWRITE(1'b0),
     .PWDATA('0), .PSTRB('0), .PPROT('0), .PNSE(1'b0),
     .PRDATA, .PREADY, .PSLVERR,
-    .linkUp, .linkParityError, .linkCreditError
+    .linkUp, .linkParityError, .linkCreditError,
+    .rasIrq(), .gpcRasIrq()
   );
 
   // A Requester is credited on REQ, RSP and DAT and receives RSP, SNP and

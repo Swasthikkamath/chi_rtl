@@ -29,6 +29,9 @@
 // registered and it tries again.
 // A store from an LP that is not identifiable is handled as one from an LP
 // that never registered (B6.2.1): it fails and registers nothing.
+// clearRequester resets every monitor of a Requester's LPs, for an RN-F that
+// leaves system coherency (IHI 0050H B15); a Requester outside coherency
+// may still use Non-snoopable exclusives, so this happens once, on exit.
 module chi_excl_mon #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned NUM_REQUESTERS = 1,
@@ -52,6 +55,7 @@ module chi_excl_mon #(
   input  logic [ADDR_W-1:0] commitKey,
   // A passing Exclusive Store from another LP still waits for CompAck.
   input  logic registerBlocked,
+  input  logic [NUM_REQUESTERS-1:0] clearRequester,
   // The store passed; the load or the failed store registered.
   output logic pass,
   output logic registered,
@@ -187,7 +191,7 @@ module chi_excl_mon #(
       amLp <= '0;
       for (int unsigned m = 0; m < AMON; m++)
         amAge[m] <= AMON_W'(m);
-    end else if (commitValid) begin
+    end else if (commitValid || (clearRequester != '0)) begin
       if (pass) begin
         // Every other LP loses its bit; every other address monitor on this
         // location is reset.
@@ -200,7 +204,7 @@ module chi_excl_mon #(
               amValid[m] <= 1'b0;
       end
 
-      if (commitUpdate) begin
+      if (commitValid && commitUpdate) begin
         // A Non-snoopable update by another LP resets the System monitors
         // of the location (B6.2.4).
         for (int unsigned lp = 0; lp < NUM_LP; lp++)
@@ -245,6 +249,18 @@ module chi_excl_mon #(
                 amAge[m] <= amAge[m] + 1'b1;
         end
       end
+
+      for (int unsigned r = 0; r < NUM_REQUESTERS; r++)
+        if (clearRequester[r]) begin
+          for (int unsigned lp = 0; lp < NUM_LP; lp++)
+            if ((lp >= lpBase(RN_NUM_LP, r))
+                && (lp < (lpBase(RN_NUM_LP, r) + RN_NUM_LP[r])))
+              lpBit[lp] <= 1'b0;
+          for (int unsigned m = 0; m < AMON; m++)
+            if ((int'(amLp[m]) >= lpBase(RN_NUM_LP, r))
+                && (int'(amLp[m]) < (lpBase(RN_NUM_LP, r) + RN_NUM_LP[r])))
+              amValid[m] <= 1'b0;
+        end
     end
   end
 endmodule

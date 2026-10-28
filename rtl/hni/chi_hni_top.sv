@@ -797,6 +797,9 @@ module chi_hni_top #(
     .commitLpid(entry[exclCommitEntry].req.groupIdOrLpid),
     .commitKey(posKey[exclCommitEntry]),
     .registerBlocked(exclRegisterBlocked),
+    // Leaving system coherency concerns Snoopable lines only, so the HN-I's
+    // System monitors are kept (IHI 0050H B15).
+    .clearRequester('0),
     .pass(exclPass), .registered(exclRegistered),
     .lpKnown(exclLpKnown), .lpIndex(exclLpIndex)
   );

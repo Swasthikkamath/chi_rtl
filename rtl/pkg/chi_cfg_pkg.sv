@@ -236,6 +236,20 @@ package chi_cfg_pkg;
     logic               dvmEn;
     logic               stashEn;
     logic               exclEn;
+    // System coherency interface (IHI 0050H B15): an RN-F or RN-D is snooped
+    // only while its SYSCOREQ is HIGH, and SYSCOACK follows the four-phase
+    // handshake. 0 treats every Request Node as always coherent.
+    logic               syscoEn;
+    // RAS: SECDED on the directory, SLC tags and GPT cache entries, error
+    // records and an interrupt per HN-F, readable over APB.
+    logic               rasEn;
+    // Performance counters per HN-F and flit counters per crosspoint,
+    // readable over APB.
+    logic               pmuEn;
+    // A token bucket per Request Node port on REQ injection.
+    logic               qosRegEn;
+    int unsigned        qosRegRate;  // tokens per 256 cycles, 1 to 256
+    int unsigned        qosRegBurst; // bucket size, 1 to 255
     chi_cfg_access_e    cfgAccess;
     chi_hnf_snf_map_e   hnfSnfMap;
   } chi_cfg_t;
@@ -263,6 +277,8 @@ package chi_cfg_pkg;
     pbhaEn: 1'b0, cdaEn: 1'b0, rmeEn: 1'b1, gdiEn: 1'b0, multiReqEn: 1'b0,
     dctEn: 1'b1, dmtEn: 1'b1, dmtSepEn: 1'b0, dwtEn: 1'b1,
     atomicEn: 1'b1, dvmEn: 1'b1, stashEn: 1'b1, exclEn: 1'b1,
+    syscoEn: 1'b1, rasEn: 1'b0, pmuEn: 1'b0,
+    qosRegEn: 1'b0, qosRegRate: 256, qosRegBurst: 8,
     cfgAccess: CFG_PARAM_ONLY, hnfSnfMap: HNF_SNF_MAP_MODULO
   };
 
