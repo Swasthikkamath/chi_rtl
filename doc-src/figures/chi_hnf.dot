@@ -2,9 +2,11 @@
 // Rendered by the doc target; see Makefile.
 //
 // Laid out top to bottom so the figure fits a portrait page: a request is
-// admitted or retried, allocated a POS entry, held by the hazard check until
-// it is the oldest transaction for its location, started against the
-// directory, and then runs its own obligations through the shared engines.
+// admitted or retried, allocated a POS entry and checked by the GPC, held by
+// the hazard check until it is the oldest transaction for its location (and,
+// when Endpoint-ordered, its ticket is served), started against the directory
+// and SLC, and then runs its own obligations through the shared engines. The
+// two notes on the right are top-level blocks the Home talks to.
 digraph chiHnf {
   rankdir=TB;
   splines=polyline;
@@ -40,7 +42,8 @@ digraph chiHnf {
   subgraph cluster_mem {
     label="Memory side";
     style="rounded"; color="#77aa77"; fontcolor="#2f6b2f";
-    tracker [label="chi_sn_tracker\nReadNoSnp(Sep), WriteNoSnp, CMO\nDMT and DWT without data\nRetry, PCrdReturn", fillcolor="#e8f0e0"];
+    slc     [label="chi_slc  (slcEn)\nSystem Level Cache, {PAS, line} keys\nlookup, read, update ports,\nmaintenance walk, SECDED", fillcolor="#e8f0e0"];
+    tracker [label="chi_sn_tracker\nReadNoSnp(Sep), WriteNoSnp, CMO\nDMT and DWT without data\nRetry, PCrdReturn\none tracker reserved for GPT reads", fillcolor="#e8f0e0"];
     buf     [label="line buffers\nRequester, snoop, memory bytes", fillcolor="#e8f0e0"];
   }
 
@@ -55,18 +58,34 @@ digraph chiHnf {
   out [label="RSP / SNP / DAT / REQ out through chi_flit_fifo",
     shape=note, fillcolor="#ffffff"];
 
+  // Top-level blocks the Home talks to.
+  gpc [label="chi_gpc  (top level)\nGranule Protection Check:\nGPI table, or GPT cache and walker",
+    shape=note, fillcolor="#ffffff"];
+  eo  [label="chi_eo_order  (top level)\nEndpoint Order tickets\nper {Requester, SN-F}",
+    shape=note, fillcolor="#ffffff"];
+
   req -> pos   [label="  allocate"];
   req -> retry [label="  no entry"];
   pos -> hazard;
-  hazard -> entries [label="  oldest for its location"];
+  hazard -> entries [label="  oldest for its location,\n  ticket served"];
+  pos -> gpc [label="  check", dir=both, style=dashed, constraint=false];
+  eo -> hazard [label="  ticket", dir=both, style=dashed, constraint=false];
 
   entries -> sf [label="  start: lookup"];
+  entries -> slc [label="  lookup, read, update"];
+  slc -> vb [label="  dirty eviction", constraint=false];
+  gpc -> tracker [label="  GPT reads\n  (through the SLC\n  with gpcSlcAlloc)", style=dashed, constraint=false];
   entries -> snpgen;
   sf -> vb [label="  eviction"];
   vb -> snpgen;
   entries -> tracker;
   vb -> tracker;
   tracker -> buf [dir=both];
+  // Keep the page portrait: the memory side is one column, and the two
+  // top-level notes sit beside the admission block.
+  slc -> tracker [style=invis];
+  req -> gpc [style=invis];
+  gpc -> eo [style=invis];
   entries -> alu; alu -> excl [style=invis]; excl -> stash [style=invis];
 
   snpgen -> out;

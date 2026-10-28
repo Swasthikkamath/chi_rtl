@@ -2,8 +2,10 @@
 // Rendered by the doc target; see Makefile.
 //
 // The vertical axis is the request path: a Requester's REQ flit enters a link
-// layer, is decoded to a TgtID, crosses the selected network, is serialized by
-// a Home Node, and leaves through a second link layer to a Subordinate.
+// layer, is decoded to a TgtID, passes the QoS regulator, crosses the selected
+// network, is serialized by a Home Node, and leaves through a second link
+// layer to a Subordinate. The blocks beside the Homes serve them without
+// being fabric endpoints.
 digraph chiArchitecture {
   rankdir=TB;
   splines=polyline;
@@ -41,6 +43,8 @@ digraph chiArchitecture {
     pfmap [label="chi_prefetch_map\nPrefetchTgt to SN-F", fillcolor="#fdf0d5"];
   }
 
+  qos [label="chi_qos_reg\nREQ token bucket per Request Node port\n(qosRegEn)", fillcolor="#fdf0d5"];
+
   noc [fillcolor="#e0e0f0", style="filled",
     label=<<table border="0" cellborder="0" cellspacing="1">
       <tr><td><b>chi_noc_top</b>   topology = CROSSBAR | RING | MESH_2D</td></tr>
@@ -57,6 +61,14 @@ digraph chiArchitecture {
     mn  [label="chi_mn_dvm x numMn\nDVM sequencer", fillcolor="#f7dce9"];
   }
 
+  subgraph cluster_svc {
+    label="Home services  (top level, not on the fabric)";
+    style="rounded"; color="#bb8899"; fontcolor="#77334f";
+    gpc   [label="chi_gpc\nGranule Protection Check\nGPI table or GPT walk", fillcolor="#f7dce9"];
+    eo    [label="chi_eo_order\nEndpoint Order tickets\nper {Requester, SN-F}", fillcolor="#f7dce9"];
+    sysco [label="chi_sysco\nSYSCOREQ / SYSCOACK\nper RN-F and RN-D", fillcolor="#f7dce9"];
+  }
+
   sublink [label="chi_link_port  (one per Subordinate port)\nsame four blocks, Subordinate channel set",
     fillcolor="#e8f0e0"];
 
@@ -68,7 +80,15 @@ digraph chiArchitecture {
   }
 
   // Side annotations. constraint=false keeps them off the main request path.
-  cfg [label="chi_cfg_slave\nAPB4 register map\ncfgAccess = CFG_APB", fillcolor="#fdf0d5"];
+  cfg [fillcolor="#fdf0d5", style="rounded,filled",
+    label=<<table border="0" cellborder="0" cellspacing="1">
+      <tr><td colspan="2" align="center"><b>APB4 configuration</b>  (cfgAccess = CFG_APB)</td></tr>
+      <tr><td align="left">block 0</td><td align="left">chi_cfg_slave: region editor</td></tr>
+      <tr><td align="left">block 1</td><td align="left">chi_hnf_policy_regs: HN-F policy</td></tr>
+      <tr><td align="left">block 2</td><td align="left">chi_gpc registers</td></tr>
+      <tr><td align="left">block 3</td><td align="left">chi_obs_regs: RAS and PMU</td></tr>
+      <tr><td align="left">block 4</td><td align="left">chi_qos_regs: QoS rate, burst</td></tr>
+    </table>>];
   status [label="linkUp\nlinkParityError\nlinkCreditError\nper node ordinal",
     shape=note, fillcolor="#ffffff"];
 
@@ -80,8 +100,9 @@ digraph chiArchitecture {
   sam -> hash  [label="  hashed region"];
   sam -> pfmap [label="  PrefetchTgt"];
 
-  hash  -> noc [label="  TgtID"];
-  pfmap -> noc [label="  TgtID = SN-F"];
+  hash  -> qos [label="  TgtID"];
+  pfmap -> qos [label="  TgtID = SN-F"];
+  qos -> noc [label="  REQ"];
   reqlink -> noc [label="  RSP, DAT", constraint=false];
 
   noc -> hnf;
@@ -91,11 +112,17 @@ digraph chiArchitecture {
   hni -> noc [style=dashed, constraint=false];
   mn  -> noc [style=dashed, constraint=false];
 
+  hnf -> gpc [dir=both, style=dashed, label="  checks,\n  GPT reads"];
+  hni -> gpc [dir=both, style=dashed];
+  hnf -> eo [dir=both, style=dashed, label="  tickets"];
+  sysco -> hnf [style=dashed, label="  snoop\n  targets", constraint=false];
+
   noc -> sublink [label="  REQ to Subordinate"];
   sublink -> snf;
   sublink -> sni;
 
   cfg -> sam [label="  region update", constraint=false, color="#bb8844"];
+  cfg -> qos [label="  rate, burst", constraint=false, color="#bb8844"];
   reqlink -> status [style=dotted, arrowhead=none, constraint=false];
   sublink -> status [style=dotted, arrowhead=none, constraint=false];
 

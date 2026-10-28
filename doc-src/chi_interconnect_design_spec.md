@@ -33,7 +33,7 @@ behaviour below was checked against the source, and the feature matrix in
 Section 1.3 states exactly where each function stops.
 
 The document is generated from a single Markdown source in `doc-src/` so that
-the Word file in `docs/` and the RTL never drift apart. See Section 12.7 for
+the Word file in `docs/` and the RTL never drift apart. See Section 12.9 for
 the regeneration command.
 
 # 1 Scope, Issue H baseline, and feature status
@@ -547,7 +547,8 @@ structured so that a linter can see both:
    to depend on every crosspoint valid.
 
 The consequence is that the whole fabric elaborates with no circular
-combinational logic, which Section 12.6 records as a passing lint result.
+combinational logic. Section 12.6 records that lint passed on `main` and has
+not yet been rerun on this branch.
 
 # 3 Parameters and elaboration constraints
 
@@ -2821,10 +2822,7 @@ be expected to find defects this flow cannot see.
 ## 12.9 Regenerating this document
 
 
-The Word file in `docs/` is generated from `doc-src/`. On this branch it
-has not been regenerated: the authoring environment had neither pandoc nor
-Graphviz, so the Markdown and `.dot` sources are current and the committed
-`.docx` and `.png` files still show `main`. Run:
+The Word file in `docs/` is generated from `doc-src/`. Run:
 
 ```sh
 make doc
@@ -2834,8 +2832,18 @@ which runs:
 
 ```sh
 pandoc doc-src/chi_interconnect_design_spec.md --toc --toc-depth=2 \
-  -o docs/chi_interconnect_design_spec.docx
+  --lua-filter=doc-src/house_style.lua \
+  --reference-doc=doc-src/reference.docx \
+  --resource-path=doc-src -o docs/chi_interconnect_design_spec.docx
 ```
+
+`make figures` rebuilds the figure `.png` files from their Graphviz `.dot`
+sources at 150 dpi. On this branch the figures were rendered with Graphviz
+16.1.0 compiled to WebAssembly and rasterized by resvg, because the authoring
+environment had no native Graphviz. A native `dot` lays out the same graphs
+but may route edges and set text slightly differently. The `.docx` in
+`docs/` has not been rebuilt on this branch and still shows `main`: run
+`make doc`.
 
 Section numbers are written into the headings rather than generated, so that
 the cross-references in the prose stay correct in every output format.

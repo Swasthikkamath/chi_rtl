@@ -7,8 +7,9 @@ die-to-die transports are outside scope.
 
 > **Branch status (`feature/chi-fabric-upgrade`).** The upgrade stages on this
 > branch were written without a compiler: they have not yet been linted,
-> elaborated or simulated, and the generated Word document and figures still
-> show `main`. Run `make xcelium` or `make lint` first. Section 1.3 of the
+> elaborated or simulated. Run `make xcelium` or `make lint` first. The
+> Markdown source and figures are current, but the Word document in `docs/`
+> still shows `main` until `make doc` is run. Section 1.3 of the
 > design specification lists what remains not implemented or deferred.
 
 The RTL covers configurable Issue H flit records, three selectable internal
@@ -56,11 +57,13 @@ the RTL cannot drift apart:
 make doc
 ```
 
-Regeneration needs `pandoc` and `python3`; on this branch the `.docx` has not
-been regenerated yet. The architecture diagrams are
+Regeneration needs `pandoc` and `python3`. The architecture diagrams are
 generated from Graphviz sources in [`doc-src/figures/`](doc-src/figures);
 `make figures` rebuilds the `.png` files and needs `dot`. The rendered images
-are committed so `make doc` works without Graphviz installed.
+are committed so `make doc` works without Graphviz installed. On this branch
+the figures were rendered with Graphviz 16.1.0 compiled to WebAssembly (no
+native Graphviz was available), so a native `make figures` may route edges
+slightly differently.
 
 Word styling comes from `doc-src/reference.docx`, which
 [`doc-src/build_reference_docx.py`](doc-src/build_reference_docx.py) builds
