@@ -1,2 +1,5 @@
 agent-tools/
 obj_dir/
+xcelium.d/
+xrun.history
+xrun.log

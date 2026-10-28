@@ -1,4 +1,5 @@
 VERILATOR ?= verilator
+XRUN      ?= xrun
 PANDOC    ?= pandoc
 
 LINT_FLAGS = --lint-only --assert --sv -Wall -Wno-fatal \
@@ -11,7 +12,7 @@ LINT_TOPS  = chi_interconnect_compile chi_sva_compile chi_hnf_compile \
 
 # Supplemental harnesses that are appended to the compile set on demand.
 EXTRA_TOPS = chi_mesh_compile chi_ring_compile chi_xbar_compile \
-             chi_sam_compile chi_stage1_compile
+             chi_sam_compile chi_stage1_compile chi_cookbook_compile
 
 SIM_FLAGS = --binary --assert --sv -Wno-fatal \
             -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-UNDRIVEN \
@@ -36,7 +37,7 @@ FIG_PNG    = $(FIG_DOT:.dot=.png)
 # for free, and is the only way this flow catches a missing driver.
 SIM_SEEDS = 1 2 7 42 1234
 
-.PHONY: all lint sim simrand doc figures clean
+.PHONY: all lint xcelium sim simrand doc figures clean
 
 all: lint sim simrand doc
 
@@ -53,6 +54,20 @@ lint:
 # The smoke run is what executes the elaboration self-checks in
 # chi_interconnect_top, so it catches configuration and NodeID-encoding
 # mistakes that a lint-only pass cannot see.
+# Elaboration of every lint top with Cadence Xcelium, each in its own work
+# directory so one top's snapshot does not replace another's.
+xcelium:
+	@for top in $(LINT_TOPS); do \
+	  echo "== $$top =="; \
+	  $(XRUN) -sv -elaborate -xmlibdirname xcelium.d/$$top \
+	    -f filelist.f -top $$top || exit 1; \
+	done
+	@for top in $(EXTRA_TOPS); do \
+	  echo "== $$top =="; \
+	  $(XRUN) -sv -elaborate -xmlibdirname xcelium.d/$$top \
+	    -f filelist.f rtl/top/$$top.sv -top $$top || exit 1; \
+	done
+
 sim: $(SIM_BIN)
 	$(SIM_BIN)
 
@@ -89,4 +104,4 @@ $(DOC_OUT): $(DOC_SRC) $(FIG_PNG) $(DOC_REF) $(DOC_FILTER)
 	  --resource-path=doc-src -o $@
 
 clean:
-	rm -rf obj_dir
+	rm -rf obj_dir xcelium.d xrun.history xrun.log

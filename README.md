@@ -5,6 +5,12 @@ interconnect built against Arm AMBA 5 CHI Issue H (IHI 0050H). It is not a
 claim of CHI compliance or interoperability. CHI Chip-to-Chip, CXS, CCIX and
 die-to-die transports are outside scope.
 
+> **Branch status (`feature/chi-fabric-upgrade`).** The upgrade stages on this
+> branch were written without a compiler: they have not yet been linted,
+> elaborated or simulated, and the generated Word document and figures still
+> show `main`. Run `make xcelium` or `make lint` first. Section 1.3 of the
+> design specification lists what remains not implemented or deferred.
+
 The RTL covers configurable Issue H flit records, three selectable internal
 topologies built from one crosspoint with automatic placement, address mapping, a real CHI link layer on every node port, and
 coherent and noncoherent Home Node transaction paths. Implemented protocol
@@ -50,7 +56,8 @@ the RTL cannot drift apart:
 make doc
 ```
 
-Regeneration needs `pandoc` and `python3`. The architecture diagrams are
+Regeneration needs `pandoc` and `python3`; on this branch the `.docx` has not
+been regenerated yet. The architecture diagrams are
 generated from Graphviz sources in [`doc-src/figures/`](doc-src/figures);
 `make figures` rebuilds the `.png` files and needs `dot`. The rendered images
 are committed so `make doc` works without Graphviz installed.
@@ -66,9 +73,12 @@ caption placement are applied by
 Tables and List of Figures are Word field codes, so they fill in the first
 time Word opens the file.
 
-## Lint
+## Lint and elaboration
 
-`make lint` runs every harness. The two main targets are:
+`make lint` runs every harness through Verilator, and `make xcelium`
+elaborates the same harnesses with Cadence Xcelium (`xrun -sv -elaborate`),
+each in its own work directory under `xcelium.d/`. The two main Verilator
+targets are:
 
 ```sh
 verilator --lint-only --assert --sv -Wall -Wno-fatal \
@@ -80,9 +90,14 @@ verilator --lint-only --assert --sv -Wall -Wno-fatal \
   -f filelist.f --top-module chi_sva_compile
 ```
 
-Both produce no warnings, including no `UNOPTFLAT`: no outgoing valid depends
-on the ready it is paired with, and no module drives both directions of a
-handshake from one combinational block.
+On `main` both produced no warnings, including no `UNOPTFLAT`: no outgoing
+valid depends on the ready it is paired with, and no module drives both
+directions of a handshake from one combinational block. This branch has not
+been run through them yet.
+
+`rtl/top/chi_cookbook_compile.sv` elaborates the three reference
+configurations of Section 3.5 of the specification (a small crossbar, a ring,
+and a large mesh with SLC slices and a walked GPT) as the whole product.
 
 `chi_interconnect_compile` is the lint target rather than
 `chi_interconnect_top` because the product top's node-facing ports are
@@ -144,16 +159,16 @@ simulator would check that this flow cannot.
 | `rtl/noc/` | One parameterized crosspoint (`chi_xp`: router, route compute, arbitration) and the mesh, ring and crossbar wiring around it |
 | `rtl/sam/` | Region lookup, HN hashing and the `PrefetchTgt` mapper |
 | `rtl/hnf/` | HN-F per-entry transactions: POS and hazards, directory and victim buffer, snoops, downstream trackers, retry credits, stash, atomics, exclusives, the SLC and GPC; DCT, DMT and DWT are chosen per entry inside `chi_hnf_top` |
-| `rtl/hni/` | HN-I transactions to SN-Is, the CHI MMIO configuration window, and the APB HN-F policy registers |
+| `rtl/hni/` | HN-I transactions to SN-Is, the CHI MMIO configuration window, the APB HN-F policy registers, and the APB RAS and performance-counter block |
 | `rtl/mn/` | DVM operations at the MN: payload decode, concurrent `SnpDVMOp` distribution with Sync ordering, GPT invalidation |
 | `rtl/sva/` | Bound local safety, stability and protocol-field assertions with covers |
-| `rtl/top/` | Product top and the compile and elaboration harnesses |
+| `rtl/top/` | Product top, the system coherency handshake, the QoS regulator, and the compile and elaboration harnesses |
 | `tb/` | Node-side link model, simulation harness and smoke test (not synthesizable) |
 | `DV/` | UVM verification environment, its documentation and the Xcelium run area |
 | `doc-src/` | Design specification source, Graphviz figure sources, Word template |
 | `docs/` | Generated design specification (Word) |
 | `filelist.f` | Authoritative source order for the main lint targets |
-| `Makefile` | `make lint`, `make sim`, `make simrand` and `make doc` |
+| `Makefile` | `make lint`, `make xcelium`, `make sim`, `make simrand` and `make doc` |
 
 ## Verification environment
 

@@ -139,6 +139,25 @@ packed flit field by itself is carriage, not implementation.
 
 : Table 1.1 Feature status against Arm IHI 0050H
 
+**Not implemented or deferred.** Each item below is rejected at elaboration,
+carried in the flits without behaviour, or absent:
+
+- MTE tag semantics: `Tag`, `TU` and `TagOp` are carried only.
+- MultiReq, `NumReq` and `CacheLineID`: carried only.
+- PBHA: carried only.
+- MPAM enforcement: the MPAM bus is carried, nothing is partitioned.
+- MEC access control: `MECID` is carried only.
+- Far atomics: every atomic executes at the Home.
+- Atomic operands wider than 8 bytes.
+- The `*CHK` control, valid and credit signal checks: driven to zero.
+- More than one interface per node, and replicated channels: rejected.
+- Per-hop L-Credits inside the fabric: the fabric uses ready/valid.
+- Multiple clock domains and CDC: one clock.
+- Power gating, link deactivation sequencing and `SACTIVE` activity
+  signalling: `TXSACTIVE` and `RXSACTIVE` follow reset.
+- HN-F slice disable: every configured HN-F is always in the hash.
+- CHI Chip-to-Chip (C2C) and CXS.
+
 # 2 Architecture
 
 ## 2.1 Architecture at a glance
@@ -879,6 +898,82 @@ because every Home needs a Subordinate to pair with.
 
 Bits of the three status vectors that correspond to the internal HN-F, HN-I
 and MN ordinals read zero, because those endpoints have no external link.
+
+## 3.5 Configuration cookbook
+
+Three reference configurations show the parameter sets for a small system, a
+ring and a large mesh. Each changes only the fields listed from
+`CHI_CFG_DEFAULT`; `rtl/top/chi_cookbook_compile.sv` builds all three as the
+whole product, and `make xcelium` or `make lint` elaborates it with the other
+harnesses.
+
+| Field | Small crossbar | Ring | Large mesh |
+|-------|----------------|------|------------|
+| `topology` | `CROSSBAR` | `RING` | `MESH_2D` |
+| Crosspoints | `numXp` 1 | `numXp` 4 | `meshX` 4, `meshY` 4 |
+| `numDevPortsPerXp` | 8 | 4 | 2 |
+| `numRnf`, `numRnd`, `numRni` | 2, 0, 1 | 4, 1, 2 | 8, 1, 2 |
+| `numHnf`, `numHni` | 1, 1 | 2, 1 | 8, 1 |
+| `numSnf`, `numSni` | 1, 1 | 2, 1 | 4, 1 |
+| `numMn` | 1 | 1 | 1 |
+| `dataW` | 128 | 256 | 256 |
+| `posEntries`, `retryRecords` | 16, 8 | 32, 16 | 64, 32 |
+| `maxOutstandingSnoops` | 8 | 16 | 32 |
+| `snpFilterEntries`, `snpFilterWays` | 512, 4 | 1024, 4 | 4096, 8 |
+| `hniEntries` | 4 | 8 | 8 |
+| SLC | off | off | `slcEn`, `slcSizePerHnf` 262144, `slcWays` 16, `slcEccEn` |
+| `gpcMode` | NONE | NONE | WALK, `gpcCacheEntries` 32 |
+| `cfgAccess` | PARAM_ONLY | APB | APB |
+| `rasEn`, `pmuEn` | 0, 0 | 0, 1 | 1, 1 |
+| QoS | off | `qosRegEn`, `qosRegRate` 128, `qosRegBurst` 8 | off |
+
+: Table 3.8 Reference configurations: the fields that differ from `CHI_CFG_DEFAULT`
+
+What follows from the parameters, computed with the RTL's own width and size
+functions (`reqFlitWidth`, `datFlitWidth`, `numXpOf`, `xpIdWidth`,
+`devPortWidth` and the set arithmetic of the directory and SLC):
+
+| Result | Small crossbar | Ring | Large mesh |
+|--------|----------------|------|------------|
+| Nodes, device ports | 8, 8 | 14, 16 | 26, 32 |
+| NodeID: xpId, devicePort, deviceId bits | 1, 3, 7 | 2, 2, 7 | 4, 1, 6 |
+| REQ, RSP, SNP, DAT flit bits | 153, 79, 106, 270 | 153, 79, 106, 437 | 153, 79, 106, 437 |
+| Directory sets per HN-F | 128 | 256 | 512 |
+| SLC | none | none | 256 sets per HN-F, 2 MiB in all |
+| Error records, interrupts | none | none | 9: eight `rasIrq`, one `gpcRasIrq` |
+| APB blocks | none | 0, 1, 3 | 0, 1, 2, 3 |
+
+: Table 3.9 Derived structure of the reference configurations
+
+Elaboration results: not yet available. The configurations were written and
+checked against every `chi_cfg_check` rule by reading, but no simulator or
+elaborator was run on this branch (Section 12.6). Running `make xcelium`, or
+`make lint` with Verilator, elaborates `chi_cookbook_compile` and reports any
+`$fatal` or error per configuration.
+
+A configuration is written as a function over `CHI_CFG_DEFAULT`, as the
+harness does:
+
+```systemverilog
+function automatic chi_cfg_t largeMeshCfg();
+  chi_cfg_t cfg;
+  cfg = CHI_CFG_DEFAULT;
+  cfg.topology = MESH_2D;
+  cfg.meshX = 4;
+  cfg.meshY = 4;
+  cfg.numDevPortsPerXp = 2;
+  cfg.numHnf = 8;
+  cfg.slcEn = 1'b1;
+  cfg.gpcMode = GPC_WALK;
+  cfg.cfgAccess = CFG_APB;
+  // ... the remaining fields of Table 3.8 ...
+  return cfg;
+endfunction
+```
+
+With `gpcMode` WALK the GPT is read from SN-F memory: `GPT_BASE` must point
+into memory an HN-F serves, and software writes the tables there and cleans
+them to the PoPA before it enables the GPC (Section 9.11).
 
 # 4 The single `chi_if` node-facing interface
 
@@ -2515,8 +2610,10 @@ rtl/top/chi_sva_compile.sv
 ```
 
 `rtl/top/chi_stage1_compile.sv`, `rtl/top/chi_sam_compile.sv`,
-`rtl/top/chi_xbar_compile.sv`, `rtl/top/chi_ring_compile.sv` and
-`rtl/top/chi_mesh_compile.sv` are supplemental elaboration harnesses. The last
+`rtl/top/chi_xbar_compile.sv`, `rtl/top/chi_ring_compile.sv`,
+`rtl/top/chi_mesh_compile.sv` and `rtl/top/chi_cookbook_compile.sv` are
+supplemental elaboration harnesses; the last builds the three reference
+configurations of Section 3.5 as the whole product. The last
 three each build `chi_noc_compile`, which elaborates the fabric alone for one
 configuration. They are
 not entries in `filelist.f` and are not product hierarchy.
@@ -2526,7 +2623,13 @@ are the simulation files described in Section 12.7. They are also outside
 `filelist.f`, and they are not synthesizable. `Makefile` drives lint, the
 smoke run and document generation.
 
-## 12.6 Passing lint commands
+## 12.6 Lint and elaboration commands
+
+**Status on this branch.** The commands below passed on `main`. The stage
+commits on `feature/chi-fabric-upgrade` were written without a compiler and
+have not been linted, elaborated or simulated: run `make lint` (Verilator) or
+`make xcelium` (Cadence Xcelium, `xrun -sv -elaborate` per top) before
+relying on any statement below about warnings.
 
 `chi_interconnect_compile` is the lint and elaboration target for the product
 top. The product top's node-facing ports are `chi_if` arrays, and a tool that
@@ -2543,8 +2646,8 @@ verilator --lint-only --assert --sv -Wall -Wno-fatal \
   -f filelist.f --top-module chi_sva_compile
 ```
 
-Both commands produce no warnings, including no `UNOPTFLAT`, so the design
-has no circular combinational logic. `UNUSEDSIGNAL` and `UNUSEDPARAM` are
+On `main` both commands produced no warnings, including no `UNOPTFLAT`, so
+the design had no circular combinational logic. `UNUSEDSIGNAL` and `UNUSEDPARAM` are
 suppressed because superset protocol records, optional ports and compile
 harnesses intentionally expose fields that a given configuration does not
 consume. `UNDRIVEN` is suppressed because the lint harnesses do not
@@ -2562,9 +2665,10 @@ verilator --lint-only --assert --sv -Wall -Wno-fatal \
   -f filelist.f rtl/top/chi_ring_compile.sv --top-module chi_ring_compile
 ```
 
-The harnesses `chi_hnf_compile`, `chi_link_compile`, `chi_mesh_compile`,
-`chi_ring_compile`, `chi_xbar_compile`, `chi_sam_compile` and
-`chi_stage1_compile` all pass with the same options.
+On `main` the harnesses `chi_hnf_compile`, `chi_link_compile`,
+`chi_mesh_compile`, `chi_ring_compile`, `chi_xbar_compile`, `chi_sam_compile`
+and `chi_stage1_compile` passed with the same options. `chi_cookbook_compile`
+(Section 3.5) is new on this branch.
 
 ## 12.7 Reset, link bring-up and idle smoke run
 
@@ -2664,7 +2768,10 @@ be expected to find defects this flow cannot see.
 ## 12.9 Regenerating this document
 
 
-The Word file in `docs/` is generated from `doc-src/`:
+The Word file in `docs/` is generated from `doc-src/`. On this branch it
+has not been regenerated: the authoring environment had neither pandoc nor
+Graphviz, so the Markdown and `.dot` sources are current and the committed
+`.docx` and `.png` files still show `main`. Run:
 
 ```sh
 make doc
@@ -2740,8 +2847,10 @@ the cross-references in the prose stay correct in every output format.
     performance characterization. The smoke run in Section 12.7 drives no
     traffic at all: it brings the links up and then asserts that no flit is
     delivered. So every row this document marks Implemented rests on reading
-    the source and on lint, not on having been executed, and the bound SVA
-    cannot fire until something drives the design.
+    the source, not on having been executed, and the bound SVA cannot fire
+    until something drives the design. The changes on
+    `feature/chi-fabric-upgrade` have not even been linted or elaborated yet
+    (Section 12.6).
 
 ## 13.2 Implementation-defined decision log
 
