@@ -403,6 +403,13 @@ module chi_hnf_top #(
   logic [NUM_RNF-1:0] sfLookupSharers;
   logic sfLookupOwnerValid;
   logic [RNF_W-1:0] sfLookupOwner;
+  logic sfLookupAliasValid;
+  logic [KEY_W-1:0] sfLookupAliasKey;
+  // A physical-aliasing CMO first moves its line's other PASs to victim
+  // entries, one per cycle, through the directory update port.
+  logic sfAliasEvict;
+  logic sfUpdateEvict;
+  logic [POS_DEPTH-1:0] eAllPas;
 
   // Exclusive monitor.
   logic exclReserveValid;
@@ -603,10 +610,20 @@ module chi_hnf_top #(
     end
   end
 
+  // CleanInvalidPoPA and its Combined forms act on their line in every PAS
+  // (IHI 0050H B4.2.2.1).
+  always_comb begin
+    for (int unsigned i = 0; i < POS_DEPTH; i++)
+      eAllPas[i] = posActive[i] && (entry[i].cmo == HNF_CMO_POPA)
+                   && (entry[i].err == HNF_ERR_NONE);
+  end
+
   chi_hazard #(
-    .CFG(CFG), .DEPTH(POS_DEPTH), .KEY_W(KEY_W), .NUM_VB(NUM_VB)
+    .CFG(CFG), .DEPTH(POS_DEPTH), .KEY_W(KEY_W), .LINE_W(LINE_W),
+    .NUM_VB(NUM_VB)
   ) hazard (
-    .active(posActive), .key(posKey), .requester(posRequester),
+    .active(posActive), .key(posKey), .allPas(eAllPas),
+    .requester(posRequester),
     .order(posOrder), .older(posOlder),
     .victimActive, .victimKey,
     .lineHazard(hazardLine), .orderHazard(hazardOrder),
@@ -616,13 +633,15 @@ module chi_hnf_top #(
   chi_snoop_filter #(
     .CFG(CFG),
     .ENTRIES((CFG.snpFilterEntries > 0) ? CFG.snpFilterEntries : 1),
-    .WAYS(SF_WAYS), .NUM_RNF(NUM_RNF), .KEY_W(KEY_W)
+    .WAYS(SF_WAYS), .NUM_RNF(NUM_RNF), .KEY_W(KEY_W), .LINE_W(LINE_W)
   ) snoop_filter (
     .clk, .resetn,
     .lookupKey(posKey[startIndex]),
     .lookupHit(sfLookupHit), .lookupSharers(sfLookupSharers),
     .lookupOwnerValid(sfLookupOwnerValid), .lookupOwner(sfLookupOwner),
-    .updateValid(sfUpdateValid), .updateKey(sfUpdateKey),
+    .lookupAliasValid(sfLookupAliasValid), .lookupAliasKey(sfLookupAliasKey),
+    .updateValid(sfUpdateValid), .updateEvict(sfUpdateEvict),
+    .updateKey(sfUpdateKey),
     .updateSharers(sfUpdateSharers), .updateOwnerValid(sfUpdateOwnerValid),
     .updateOwner(sfUpdateOwner),
     .updateSetKeys(sfUpdateSetKeys), .updateSetValid(sfUpdateSetValid),
@@ -659,18 +678,19 @@ module chi_hnf_top #(
   end
 
   chi_excl_mon #(
-    .CFG(CFG), .MONITORS((CFG.exclMonitors > 0) ? CFG.exclMonitors : 1)
+    .CFG(CFG), .MONITORS((CFG.exclMonitors > 0) ? CFG.exclMonitors : 1),
+    .ADDR_W(KEY_W)
   ) exclusive_monitor (
     .clk, .resetn,
     .reserveValid(exclReserveValid), .reserveReady(exclReserveReady),
-    .reserveLineAddr(keyLine(posKey[startIndex])),
+    .reserveLineAddr(posKey[startIndex]),
     .reserveRequester(entry[startIndex].req.srcId),
     .exclusiveCheckValid(exclCheckValid),
-    .exclusiveLineAddr(keyLine(posKey[startIndex])),
+    .exclusiveLineAddr(posKey[startIndex]),
     .exclusiveRequester(entry[startIndex].req.srcId),
     .exclusiveOkay(exclOkay),
     .conflictValid(exclConflictValid), .conflictIsWriteOrSnoop(1'b1),
-    .conflictLineAddr(keyLine(posKey[startIndex]))
+    .conflictLineAddr(posKey[startIndex])
   );
 
   chi_stash_ctrl #(
@@ -735,8 +755,18 @@ module chi_hnf_top #(
     allocEntry.req = incomingReq;
     allocEntry.kind = kind;
     allocEntry.cmo = hnfCmo(incomingReq.opcode);
-    allocEntry.err = (kind == HNF_KIND_ILLEGAL) ? HNF_ERR_UNSUPPORTED
-                                                : HNF_ERR_NONE;
+    // A request the Requester-side SAM refused, or one in a PAS this
+    // configuration does not support, completes with NDERR and touches
+    // nothing (IHI 0050H B9.1.1, Table B13.47).
+    if (reqInFlit.decodeErr == NOC_ERR_ADDRESS)
+      allocEntry.err = HNF_ERR_ADDRESS;
+    else if ((reqInFlit.decodeErr == NOC_ERR_PAS)
+             || !pasLegal(CFG, incomingReq.pas))
+      allocEntry.err = HNF_ERR_PAS;
+    else if (kind == HNF_KIND_ILLEGAL)
+      allocEntry.err = HNF_ERR_UNSUPPORTED;
+    else
+      allocEntry.err = HNF_ERR_NONE;
     allocEntry.reqIsRnf = isRnf(incomingReq.srcId);
     allocEntry.reqRnf = rnfIndex(incomingReq.srcId);
     allocEntry.snpOpcode = SNP_SHARED;
@@ -804,7 +834,10 @@ module chi_hnf_top #(
         startIndex = POS_W'(candidate);
       end
     end
-    startValid = found;
+    // A physical-aliasing CMO starts only once no other PAS of its line is
+    // in the directory; until then it evicts one per cycle instead.
+    sfAliasEvict = found && eAllPas[startIndex] && sfLookupAliasValid;
+    startValid = found && !sfAliasEvict;
     posStartMask = '0;
     if (startValid)
       posStartMask[startIndex] = 1'b1;
@@ -1858,9 +1891,11 @@ module chi_hnf_top #(
         sfUpdateEntry = POS_W'(candidate);
       end
     end
-    sfUpdateValid = found;
+    // An alias eviction takes the port ahead of a retiring entry.
+    sfUpdateEvict = sfAliasEvict;
+    sfUpdateValid = found || sfAliasEvict;
     e = entry[sfUpdateEntry];
-    sfUpdateKey = posKey[sfUpdateEntry];
+    sfUpdateKey = sfAliasEvict ? sfLookupAliasKey : posKey[sfUpdateEntry];
     reqBit = '0;
     if (e.reqIsRnf)
       reqBit[e.reqRnf] = 1'b1;
@@ -1991,7 +2026,8 @@ module chi_hnf_top #(
       if (entry[i].phase == PH_RETIRE) begin
         if (!entry[i].sfUpdOwed)
           posFreeMask[i] = 1'b1;
-        else if (sfUpdateValid && sfUpdateReady && (sfUpdateEntry == POS_W'(i)))
+        else if (sfUpdateValid && sfUpdateReady && !sfUpdateEvict
+                 && (sfUpdateEntry == POS_W'(i)))
           posFreeMask[i] = 1'b1;
       end
   end
@@ -2253,7 +2289,7 @@ module chi_hnf_top #(
         if (posFreeMask[i])
           entry[i].phase <= PH_FREE;
       end
-      if (sfUpdateValid && sfUpdateReady)
+      if (sfUpdateValid && sfUpdateReady && !sfUpdateEvict)
         sfUpdatePointer <= (int'(sfUpdateEntry) == (POS_DEPTH - 1))
                            ? '0 : (sfUpdateEntry + 1'b1);
 

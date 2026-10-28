@@ -16,12 +16,20 @@
 // before anything else may touch the location (IHI 0050H B4.4: a back
 // invalidation uses SnpUnique or SnpCleanInvalid). When every unlocked way
 // would need a victim entry and none is free, the update waits.
+//
+// A key is {PAS, line}; the set index comes from the line, so every PAS of a
+// line shares a set. Lookup also reports another PAS of the same line held
+// in the set (an alias), and an update with updateEvict moves the named
+// location to the victim buffer: a physical-aliasing CMO uses the pair to
+// clean its line in every PAS (IHI 0050H B4.2.2.1).
 module chi_snoop_filter #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter int unsigned ENTRIES = CFG.snpFilterEntries,
   parameter int unsigned WAYS = CFG.snpFilterWays,
   parameter int unsigned NUM_RNF = (CFG.numRnf > 0) ? CFG.numRnf : 1,
   parameter int unsigned KEY_W = CFG.addrW - 6,
+  // Line bits at the bottom of the key; the rest is PAS.
+  parameter int unsigned LINE_W = KEY_W,
   parameter int unsigned RNF_W = chi_pkg::clog2Min1(NUM_RNF)
 ) (
   input  logic clk,
@@ -31,7 +39,11 @@ module chi_snoop_filter #(
   output logic [NUM_RNF-1:0] lookupSharers,
   output logic lookupOwnerValid,
   output logic [RNF_W-1:0] lookupOwner,
+  output logic lookupAliasValid,
+  output logic [KEY_W-1:0] lookupAliasKey,
   input  logic updateValid,
+  // Move the location updateKey names to the victim buffer.
+  input  logic updateEvict,
   input  logic [KEY_W-1:0] updateKey,
   // A zero sharer vector removes the location.
   input  logic [NUM_RNF-1:0] updateSharers,
@@ -55,6 +67,7 @@ module chi_snoop_filter #(
   localparam int unsigned SET_W = clog2Min1(SETS);
   localparam int unsigned WAY_W = clog2Min1(WAYS);
   localparam int unsigned TAG_W = KEY_W - SET_W;
+  localparam int unsigned TAG_LINE_W = (LINE_W > SET_W) ? (LINE_W - SET_W) : 1;
 
   logic validRam [SETS][WAYS];
   logic [TAG_W-1:0] tagRam [SETS][WAYS];
@@ -76,6 +89,10 @@ module chi_snoop_filter #(
   logic writeWay;
   logic [WAY_W-1:0] targetWay;
   logic removeLocation;
+  logic [WAY_W-1:0] victimSelWay;
+  // Another valid way already holds the location an update writes; the
+  // bound assertion requires this never to happen.
+  logic updateDuplicate;
   int unsigned candidate;
 
   always_comb begin
@@ -85,12 +102,21 @@ module chi_snoop_filter #(
     lookupSharers = '0;
     lookupOwnerValid = 1'b0;
     lookupOwner = '0;
+    lookupAliasValid = 1'b0;
+    lookupAliasKey = '0;
     for (int unsigned way = 0; way < WAYS; way++) begin
       if (validRam[lookupSet][way] && (tagRam[lookupSet][way] == lookupTag)) begin
         lookupHit = 1'b1;
         lookupSharers = sharerRam[lookupSet][way];
         lookupOwnerValid = ownerValidRam[lookupSet][way];
         lookupOwner = ownerRam[lookupSet][way];
+      end
+      if ((LINE_W < KEY_W) && validRam[lookupSet][way]
+          && (tagRam[lookupSet][way] != lookupTag)
+          && (tagRam[lookupSet][way][TAG_LINE_W-1:0]
+              == lookupTag[TAG_LINE_W-1:0])) begin
+        lookupAliasValid = 1'b1;
+        lookupAliasKey = {tagRam[lookupSet][way], lookupSet};
       end
     end
   end
@@ -129,12 +155,20 @@ module chi_snoop_filter #(
       end
     end
 
-    removeLocation = updateSharers == '0;
+    removeLocation = updateEvict || (updateSharers == '0);
     writeWay = 1'b0;
     targetWay = '0;
     victimValid = 1'b0;
     updateReady = 1'b0;
-    if (removeLocation) begin
+    victimSelWay = victimWay;
+    if (updateEvict) begin
+      // Nothing to evict once the location is gone.
+      updateReady = !updateHit || victimReady;
+      writeWay = updateHit;
+      targetWay = updateHitWay;
+      victimSelWay = updateHitWay;
+      victimValid = updateValid && updateHit;
+    end else if (removeLocation) begin
       updateReady = 1'b1;
       writeWay = updateHit;
       targetWay = updateHitWay;
@@ -153,10 +187,16 @@ module chi_snoop_filter #(
       victimValid = updateValid;
     end
 
-    victimKey = {tagRam[updateSet][victimWay], updateSet};
-    victimSharers = sharerRam[updateSet][victimWay];
-    victimOwnerValid = ownerValidRam[updateSet][victimWay];
-    victimOwner = ownerRam[updateSet][victimWay];
+    updateDuplicate = 1'b0;
+    for (int unsigned way = 0; way < WAYS; way++)
+      if ((WAY_W'(way) != targetWay) && validRam[updateSet][way]
+          && (tagRam[updateSet][way] == updateTag))
+        updateDuplicate = 1'b1;
+
+    victimKey = {tagRam[updateSet][victimSelWay], updateSet};
+    victimSharers = sharerRam[updateSet][victimSelWay];
+    victimOwnerValid = ownerValidRam[updateSet][victimSelWay];
+    victimOwner = ownerRam[updateSet][victimSelWay];
   end
 
   always_ff @(posedge clk) begin
@@ -177,7 +217,7 @@ module chi_snoop_filter #(
       sharerRam[updateSet][targetWay] <= updateSharers;
       ownerValidRam[updateSet][targetWay] <= updateOwnerValid && !removeLocation;
       ownerRam[updateSet][targetWay] <= updateOwner;
-      if (victimValid)
+      if (victimValid && !updateEvict)
         replaceWay[updateSet] <= (int'(victimWay) == (WAYS - 1))
                                  ? '0 : (victimWay + 1'b1);
     end

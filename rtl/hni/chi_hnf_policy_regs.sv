@@ -8,9 +8,9 @@
 // the node involved.
 //
 // The register map and the security rule are implementation defined; CHI
-// defines no register interface. Writes need a Secure access (PPROT[1] == 0),
-// the same rule as the region editor in chi_cfg_slave. Reads are
-// unrestricted.
+// defines no register interface. Writes need a Root access with RME
+// (PNSE == 1, PPROT[1] == 0) and a Secure access without it, the same rule as
+// the region editor in chi_cfg_slave. Reads are unrestricted.
 //
 //   0x00 SELECT  RW  HN-F index the next two registers refer to
 //   0x04 STAGED  RW  staged policy of the selected HN-F (chi_hnf_policy_t)
@@ -32,6 +32,8 @@ module chi_hnf_policy_regs #(
   input  logic [31:0] PWDATA,
   input  logic [3:0] PSTRB,
   input  logic [2:0] PPROT,
+  // With RME, PNSE and PPROT[1] together name the Root PAS (AMBA APB5).
+  input  logic PNSE,
   output logic [31:0] PRDATA,
   output logic PREADY,
   output logic PSLVERR,
@@ -85,7 +87,7 @@ module chi_hnf_policy_regs #(
     if (transfer) begin
       if ((PADDR[1:0] != 2'b00) || !addressImplemented)
         PSLVERR = 1'b1;
-      else if (PWRITE && PPROT[1])
+      else if (PWRITE && (PPROT[1] || (CFG.rmeEn && !PNSE)))
         PSLVERR = 1'b1;
       else if (PWRITE && (PADDR == ADDR_ACTIVE))
         PSLVERR = 1'b1;

@@ -80,7 +80,8 @@ packed flit field by itself is carriage, not implementation.
 |------------------------|------------|--------------|--------------------------------------------------|
 | REQ/RSP/SNP/DAT records and pack/unpack | B13.9, B13.10 | Implemented | Configurable packed records match the Issue H field lists and slot widths, including every documented field overlay. Opcode-dependent field legality is not policed. |
 | Fixed flit slot widths and overlays | B13.9.1--B13.9.4 | Implemented | `TxnID` 12, `ReturnTxnID`/`StashLPID` 12, `NumReq`/`Size` 6, `GroupID` 8, RSP `DBID` 12, DAT `DBID` 16, `DataSource` 8, `CCID` 2, `DataID` 2, `CacheLineID` 6, `PAS` 3 are slot widths independent of the node-side field widths. |
-| `PAS[2:0]` replacing `NS`/`NSE` | B2.8.2, B13.10.68 | Implemented | REQ and SNP carry the three-bit Physical Address Space selector and the SAM decodes its non-secure sense. |
+| `PAS[2:0]` replacing `NS`/`NSE` | B2.8.2, B13.10.68 | Implemented | REQ and SNP carry the three-bit PAS with the encodings of Table B13.47. Root and Realm are legal only with `rmeEn` (RME_Support), System Agent and Non-secure Protected only with `gdiEn` as well; the reserved encodings never. |
+| PAS-aware SAM and Homes | B2.8.2, B4.2.2.1, B9.1.1 | Implemented | Each SAM region names the PASs that may access it. A refused PAS does not fall through to another region: the request goes to that region's Home, marked, and completes with NDERR; an unmapped address goes to the HN-F the hash picks (or the first HN-I) and completes the same way. HN-F and HN-I key every location by `{line, PAS}` (snoop filter, POS, hazards, exclusive monitor, victims, buffers), and snoops and downstream requests carry the request's own PAS. `CleanInvalidPoPA` and its Combined forms act on their line in every PAS: other-PAS copies are evicted to victim entries, snooped out and written back first, and the CMO is then forwarded to the Subordinate. Section 9.9. |
 | One node-facing interface type | B13 | Implemented | `rtl/if/chi_if.sv` is the only interface declaration in the repository and is a superset used by all five external node-class arrays. |
 | Top-level interface count and replicated channels | B13.7 | Not implemented | Elaboration requires `numIfPerNode == 1` and `replChannels == 1`. No top-level replication exists. |
 | L-Credit manager, link TX and link RX | B13.11, B14.2 | Implemented | `chi_lcrd_mgr`, `chi_link_tx` and `chi_link_rx` implement finite credit accounting, receive buffering, and the `LCrdReturn` exchange in both directions: the transmitter spends its remaining credits on `LCrdReturn` flits when it deactivates, and the receiver recognises a zero `Opcode`, extinguishes the credit and waits for all of them before it releases `LINKACTIVEACK`. |
@@ -103,7 +104,7 @@ packed flit field by itself is carriage, not implementation.
 | `PrefetchTgt` routing | B3.3.1, B4.2.6.2 | Implemented | `chi_prefetch_map` maps the address to an SN-F independently of the HN hash, the request bypasses the Home, and both the HN-F and HN-I accept and discard it without a response and without a RetryAck. |
 | Coherent read family | B2.3.1, B4.2.1, B4.4, B4.5.1 | Implemented | Every allocating read, `MakeReadUnique` (Comp without data while the Requester still holds the line), the `ReadOnce` family and `ReadNoSnp`. The Home reads memory with its own `ReadNoSnp` only when no snoop returned the whole line, merges partial Dirty data over memory data, and grants `CompData` per Table B4.27 from what the other caches keep; Dirty data a read cannot take is written back. Data always passes through the Home (see the DCT and DMT rows). |
 | Write family | B2.3.2, B4.2.3, B4.5.1.3 | Implemented | Immediate, Write Zero and CopyBack writes, stash and Combined forms. The Home issues its own `DBIDResp` or `CompDBIDResp` with its entry as DBID, buffers the data, merges a partial write over Dirty snoop data, honours `WriteDataCancel` and `CopyBackWriteData_I`, and writes memory with `WriteNoSnpFull` or `WriteNoSnpPtl`; a `WriteNoSnp` keeps its own address, Size and attributes. `WriteNoSnpDef` is answered OK/Unsupported (B4.5.1.3.1). |
-| CMO and combined write-CMO | B2.3.2.4, B2.3.2.5, B2.3.5, B4.2.2 | Implemented | Every CMO and Combined write including PoPA and the Issue H Storage forms. Dirty copies are snooped out and written back before `Comp`; persist and Storage maintenance is forwarded to the SN-F, `CleanSharedPersistSep` with `ReturnNID` naming the Requester so the Persist goes straight to it; `CompCMO` follows the write. PoP, PoPA and PoPS are taken to be at or behind the SN-F. |
+| CMO and combined write-CMO | B2.3.2.4, B2.3.2.5, B2.3.5, B4.2.2 | Implemented | Every CMO and Combined write including PoPA and the Issue H Storage forms. Dirty copies are snooped out and written back before `Comp`; persist, PoPA and Storage maintenance is forwarded to the SN-F, `CleanSharedPersistSep` with `ReturnNID` naming the Requester so the Persist goes straight to it; `CompCMO` follows the write. PoP, PoPA and PoPS are taken to be at or behind the SN-F. |
 | DCT | B2.3.1.1 alt 5, B4.8.3 | Not implemented | The per-entry Home does not send forwarding snoops yet; all read data passes through the Home. Capability and policy plumbing exists (Stage 1). |
 | DMT, including `ReadNoSnpSep` | B2.3.1.1 alts 3-4, B2.3.9.1 | Not implemented | The Home reads memory into its own buffer; `ReadNoSnpSep` is never issued and is rejected with NDERR from a Requester (B1.6). |
 | DWT | B2.3.2.1 alt 1, B13.10.24 | Not implemented | Write data passes through the Home. DWT is not legal for CopyBack writes (B2.3.2.3, B13.10.24), so it will only ever apply to Immediate and Combined writes. |
@@ -118,7 +119,7 @@ packed flit field by itself is carriage, not implementation.
 | Request Retry, `RetryAck` and `PCrdGrant` | B2.5.5, B2.10 | Implemented | HN-F and HN-I. `chi_retry` counts the grants it owes per Requester and credit type, so a Home can always answer with `RetryAck` and its REQ input is never held. One of four P-Credit types is used; `PCrdGrant` names the Requester, carries no `TxnID` and no `DBID`, and goes to the highest recorded QoS, then round-robin. Every granted credit holds a transaction entry in reserve, so a request re-sent on it is always accepted. |
 | Deadlock freedom across REQ, RSP, SNP and DAT | B2.10, B4.11, B2.7.5.3 | Implemented | Every Home accepts RSP and DAT unconditionally into storage reserved before the message was invited and answers REQ with an entry or `RetryAck`, so no channel waits on another in a cycle. The argument is in Section 9.7; `chi_home_liveness_sva` states its environment assumptions and the entry-completion property for a formal tool, with per-entry bounded-completion covers in every build. |
 | P-Credit return | B2.5.6, B2.10.1 | Implemented | A granted credit leaves the accounting either when a request arrives with `AllowRetry` deasserted or when the Requester returns it with `PCrdReturn`, which the Home accepts and discards. |
-| Exclusives | B6 | Partial | Checked when the entry starts, after same-location ordering. Exclusive loads register, `CleanUnique` and `WriteNoSnp` with `Excl` are checked; a failing `CleanUnique` sends no snoop and completes Shared, a failing `WriteNoSnp` writes nothing. The monitor is still keyed by SrcID and line without LPID or PAS and does not re-register on failure (Stage 7). |
+| Exclusives | B6 | Partial | Checked when the entry starts, after same-location ordering. Exclusive loads register, `CleanUnique` and `WriteNoSnp` with `Excl` are checked; a failing `CleanUnique` sends no snoop and completes Shared, a failing `WriteNoSnp` writes nothing. The monitor is keyed by SrcID and `{line, PAS}` without LPID and does not re-register on failure (Stage 7). |
 | Ordering and `ReadReceipt` | B2.7.5 | Implemented | Request Order is kept per location by the same-location rule; an Endpoint-ordered request waits for every older ordered request from its source. `ReadReceipt` goes out when an ordered `ReadNoSnp` or `ReadOnce*` is allocated, since the POS is the ordering point. |
 | HN-I transactions and ordering | B2.7.5, B2.7.5.3, B4.11, Table B2.9 | Implemented | `hniEntries` concurrent transactions with their own TxnIDs and buffers; one per `{line, PAS}` in arrival order; Endpoint-ordered requests sent downstream only after older ordered requests from the source were accepted, with Order passed to the SN-I; OWO writes held until CompAck; atomics forwarded; unsupported requests completed with NDERR. Section 9.8. |
 | `DataCheck` and poison carriage | B9, B13.10 | Partial | Optional DAT bits pack and unpack end to end. There is no error-response generation from a data check failure. |
@@ -128,7 +129,7 @@ packed flit field by itself is carriage, not implementation.
 | MEC | B10.6, B13.10 | Not implemented | The 16-bit `MECID` and its DAT slot overlay are carried. No MEC access control, translation or consistency checking exists. |
 | MPAM | B11.4 | Partial | The 12-bit or 15-bit bus is carried in REQ and SNP. There is no resource partitioning or monitoring. |
 | APB configuration | Project-defined | Implemented | Secure-write staged region editor with a quiescent commit. Limitations are in Section 7. |
-| CHI MMIO configuration | Project-defined | Partial | The HN-I recognizes a 4 KiB window and simple read and write offsets. Security, validation and quiescent commit are incomplete. |
+| CHI MMIO configuration | Project-defined | Partial | The HN-I serves a 4 KiB window to the Root PAS only (Secure without RME), with ordinary read and write flows, and commits only while every other Home is idle; any other access completes with NDERR. Register values are not validated. |
 | SVA | Sections above | Partial | Bound local safety, stability and protocol-field properties with functional covers. There is no full protocol checker and no proof closure. |
 
 : Table 1.1 Feature status against Arm IHI 0050H
@@ -339,7 +340,7 @@ Requester ports has its own `chi_sam` instance rather than sharing a central
 decoder.
 
 `chi_sam` walks an ordered region table, takes the first matching region,
-and applies the region's security rule against the incoming `PAS`. What
+and checks the incoming `PAS` against the PASs the region allows. What
 happens next depends on the region kind:
 
 - A plain region names one target directly.
@@ -568,7 +569,9 @@ it is a parameter at all and what choosing it wrong costs.
 | `mteEn` | 0 | 0 or 1 | Affects DCT eligibility only. MTE semantics are absent. |
 | `mecEn` | 0 | 0 or 1; mutually exclusive with `cdaEn` | Adds the 16-bit MECID to REQ, SNP and DAT. |
 | `pbhaEn` | 0 | 0 or 1 | Adds the 4-bit PBHA field to REQ. |
-| `cdaEn` | 0 | 0 or 1; mutually exclusive with `mecEn` | Adds `StreamID` and `SecSID1` to REQ. |
+| `cdaEn` | 0 | 0 or 1; mutually exclusive with `mecEn`; needs `rmeEn` | Adds `StreamID` and `SecSID1` to REQ. |
+| `rmeEn` | 1 | 0 or 1 | RME_Support: the Root and Realm PASs are legal, and configuration writes need the Root PAS. |
+| `gdiEn` | 0 | 0 or 1; needs `rmeEn` | GDI_Support: the System Agent and Non-secure Protected PASs are legal. |
 | `multiReqEn` | 0 | 0 or 1 | Checked metadata. No multi-request behaviour. |
 | `dctEn` | 1 | if 1, RN-F and HN-F must exist | Enables DCT eligibility and forwarding snoops. |
 | `dmtEn` | 1 | if 1, a Home and SN-F must exist | Enables direct memory transfer. |
@@ -639,6 +642,7 @@ impossible opcodes far from the cause.
 | `mteEn` | B16.1.23 `MTE_Support` | Memory tagging fields are misinterpreted. |
 | `mecEn` | B16.1.25 `MEC_Support`, B16.1.26 `MECID_Width` | REQ, SNP and DAT lengths differ, and realm isolation is lost. |
 | `cdaEn` | B16.1.16 `RME_Support` | `StreamID` and `SecSID1` are absent or misplaced in REQ. |
+| `rmeEn`, `gdiEn` | B16.1.16 `RME_Support`, `GDI_Support` (Table B13.47) | A PAS one side may send is refused, or accepted, by the other. |
 | `pbhaEn` | B16.1.19 `PBHA_Support` | REQ length differs. |
 | `multiReqEn` | B16.1.39 `MultiReq_Support` | A multi-request transaction is treated as a single request. |
 | `retryRecords` | B16.1.38 `Retry_Support`, with B16.1.34 `Num_RP_REQ` and B16.1.35 `Shared_Credits_REQ` | The P-Credit pool the Requester believes exists does not match what the Home can track. |
@@ -825,7 +829,7 @@ because every Home needs a Subordinate to pair with.
 | Port | Direction | Width | Purpose |
 |------------------|-----------|----------------|-------------------------------------------------------|
 | `clk`, `resetn` | in | 1 | Single clock and synchronous active-low reset. |
-| `PADDR`, `PSEL`, `PENABLE`, `PWRITE`, `PWDATA`, `PSTRB`, `PPROT` | in | 12, 1, 1, 1, 32, 4, 3 | APB4 configuration request. |
+| `PADDR`, `PSEL`, `PENABLE`, `PWRITE`, `PWDATA`, `PSTRB`, `PPROT`, `PNSE` | in | 12, 1, 1, 1, 32, 4, 3, 1 | APB configuration request; `PNSE` (APB5, default 0) marks a Root access together with `PPROT[1]=0`. |
 | `PRDATA`, `PREADY`, `PSLVERR` | out | 32, 1, 1 | APB4 configuration response. |
 | `linkUp` | out | `NUM_NODES` | Set while any receive channel of that node's link is in RUN. |
 | `linkParityError` | out | `NUM_NODES` | Flit parity mismatch observed on that node's link. |
@@ -1126,9 +1130,16 @@ to be 1 for it.
 ## 6.2 Lookup and default regions
 
 Regions use inclusive `[base, limit]` bounds with ascending-index first-match
-priority. Attributes are `[3:2]=kind`, `[1]=secureOnly`, `[0]=valid`. A
-secure-only match by a non-secure request returns `unmappedError`; the lookup
-does not fall through to an overlapping lower-priority region.
+priority. Attributes are `CHI_SAM_ATTR_W` = 12 bits: `[11:4]` the PASs
+allowed, bit `4+p` for PAS encoding `p`; `[3:2]` the kind; `[1]` reserved
+(it was the secure-only bit); `[0]` valid. A match whose mask, ANDed with the
+PASs the configuration supports, does not include the request's PAS raises
+`pasError`; the lookup does not fall through to an overlapping
+lower-priority region, and the target stays that region's Home. An address
+no region matches raises `unmappedError` and targets the HN-F the hash picks.
+The Requester port marks such a request in the fabric flit (`decodeErr`), and
+the Home it reaches completes it with NDERR without touching any state
+(B9.1.1). A replay on a P-Credit keeps its target but is checked again.
 
 With `NUM_REGIONS=4` and `USE_DEFAULT_REGIONS=1`:
 
@@ -1194,7 +1205,9 @@ APB runs on `clk` and `PREADY` is always 1. Addresses are 12-bit and word
 aligned. `PADDR[11:8]` selects a 256-byte block: block 0 is the region editor
 below, block 1 the HN-F policy registers of Table 7.1b, and every other block
 returns `PSLVERR`. Writes merge the bytes selected by `PSTRB`. Reads are unrestricted.
-A write with `PPROT[1]=1` is rejected as non-secure. Unsupported or
+A write must be a Root access with `rmeEn` (`PNSE=1`, `PPROT[1]=0`, the AMBA
+APB5 encoding) and a Secure access without it (`PPROT[1]=0`); anything else
+returns `PSLVERR`. Unsupported or
 misaligned accesses, out-of-range SELECT writes and non-quiescent COMMIT
 writes return `PSLVERR`.
 
@@ -1246,11 +1259,16 @@ A read returns one `CompData` with the 64-bit register at its natural byte
 position (B2.9.4). A write is an ordinary write transaction: `DBIDResp`, the
 data, then `Comp` once the register has taken the value. Configuration
 accesses to the register line are serialized like any other line at the HN-I
-(Section 9.8). The path does not check byte enables, security or PAS,
-privilege, base and limit validity, target validity, or quiescence.
-Unsupported offsets silently read SELECT or ignore the write and still
-complete successfully, and an invalid SELECT payload is silently ignored. This
-is a reference control path, not a hardened management interface.
+(Section 9.8). The window answers only the Root PAS with `rmeEn` and only the
+Secure PAS without it; the default region table admits only that PAS to the
+window, and the HN-I checks again, so any other access completes with NDERR.
+A COMMIT takes effect only while every other Home is idle and the commit is
+the HN-I's only transaction; otherwise it changes nothing and completes with
+NDERR. The path does not check byte enables, base and limit validity or
+target validity. Unsupported offsets silently read SELECT or ignore the write
+and still complete successfully, and an invalid SELECT payload is silently
+ignored. This is a reference control path, not a hardened management
+interface.
 
 # 8 Transaction flows
 
@@ -1463,9 +1481,9 @@ write has completed. Each owner has at most one downstream operation in flight,
 in the order read, write, CMO, which is the order every transaction kind
 needs.
 
-Later stages extend the entry rather than replace it: PAS is already part of
-the key, and the SLC, granule protection, exclusive and direct-transfer stages
-add fields and obligations of their own.
+Later stages extend the entry rather than replace it: PAS is part of the key
+(Section 9.9), and the SLC, granule protection, exclusive and direct-transfer
+stages add fields and obligations of their own.
 
 ## 9.2 Snoops
 
@@ -1553,7 +1571,7 @@ as the request is allocated, and always before its `CompData`.
 the Home uses towards the SN-F, so no Requester TxnID ever reaches the
 Subordinate. The Home sends only `ReadNoSnp`, `WriteNoSnpFull`,
 `WriteNoSnpPtl`, `CleanSharedPersist`, `CleanSharedPersistSep`,
-`CleanInvalidStorage` and `PCrdReturn`, with `SnpAttr` and `ExpCompAck` zero
+`CleanInvalidPoPA`, `CleanInvalidStorage` and `PCrdReturn`, with `SnpAttr` and `ExpCompAck` zero
 and `Order` zero. A RetryAck from the SN-F parks the tracker until a
 `PCrdGrant` of the recorded type arrives; the request is then re-sent with
 `AllowRetry` deasserted. A credit nothing waits for is returned with
@@ -1645,9 +1663,9 @@ SN-I permits (Table B2.9), so the SN-I keeps the order from there.
 | Request | HN-I behaviour |
 |---------|----------------|
 | `ReadNoSnp`, `ReadOnce*` | `ReadNoSnp` to the SN-I; `ReadReceipt` on allocation when ordered; `CompData` from the buffer, with the SN-I's state for `ReadNoSnp` and I for `ReadOnce*`. |
-| Immediate and Combined writes | `DBIDResp` on allocation, the data into the buffer, then `WriteNoSnpFull`, `WriteNoSnpPtl` or `WriteNoSnpDef` to the SN-I. `Comp` follows the SN-I's unless the write has Early Write Acknowledge (never for `WriteNoSnpDef`, whose `Comp` carries the SN-I's answer, Table B4.29). An OWO write goes downstream only after its CompAck (B2.7.5.3). A Combined write's CMO is forwarded when it is a persist or Storage CMO and `CompCMO` follows it; other CMOs complete at the HN-I, which holds no data. |
+| Immediate and Combined writes | `DBIDResp` on allocation, the data into the buffer, then `WriteNoSnpFull`, `WriteNoSnpPtl` or `WriteNoSnpDef` to the SN-I. `Comp` follows the SN-I's unless the write has Early Write Acknowledge (never for `WriteNoSnpDef`, whose `Comp` carries the SN-I's answer, Table B4.29). An OWO write goes downstream only after its CompAck (B2.7.5.3). A Combined write's CMO is forwarded when it is a persist, PoPA or Storage CMO and `CompCMO` follows it; other CMOs complete at the HN-I, which holds no data. |
 | `WriteNoSnpZero`, `WriteUniqueZero` | A full line of zeros to the SN-I, then `CompDBIDResp`. |
-| CMOs | Persist and Storage CMOs forwarded (`CleanSharedPersistSep` with ReturnNID naming the Requester); others completed at the HN-I. |
+| CMOs | Persist, PoPA and Storage CMOs forwarded (`CleanSharedPersistSep` with ReturnNID naming the Requester); others completed at the HN-I. |
 | Atomics | Forwarded: the operand goes after the SN-I's DBID, and its `CompData` or `Comp` is returned to the Requester. |
 | `Evict`, `StashOnce*` | `Comp`, or `CompStashDone` for the separate forms; nothing is stashed. |
 | Allocating reads, CopyBacks, `CleanUnique`, `MakeUnique`, `DVMOp`, `ReadNoSnpSep`, unknown opcodes, unmapped addresses | NDERR, after any data the Requester owes (B9.1.1, B1.6). |
@@ -1657,6 +1675,35 @@ SN-I permits (Table B2.9), so the SN-I keeps the order from there.
 
 `Excl` is passed to the SN-I and its `EXOK` passed back until the HN-I has an
 exclusive monitor of its own (Stage 7).
+
+## 9.9 Physical address spaces
+
+A location is a 64-byte line in one PAS (B2.8.2), so both Homes key it as
+`{PAS, line}`: the snoop filter tag, the POS key and its hazards, victim
+entries, the HN-F exclusive monitor, the HN-I entries and every buffer. Snoops
+and downstream requests carry the PAS of the location their owner holds,
+which `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED` and
+`HNI_DOWNSTREAM_PAS_PRESERVED` check. Retry state needs no PAS: it counts
+grants per Requester, and a re-sent request carries its own.
+
+A request in a PAS the configuration does not support (Table B13.47), or one
+the Requester-side SAM refused, completes at the Home with NDERR in its own
+message structure and touches nothing (B9.1.1).
+
+`CleanInvalidPoPA` and the Combined writes that carry it make Dirty data
+visible past the PoPA, where every PAS of a physical address meets
+(B4.2.2.1). The specification leaves cleaning the line in other PASs to
+further CMOs; this design does it as well, which is permitted and is what
+software that remaps a granule between PASs needs. Such an entry is ordered
+against its line in every PAS, in both directions. Before it starts, every
+other-PAS copy the directory holds for its line is moved, one per cycle, to a
+victim entry through the directory update port; the victim snoops it out with
+`SnpCleanInvalid` in that PAS and writes back Dirty data. Once no copy and no
+victim of the line in another PAS remains, the entry runs as a
+`CleanInvalid` in its own PAS and then forwards `CleanInvalidPoPA` to the
+SN-F, because the PoPA is at or behind the Subordinate (B2.3.9.5);
+`Comp` follows the SN-F's. The HN-I holds no data: it orders such a request
+against its line in every PAS and forwards it.
 
 # 10 RN-F boundary cache-state model
 
@@ -1749,7 +1796,8 @@ or performance guarantees are supplied.
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `RSP_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `DVM_RESPONSE_ID_CONSISTENT` | `DVM_COMPLETION` |
 | `chi_ordering_sva.sv` | pairwise `ONE_RUNNING_ENTRY_PER_LOCATION`, per-entry `START_ONLY_AFTER_OLDER_SAME_LOCATION`, `STARTED_IMPLIES_ACTIVE` | none |
 | `chi_hnf_ordering_sva.sv` | `ENDPOINT_ORDER_RESPECTED`, `ORDERED_REQUEST_STARTS_IN_ARRIVAL_ORDER` | none |
-| `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
+| `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA`, `HNI_DOWNSTREAM_PAS_PRESERVED` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
+| `chi_pas_sva.sv` | `SAM_PAS_REFUSAL_KEEPS_REGION`, `SAM_ACCEPTED_PAS_ALLOWED`, `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED`, `SF_ONE_WAY_PER_LOCATION` | `SAM_PAS_REFUSED`, `PAS_ALIAS_EVICTED`, `POPA_FORWARDED`, `REFUSED_REQUEST_ALLOCATED` |
 | `chi_home_liveness_sva.sv` (HN-F and HN-I) | with `CHI_SVA_LIVENESS`: `ENTRY_EVENTUALLY_FREES` under the assumptions `SNOOP_RESPONSE_ARRIVES`, `SUBORDINATE_ANSWERS`, `REQUESTER_ANSWERS` and `*_OUTPUT_FAIR` | `ENTRY_COMPLETES_WITHIN_BOUND` per entry |
 | `chi_snoop_sva.sv` | `SNOOP_OUTSTANDING_BOUNDED`, `SNOOP_COUNT_MATCHES_PENDING`, `ONE_SNOOP_PER_SNOOPEE_PER_LOCATION`, `SNOOP_RESPONSE_EXPECTED`, `SNOOP_DATA_EXPECTED` | `PARALLEL_SNOOPS_ONE_TRANSACTION`, `SEVERAL_TRANSACTIONS_SNOOPING`, `SNOOP_LIMIT_REACHED`, `DATA_FROM_TWO_SNOOPEES`, `DIRTY_SNOOP_DATA`, `PARTIAL_SNOOP_DATA`, `FORWARDED_SNOOP_RESPONSE` |
 | `chi_noc_sva.sv` | `ROUTE_NEVER_SELECTS_NONEXISTENT_PORT`, `EJECTS_AT_ENCODED_XP_AND_PORT`, `OUTPUT_STABLE_UNDER_BACKPRESSURE`, `OUTPUT_FIFO_IN_RANGE`, `ROUTE_LENGTH_BOUNDED`, `MESH_NO_Y_TO_X_TURN`, `RING_INJECTION_LEAVES_A_BUBBLE`, `NO_UNROUTABLE_FLIT`, `RING_DIRECTION_NEVER_FULL` | `MAX_HOP_PATH`, `ALL_DEVICE_PORTS_EJECT` |
@@ -1870,6 +1918,7 @@ rtl/sva/chi_hnf_ordering_sva.sv
 rtl/sva/chi_snoop_sva.sv
 rtl/sva/chi_hni_sva.sv
 rtl/sva/chi_home_liveness_sva.sv
+rtl/sva/chi_pas_sva.sv
 rtl/sva/chi_noc_sva.sv
 rtl/top/chi_sva_compile.sv
 ```
@@ -2109,7 +2158,7 @@ the cross-references in the prose stay correct in every output format.
 | DVM fanout | Sequential unicast | Minimal replication state, additive target latency. |
 | Home to subordinate mapping | Index modulo the subordinate count | Static striping rather than address-based balancing. |
 | Atomic execution point | Always the Home | No far-atomic negotiation, but one serialization point. |
-| APB security | Writes require `PPROT[1]==0` | Reads remain unrestricted. |
+| APB security | Writes require Root (`PNSE=1`, `PPROT[1]=0`) with RME, Secure without | Reads remain unrestricted. |
 | Reconfiguration | Staged fields plus an explicit commit | Software owns the ordering; CHI-MMIO is less protected than APB. |
 | Reset | Synchronous active low | No asynchronous reset behaviour and no CDC support. |
 | Bound assertion array ports | Packed two-dimensional, never unpacked | `bind` elaborates portably across simulators. |

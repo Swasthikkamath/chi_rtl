@@ -41,23 +41,25 @@ module chi_sam_compile (
       48'h0000_0000_0000, 48'h0000_0000_0000};
   localparam logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] REGION_TARGET [NUM_REGIONS-1:0] =
     '{default:'0};
-  localparam logic [3:0] REGION_ATTRIBUTES [NUM_REGIONS-1:0] =
-    '{4'b0001, 4'b0000, 4'b0000, 4'b0000};
+  localparam logic [CHI_SAM_ATTR_W-1:0] REGION_ATTRIBUTES [NUM_REGIONS-1:0] =
+    '{samAttributes(SAM_REGION_HNF_HASH, 8'hff, 1'b1), '0, '0, '0};
 
   logic regionUpdate;
   logic [clog2Min1(NUM_REGIONS)-1:0] regionUpdateIndex;
   logic [APB_CFG.addrW-1:0] regionUpdateBase;
   logic [APB_CFG.addrW-1:0] regionUpdateLimit;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] regionUpdateTarget;
-  logic [3:0] regionUpdateAttributes;
+  logic [CHI_SAM_ATTR_W-1:0] regionUpdateAttributes;
   logic [APB_CFG.addrW-1:0] sampleAddress;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterTarget;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] subordinateTarget;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] defaultHashTarget;
-  logic [3:0] requesterAttributes;
-  logic [3:0] subordinateAttributes;
+  logic [CHI_SAM_ATTR_W-1:0] requesterAttributes;
+  logic [CHI_SAM_ATTR_W-1:0] subordinateAttributes;
   logic requesterUnmapped;
   logic subordinateUnmapped;
+  logic requesterPasError;
+  logic subordinatePasError;
 
   assign sampleAddress = '0;
 
@@ -84,10 +86,11 @@ module chi_sam_compile (
     .clk(PCLK),
     .resetn(PRESETn),
     .address(sampleAddress),
-    .nonSecure(1'b0),
+    .pas(PAS_SECURE),
     .targetNodeId(requesterTarget),
     .matchedAttributes(requesterAttributes),
     .unmappedError(requesterUnmapped),
+    .pasError(requesterPasError),
     .regionUpdate(regionUpdate),
     .regionUpdateIndex(regionUpdateIndex),
     .regionUpdateBase(regionUpdateBase),
@@ -111,10 +114,11 @@ module chi_sam_compile (
     .clk(PCLK),
     .resetn(PRESETn),
     .address(sampleAddress),
-    .nonSecure(1'b0),
+    .pas(PAS_SECURE),
     .targetNodeId(subordinateTarget),
     .matchedAttributes(subordinateAttributes),
     .unmappedError(subordinateUnmapped),
+    .pasError(subordinatePasError),
     .regionUpdate(1'b0),
     .regionUpdateIndex('0),
     .regionUpdateBase('0),
@@ -140,6 +144,7 @@ module chi_sam_compile (
     .PWDATA(PWDATA),
     .PSTRB(PSTRB),
     .PPROT(PPROT),
+    .PNSE(1'b1),
     .PRDATA(PRDATA),
     .PREADY(PREADY),
     .PSLVERR(PSLVERR),

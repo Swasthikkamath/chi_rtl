@@ -171,15 +171,19 @@ package chi_hnf_pkg;
   // A CMO whose point of completion is downstream of the Home: the Point of
   // Persistence and the Point of Physical Storage are in or behind the SN-F,
   // so the Home forwards these (IHI 0050H B4.2.2.2, B2.3.5 alt 3c).
+  // CMOs whose point lies at or behind the Subordinate: the PoP, the PoPA and
+  // the PoPS. A Home forwards them once its own copies are clean
+  // (IHI 0050H B2.3.9.5, B4.2.2.1); the PoC is at the Home.
   function automatic logic cmoForwarded(input chi_hnf_cmo_e cmo);
     return (cmo == HNF_CMO_PERSIST) || (cmo == HNF_CMO_PERSIST_SEP)
-           || (cmo == HNF_CMO_STORAGE);
+           || (cmo == HNF_CMO_POPA) || (cmo == HNF_CMO_STORAGE);
   endfunction
 
   function automatic chi_req_opcode_e cmoDownstreamOpcode(input chi_hnf_cmo_e cmo);
     case (cmo)
       HNF_CMO_PERSIST:     return REQ_CLEAN_SHARED_PERSIST;
       HNF_CMO_PERSIST_SEP: return REQ_CLEAN_SHARED_PERSIST_SEP;
+      HNF_CMO_POPA:        return REQ_CLEAN_INVALID_POPA;
       default:             return REQ_CLEAN_INVALID_STORAGE;
     endcase
   endfunction

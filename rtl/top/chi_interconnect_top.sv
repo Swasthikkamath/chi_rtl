@@ -34,7 +34,8 @@ module chi_interconnect_top #(
     REGION_LIMIT [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
-  parameter logic [3:0]
+  // See CHI_SAM_ATTR_W in chi_cfg_pkg: valid, kind and the allowed PASs.
+  parameter logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0]
     REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0}
 ) (
   input logic clk,
@@ -51,6 +52,9 @@ module chi_interconnect_top #(
   input  logic [31:0] PWDATA,
   input  logic [3:0] PSTRB,
   input  logic [2:0] PPROT,
+  // AMBA APB5 PNSE: with PPROT[1] = 0 it marks a Root access. Configuration
+  // writes need Root with RME and Secure without it.
+  input  logic PNSE = 1'b0,
   output logic [31:0] PRDATA,
   output logic PREADY,
   output logic PSLVERR,
@@ -94,7 +98,7 @@ module chi_interconnect_top #(
   typedef logic [CHI_MAX_NODEID_W-1:0] dvm_id_array_t [NUM_DVM-1:0];
   typedef logic [CFG.addrW-1:0] region_addr_array_t [NUM_REGIONS-1:0];
   typedef logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] region_target_array_t [NUM_REGIONS-1:0];
-  typedef logic [3:0] region_attr_array_t [NUM_REGIONS-1:0];
+  typedef logic [CHI_SAM_ATTR_W-1:0] region_attr_array_t [NUM_REGIONS-1:0];
 
   function automatic chi_hnf_snf_table_t makeHnfSnfTable();
     chi_hnf_snf_table_t values;
@@ -227,23 +231,30 @@ module chi_interconnect_top #(
     return values;
   endfunction
 
+  localparam logic [7:0] MMIO_PAS_MASK =
+    CFG.rmeEn ? (8'd1 << PAS_ROOT) : (8'd1 << PAS_SECURE);
+
   function automatic region_attr_array_t makeRegionAttributes();
     region_attr_array_t values;
     values = REGION_ATTRIBUTES;
     if (USE_DEFAULT_REGIONS) begin
       values = '{default:'0};
-      values[0] = {SAM_REGION_HNF_HASH, 1'b0, 1'b1};
+      // Memory and the HN-I range admit every PAS the configuration
+      // supports; the configuration window admits only Root with RME and
+      // only Secure without it.
+      values[0] = samAttributes(SAM_REGION_HNF_HASH, pasLegalMask(CFG), 1'b1);
       if (NUM_REGIONS > 1)
-        values[1] = {SAM_REGION_DIRECT, 1'b0, 1'b1};
+        values[1] = samAttributes(SAM_REGION_DIRECT, pasLegalMask(CFG), 1'b1);
       if (NUM_REGIONS > 2)
-        values[2] = {SAM_REGION_MMIO, 1'b0, 1'b1};
+        values[2] = samAttributes(SAM_REGION_MMIO, MMIO_PAS_MASK, 1'b1);
     end
     return values;
   endfunction
 
   function automatic chi_noc_flit_t reqToNoc(
     input logic [CHI_MAX_REQ_FLIT_W-1:0] payload,
-    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] samTarget
+    input logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] samTarget,
+    input chi_noc_err_e decodeErr
   );
     chi_noc_flit_t value;
     chi_req_flit_t request;
@@ -253,6 +264,7 @@ module chi_interconnect_top #(
     value.channel = CHI_CHANNEL_REQ;
     value.qos = request.qos;
     value.targetNodeId = samTarget;
+    value.decodeErr = decodeErr;
     value.payload[CHI_MAX_REQ_FLIT_W-1:0] = packReqFlit(CFG, request);
     return value;
   endfunction
@@ -328,7 +340,9 @@ module chi_interconnect_top #(
   logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterSamTarget;
   logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterRouteTarget;
   logic [NUM_REQ_E-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requesterPrefetchTarget;
-  logic [NUM_REQ_E-1:0][3:0] requesterSamAttributes;
+  logic [NUM_REQ_E-1:0][CHI_SAM_ATTR_W-1:0] requesterSamAttributes;
+  logic [NUM_REQ_E-1:0] requesterSamPasError;
+  chi_noc_err_e [NUM_REQ_E-1:0] requesterDecodeErr;
   logic [NUM_REQ_E-1:0] requesterSamError;
   chi_req_flit_t requesterReq [NUM_REQ_E-1:0];
   logic [CHI_MAX_REQ_FLIT_W-1:0] requesterRawReq [NUM_REQ_E-1:0];
@@ -338,20 +352,22 @@ module chi_interconnect_top #(
   logic [CFG.addrW-1:0] apbRegionUpdateBase;
   logic [CFG.addrW-1:0] apbRegionUpdateLimit;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] apbRegionUpdateTarget;
-  logic [3:0] apbRegionUpdateAttributes;
+  logic [CHI_SAM_ATTR_W-1:0] apbRegionUpdateAttributes;
   logic selectedRegionUpdate;
   logic [clog2Min1(NUM_REGIONS)-1:0] selectedRegionUpdateIndex;
   logic [CFG.addrW-1:0] selectedRegionUpdateBase;
   logic [CFG.addrW-1:0] selectedRegionUpdateLimit;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] selectedRegionUpdateTarget;
-  logic [3:0] selectedRegionUpdateAttributes;
+  logic [CHI_SAM_ATTR_W-1:0] selectedRegionUpdateAttributes;
   logic [NUM_HNI_E-1:0] mmioRegionUpdate;
   logic [clog2Min1(NUM_REGIONS)-1:0]
     mmioRegionUpdateIndex [NUM_HNI_E-1:0];
   logic [CFG.addrW-1:0] mmioRegionUpdateBase [NUM_HNI_E-1:0];
   logic [CFG.addrW-1:0] mmioRegionUpdateLimit [NUM_HNI_E-1:0];
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] mmioRegionUpdateTarget [NUM_HNI_E-1:0];
-  logic [3:0] mmioRegionUpdateAttributes [NUM_HNI_E-1:0];
+  logic [CHI_SAM_ATTR_W-1:0] mmioRegionUpdateAttributes [NUM_HNI_E-1:0];
+  // Every Home but HN-I i is idle: the CHI MMIO commit needs this.
+  logic [NUM_HNI_E-1:0] hniOthersQuiescent;
   logic [NUM_HNI_E-1:0] hniIdle;
   logic [(CFG.numHnf > 0 ? CFG.numHnf : 1)-1:0] hnfIdle;
   logic [(CFG.numMn > 0 ? CFG.numMn : 1)-1:0] mnIdle;
@@ -406,6 +422,10 @@ module chi_interconnect_top #(
         // one of the two extensions can be carried on a given interface.
         if (CFG.mecEn && CFG.cdaEn)
           $fatal(1, "MEC and RME-CDA cannot share the REQ MECID/StreamID field");
+        if (CFG.gdiEn && !CFG.rmeEn)
+          $fatal(1, "gdiEn needs rmeEn: the System Agent and Non-secure Protected PASs require RME_Support (IHI 0050H Table B13.47)");
+        if (CFG.cdaEn && !CFG.rmeEn)
+          $fatal(1, "cdaEn needs rmeEn: RME device assignment is an RME feature");
         // The packed widths must stay inside the Issue H flit totals, which
         // catches any pack/unpack field list that drifts from B13.9.
         if ((reqFlitWidth(CFG) < (93 + CFG.addrW))
@@ -585,6 +605,19 @@ module chi_interconnect_top #(
       trafficQuiescent &= mnIdle[i];
   end
 
+  always_comb begin
+    for (int unsigned i = 0; i < NUM_HNI_E; i++) begin
+      hniOthersQuiescent[i] = 1'b1;
+      for (int unsigned j = 0; j < CFG.numHni; j++)
+        if (j != i)
+          hniOthersQuiescent[i] &= hniIdle[j];
+      for (int unsigned j = 0; j < CFG.numHnf; j++)
+        hniOthersQuiescent[i] &= hnfIdle[j];
+      for (int unsigned j = 0; j < CFG.numMn; j++)
+        hniOthersQuiescent[i] &= mnIdle[j];
+    end
+  end
+
   if (CFG.cfgAccess == CFG_APB) begin : apb_cfg
     always_comb begin
       apbRegionSelect = PSEL && (PADDR[11:8] == 4'h0);
@@ -599,7 +632,7 @@ module chi_interconnect_top #(
       .REGION_ATTRIBUTES(EFFECTIVE_REGION_ATTRIBUTES)
     ) cfg_slave (
       .PCLK(clk), .PRESETn(resetn), .PADDR, .PSEL(apbRegionSelect), .PENABLE,
-      .PWRITE, .PWDATA, .PSTRB, .PPROT, .PRDATA(apbRegionRdata),
+      .PWRITE, .PWDATA, .PSTRB, .PPROT, .PNSE, .PRDATA(apbRegionRdata),
       .PREADY(apbRegionReady), .PSLVERR(apbRegionError),
       .trafficQuiescent, .regionUpdate(apbRegionUpdate),
       .regionUpdateIndex(apbRegionUpdateIndex),
@@ -614,6 +647,7 @@ module chi_interconnect_top #(
     ) policy_regs (
       .PCLK(clk), .PRESETn(resetn), .PADDR(PADDR[7:0]),
       .PSEL(apbPolicySelect), .PENABLE, .PWRITE, .PWDATA, .PSTRB, .PPROT,
+      .PNSE,
       .PRDATA(apbPolicyRdata), .PREADY(apbPolicyReady),
       .PSLVERR(apbPolicyError), .trafficQuiescent, .policy(hnfPolicy)
     );
@@ -686,6 +720,28 @@ module chi_interconnect_top #(
       if ((requesterReq[i].opcode == REQ_PCRD_RETURN)
           || !requesterReq[i].allowRetry)
         requesterRouteTarget[i] = requesterReq[i].tgtId;
+      // An address no region maps still needs a Home to answer it. With no
+      // HN-F to hash to, that is the first HN-I.
+      if (requesterSamError[i] && (CFG.numHnf == 0) && (CFG.numHni > 0)
+          && requesterReq[i].allowRetry
+          && !(requesterReq[i].opcode inside {REQ_DVM_OP, REQ_PREFETCH_TGT,
+                                              REQ_PCRD_RETURN}))
+        requesterRouteTarget[i] = EFFECTIVE_NODE_IDS[OFF_HNI];
+    end
+
+    // A refused request carries the reason to its Home, which completes it
+    // with NDERR (IHI 0050H B9.1.1). A replay is checked against the current
+    // map too, although it keeps its target. DVMOp, PrefetchTgt and
+    // PCrdReturn are not address-mapped.
+    always_comb begin
+      requesterDecodeErr[i] = NOC_ERR_NONE;
+      if (!(requesterReq[i].opcode inside {REQ_DVM_OP, REQ_PREFETCH_TGT,
+                                           REQ_PCRD_RETURN})) begin
+        if (requesterSamError[i])
+          requesterDecodeErr[i] = NOC_ERR_ADDRESS;
+        else if (requesterSamPasError[i])
+          requesterDecodeErr[i] = NOC_ERR_PAS;
+      end
     end
 
     chi_prefetch_map #(
@@ -704,10 +760,11 @@ module chi_interconnect_top #(
       .REGION_ATTRIBUTES(EFFECTIVE_REGION_ATTRIBUTES)
     ) sam (
       .clk, .resetn, .address(requesterReq[i].addr[CFG.addrW-1:0]),
-      .nonSecure(pasNonSecure(requesterReq[i].pas)),
+      .pas(requesterReq[i].pas),
       .targetNodeId(requesterSamTarget[i]),
       .matchedAttributes(requesterSamAttributes[i]),
       .unmappedError(requesterSamError[i]),
+      .pasError(requesterSamPasError[i]),
       .regionUpdate(selectedRegionUpdate),
       .regionUpdateIndex(selectedRegionUpdateIndex),
       .regionUpdateBase(selectedRegionUpdateBase),
@@ -787,7 +844,8 @@ module chi_interconnect_top #(
         assign requesterRawReq[OFFSET+i] = \
           {{(CHI_MAX_REQ_FLIT_W-reqFlitWidth(CFG)){1'b0}}, portReqRxFlit}; \
         assign reqInFlit[OFFSET+i] = \
-          reqToNoc(requesterRawReq[OFFSET+i], requesterRouteTarget[OFFSET+i]); \
+          reqToNoc(requesterRawReq[OFFSET+i], requesterRouteTarget[OFFSET+i], \
+                   requesterDecodeErr[OFFSET+i]); \
         assign reqOutReady[OFFSET+i] = 1'b1; \
         assign snpOutReady[OFFSET+i] = portSnpTxReady; \
       end else begin : subordinate_ingress \
@@ -864,7 +922,8 @@ module chi_interconnect_top #(
       .NUM_REGIONS(NUM_REGIONS), .CFG_MMIO_BASE(CFG_MMIO_BASE),
       .REGION_BASE('{default:'0}), .REGION_LIMIT('{default:{CFG.addrW{1'b1}}}),
       .REGION_TARGET('{default:EFFECTIVE_NODE_IDS[OFF_SNI+(i % CFG.numSni)]}),
-      .REGION_ATTRIBUTES('{default:{SAM_REGION_DIRECT,1'b0,1'b1}}),
+      .REGION_ATTRIBUTES('{default:samAttributes(SAM_REGION_DIRECT,
+                                                 pasLegalMask(CFG), 1'b1)}),
       .NUM_SNI(NUM_SNI_E), .SNI_NODE_IDS(SNI_NODE_IDS),
       .NUM_REQUESTERS(NUM_DVM), .REQUESTER_NODE_IDS(REQUESTER_NODE_IDS)
     ) hni (
@@ -884,6 +943,7 @@ module chi_interconnect_top #(
       .regionUpdateLimit(selectedRegionUpdateLimit),
       .regionUpdateTarget(selectedRegionUpdateTarget),
       .regionUpdateAttributes(selectedRegionUpdateAttributes),
+      .othersQuiescent(hniOthersQuiescent[i]),
       .mmioRegionUpdate(mmioRegionUpdate[i]),
       .mmioRegionUpdateIndex(mmioRegionUpdateIndex[i]),
       .mmioRegionUpdateBase(mmioRegionUpdateBase[i]),

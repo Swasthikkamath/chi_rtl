@@ -30,14 +30,24 @@ package chi_pkg;
     CHI_CHANNEL_DAT = 2'b11
   } chi_channel_e;
 
+  // Why the Requester-side SAM refused a request. The request still goes to
+  // a Home, which completes it with NDERR (IHI 0050H B9.1.1).
+  typedef enum logic [1:0] {
+    NOC_ERR_NONE    = 2'd0,
+    NOC_ERR_ADDRESS = 2'd1,  // no region maps the address
+    NOC_ERR_PAS     = 2'd2   // the region does not allow the request's PAS
+  } chi_noc_err_e;
+
   // Internal fabric flit. hops counts the crosspoint-to-crosspoint links the
-  // flit has crossed; it is fabric bookkeeping, never part of a CHI message,
-  // and lets the bound assertions bound the route length per topology.
+  // flit has crossed and decodeErr carries a SAM refusal to the Home; both are
+  // fabric bookkeeping, never part of a CHI message. hops lets the bound
+  // assertions bound the route length per topology.
   typedef struct packed {
     chi_channel_e channel;
     logic [3:0] qos;
     logic [CHI_MAX_NODEID_W-1:0] targetNodeId;
     logic [7:0] hops;
+    chi_noc_err_e decodeErr;
     logic [CHI_MAX_NOC_PAYLOAD_W-1:0] payload;
   } chi_noc_flit_t;
 
@@ -217,6 +227,29 @@ package chi_pkg;
   function automatic logic pasNonSecure(input chi_pas_e pas);
     return (pas == PAS_NON_SECURE) || (pas == PAS_REALM)
            || (pas == PAS_NON_SECURE_PROTECTED);
+  endfunction
+
+  // The PASs a configuration supports (IHI 0050H Table B13.47): Secure and
+  // Non-secure always, Root and Realm with RME, System Agent and Non-secure
+  // Protected with RME and GDI. Bit p stands for PAS encoding p; the two
+  // reserved encodings are never legal.
+  function automatic logic [7:0] pasLegalMask(input chi_cfg_pkg::chi_cfg_t cfg);
+    logic [7:0] mask;
+    mask = 8'b0000_0011;
+    if (cfg.rmeEn)
+      mask[3:2] = 2'b11;
+    if (cfg.rmeEn && cfg.gdiEn)
+      mask[5:4] = 2'b11;
+    return mask;
+  endfunction
+
+  function automatic logic pasLegal(
+    input chi_cfg_pkg::chi_cfg_t cfg,
+    input chi_pas_e pas
+  );
+    logic [7:0] mask;
+    mask = pasLegalMask(cfg);
+    return mask[pas];
   endfunction
 
   function automatic logic pasMecIdApplicable(input chi_pas_e pas);

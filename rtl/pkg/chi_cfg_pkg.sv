@@ -69,6 +69,25 @@ package chi_cfg_pkg;
     SAM_REGION_MMIO     = 2'b10
   } chi_sam_region_kind_e;
 
+  // SAM region attributes: [0] valid, [1] reserved (it was the secure-only
+  // bit), [3:2] chi_sam_region_kind_e, [11:4] the PASs allowed to access the
+  // region, bit 4+p for PAS encoding p (IHI 0050H Table B13.47).
+  localparam int unsigned CHI_SAM_ATTR_W = 12;
+
+  function automatic logic [CHI_SAM_ATTR_W-1:0] samAttributes(
+    input chi_sam_region_kind_e kind,
+    input logic [7:0] allowedPas,
+    input logic valid
+  );
+    return {allowedPas, kind, 1'b0, valid};
+  endfunction
+
+  function automatic logic [7:0] samAllowedPas(
+    input logic [CHI_SAM_ATTR_W-1:0] attributes
+  );
+    return attributes[11:4];
+  endfunction
+
   // How each HN-F is paired with the SN-F that holds its memory: HN-F i to
   // SN-F i % numSnf, or an explicit table given by the HNF_TO_SNF top
   // parameter.
@@ -146,6 +165,10 @@ package chi_cfg_pkg;
     logic               mecEn;
     logic               pbhaEn;
     logic               cdaEn;
+    // RME_Support: the Root and Realm PASs exist. GDI_Support additionally
+    // allows System Agent and Non-secure Protected (IHI 0050H Table B13.47).
+    logic               rmeEn;
+    logic               gdiEn;
     logic               multiReqEn;
     logic               dctEn;
     logic               dmtEn;
@@ -172,7 +195,7 @@ package chi_cfg_pkg;
     interleaveGranule: 64, hnHashShift: 6,
     dataCheckEn: 1'b1, poisonEn: 1'b1, parityEn: 1'b0,
     mpamEn: 1'b0, mteEn: 1'b0, mecEn: 1'b0,
-    pbhaEn: 1'b0, cdaEn: 1'b0, multiReqEn: 1'b0,
+    pbhaEn: 1'b0, cdaEn: 1'b0, rmeEn: 1'b1, gdiEn: 1'b0, multiReqEn: 1'b0,
     dctEn: 1'b1, dmtEn: 1'b1, dwtEn: 1'b1,
     atomicEn: 1'b1, dvmEn: 1'b1, stashEn: 1'b1, exclEn: 1'b1,
     cfgAccess: CFG_PARAM_ONLY, hnfSnfMap: HNF_SNF_MAP_MODULO
@@ -183,7 +206,7 @@ package chi_cfg_pkg;
     logic [CHI_MAX_ADDR_W-1:0] limitAddr;
     logic [CHI_MAX_NODEID_W-1:0] targetNodeId;
     chi_sam_region_kind_e      kind;
-    logic                      secureOnly;
+    logic [7:0]                allowedPas;
     logic                      valid;
   } chi_sam_region_t;
 

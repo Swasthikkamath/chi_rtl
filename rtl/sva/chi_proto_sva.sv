@@ -96,7 +96,8 @@ module chi_proto_sva #(
       |-> downstream.opcode inside {
             REQ_READ_NO_SNP, REQ_WRITE_NO_SNP_FULL, REQ_WRITE_NO_SNP_PTL,
             REQ_CLEAN_SHARED_PERSIST, REQ_CLEAN_SHARED_PERSIST_SEP,
-            REQ_CLEAN_INVALID_STORAGE, REQ_PCRD_RETURN});
+            REQ_CLEAN_INVALID_POPA, REQ_CLEAN_INVALID_STORAGE,
+            REQ_PCRD_RETURN});
 
   DOWNSTREAM_FIELDS_LEGAL: assert property (
     @(posedge clk) disable iff (!resetn)

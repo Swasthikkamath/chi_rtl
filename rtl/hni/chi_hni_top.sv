@@ -49,7 +49,7 @@ module chi_hni_top #(
     REGION_LIMIT [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
-  parameter logic [3:0]
+  parameter logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0]
     REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0},
   // The SN-Is a region may name; a decode to any other node is an error.
   parameter int unsigned NUM_SNI = 1,
@@ -85,13 +85,15 @@ module chi_hni_top #(
   input  logic [CFG.addrW-1:0] regionUpdateBase,
   input  logic [CFG.addrW-1:0] regionUpdateLimit,
   input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] regionUpdateTarget,
-  input  logic [3:0] regionUpdateAttributes,
+  input  logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] regionUpdateAttributes,
+  // Every other Home is idle: a CHI MMIO commit needs a quiescent fabric.
+  input  logic othersQuiescent,
   output logic mmioRegionUpdate,
   output logic [chi_pkg::clog2Min1(NUM_REGIONS)-1:0] mmioRegionUpdateIndex,
   output logic [CFG.addrW-1:0] mmioRegionUpdateBase,
   output logic [CFG.addrW-1:0] mmioRegionUpdateLimit,
   output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] mmioRegionUpdateTarget,
-  output logic [3:0] mmioRegionUpdateAttributes,
+  output logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] mmioRegionUpdateAttributes,
   output logic idle
 );
   import chi_cfg_pkg::*;
@@ -180,8 +182,10 @@ module chi_hni_top #(
   chi_rsp_flit_t incomingRsp;
   chi_dat_flit_t incomingDat;
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] samTarget;
-  logic [3:0] samAttributes;
+  logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] samMatched;
   logic samError;
+  logic samPasError;
+  logic configPasOk;
   logic configAccess;
   logic sniKnown;
   logic [SUB_W-1:0] sniIndex;
@@ -201,8 +205,9 @@ module chi_hni_top #(
     .REGION_TARGET(REGION_TARGET), .REGION_ATTRIBUTES(REGION_ATTRIBUTES)
   ) hni_sam (
     .clk, .resetn, .address(incomingReq.addr[CFG.addrW-1:0]),
-    .nonSecure(pasNonSecure(incomingReq.pas)), .targetNodeId(samTarget),
-    .matchedAttributes(samAttributes), .unmappedError(samError),
+    .pas(incomingReq.pas), .targetNodeId(samTarget),
+    .matchedAttributes(samMatched), .unmappedError(samError),
+    .pasError(samPasError),
     .regionUpdate, .regionUpdateIndex, .regionUpdateBase,
     .regionUpdateLimit, .regionUpdateTarget, .regionUpdateAttributes
   );
@@ -215,6 +220,9 @@ module chi_hni_top #(
                    && ((incomingReq.addr[CFG.addrW-1:0]
                         & ~CFG.addrW'(12'hfff))
                        == CFG_MMIO_BASE);
+    // The configuration window answers only the Root PAS with RME and only
+    // the Secure PAS without it.
+    configPasOk = incomingReq.pas == (CFG.rmeEn ? PAS_ROOT : PAS_SECURE);
     // PCrdReturn carries no transaction and PrefetchTgt has no response, so
     // both are accepted and discarded (IHI 0050H B2.5.6, B4.2.6.2).
     dropRequest = (incomingReq.opcode == REQ_PCRD_RETURN)
@@ -243,7 +251,7 @@ module chi_hni_top #(
   logic [CFG.addrW-1:0] stagedBase [NUM_REGIONS-1:0];
   logic [CFG.addrW-1:0] stagedLimit [NUM_REGIONS-1:0];
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] stagedTarget [NUM_REGIONS-1:0];
-  logic [3:0] stagedAttributes [NUM_REGIONS-1:0];
+  logic [CHI_SAM_ATTR_W-1:0] stagedAttributes [NUM_REGIONS-1:0];
 
   // chi_pos.
   logic posAllocValid;
@@ -359,6 +367,7 @@ module chi_hni_top #(
   logic datEntrySend;
   logic cfgApplyValid;
   logic [IDX_W-1:0] cfgApplyEntry;
+  logic cfgCommitAllowed;
 
   // The configuration register an access names, as a 64-bit little-endian
   // value at its own offset (IHI 0050H B2.9.4: bytes travel at their natural
@@ -370,7 +379,7 @@ module chi_hni_top #(
       8'h08: value[CFG.addrW-1:0] = stagedBase[selectedRegion];
       8'h10: value[CFG.addrW-1:0] = stagedLimit[selectedRegion];
       8'h18: value[CHI_NODEID_SLOT_W-1:0] = stagedTarget[selectedRegion];
-      8'h20: value[3:0] = stagedAttributes[selectedRegion];
+      8'h20: value[CHI_SAM_ATTR_W-1:0] = stagedAttributes[selectedRegion];
       default: value[REG_W-1:0] = selectedRegion;
     endcase
     return value;
@@ -505,14 +514,20 @@ module chi_hni_top #(
         end
       endcase
     end
-    // Inside the configuration window only the register accesses are
-    // served; elsewhere the address must decode to an SN-I.
+    // Inside the configuration window only Root (or Secure) register
+    // accesses are served; elsewhere the address must decode to an SN-I and
+    // the PAS must be one the region and the configuration allow. A request
+    // the Requester-side SAM refused carries that refusal here
+    // (IHI 0050H B9.1.1).
     if (configAccess) begin
-      if (!(kind inside {HNI_K_CFG_READ, HNI_K_CFG_WRITE}))
+      if (!(kind inside {HNI_K_CFG_READ, HNI_K_CFG_WRITE}) || !configPasOk)
         err = 1'b1;
-    end else if (samError || !sniKnown) begin
+    end else if (samError || samPasError || !sniKnown) begin
       err = 1'b1;
     end
+    if ((reqInFlit.decodeErr != NOC_ERR_NONE)
+        || !pasLegal(CFG, incomingReq.pas))
+      err = 1'b1;
 
     allocEntry = '0;
     allocEntry.req = incomingReq;
@@ -555,9 +570,14 @@ module chi_hni_top #(
       // Same line: wait for every older entry for the location.
       olderSameLine = 1'b0;
       olderOrderedPending = 1'b0;
+      // CleanInvalidPoPA and its Combined forms are ordered against their
+      // line in every PAS (IHI 0050H B4.2.2.1).
       for (int unsigned j = 0; j < DEPTH; j++)
         if ((j != i) && posActive[j] && posOlder[i][j]) begin
-          if (posKey[j] == posKey[i])
+          if ((posKey[j] == posKey[i])
+              || (((entry[i].cmo == HNF_CMO_POPA)
+                   || (entry[j].cmo == HNF_CMO_POPA))
+                  && (posKey[j][LINE_W-1:0] == posKey[i][LINE_W-1:0])))
             olderSameLine = 1'b1;
           if (entry[j].ordered && !entry[j].dnAccepted
               && (posRequester[j] == posRequester[i]))
@@ -864,6 +884,8 @@ module chi_hni_top #(
         cfgApplyValid = 1'b1;
         cfgApplyEntry = IDX_W'(i);
       end
+    cfgCommitAllowed = othersQuiescent
+                       && ((posActive & ~(DEPTH'(1) << cfgApplyEntry)) == '0);
   end
 
   // ---------------------------------------------------------------------
@@ -1182,7 +1204,12 @@ module chi_hni_top #(
         offset = entry[cfgApplyEntry].req.addr[7:0];
         value = bufReq[cfgApplyEntry][int'(entry[cfgApplyEntry].req.addr[5:3])*64 +: 64];
         entry[cfgApplyEntry].dnMainDone <= 1'b1;
-        if (!entry[cfgApplyEntry].wrCancel) begin
+        // A commit takes effect only on a quiescent fabric: every other Home
+        // idle and nothing else at this HN-I. Otherwise it changes nothing
+        // and completes with NDERR.
+        if (((offset & 8'hf8) == 8'h28) && !cfgCommitAllowed)
+          entry[cfgApplyEntry].err <= 1'b1;
+        else if (!entry[cfgApplyEntry].wrCancel) begin
           case (offset & 8'hf8)
             8'h00:
               if ((value[63:REG_W] == '0)
@@ -1191,7 +1218,7 @@ module chi_hni_top #(
             8'h08: stagedBase[selectedRegion] <= value[CFG.addrW-1:0];
             8'h10: stagedLimit[selectedRegion] <= value[CFG.addrW-1:0];
             8'h18: stagedTarget[selectedRegion] <= value[CHI_NODEID_SLOT_W-1:0];
-            8'h20: stagedAttributes[selectedRegion] <= value[3:0];
+            8'h20: stagedAttributes[selectedRegion] <= value[CHI_SAM_ATTR_W-1:0];
             8'h28: begin
               mmioRegionUpdate <= 1'b1;
               mmioRegionUpdateIndex <= selectedRegion;

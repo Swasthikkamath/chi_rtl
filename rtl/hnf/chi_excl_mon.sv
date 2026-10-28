@@ -1,23 +1,26 @@
 module chi_excl_mon #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
-  parameter int unsigned MONITORS = CFG.exclMonitors
+  parameter int unsigned MONITORS = CFG.exclMonitors,
+  // A monitored location: the line, and with it the PAS when the Home keys
+  // locations by {PAS, line} (IHI 0050H B2.8.2).
+  parameter int unsigned ADDR_W = CFG.addrW - 6
 ) (
   input  logic clk,
   input  logic resetn,
   input  logic reserveValid,
   output logic reserveReady,
-  input  logic [CFG.addrW-7:0] reserveLineAddr,
+  input  logic [ADDR_W-1:0] reserveLineAddr,
   input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] reserveRequester,
   input  logic exclusiveCheckValid,
-  input  logic [CFG.addrW-7:0] exclusiveLineAddr,
+  input  logic [ADDR_W-1:0] exclusiveLineAddr,
   input  logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] exclusiveRequester,
   output logic exclusiveOkay,
   input  logic conflictValid,
   input  logic conflictIsWriteOrSnoop,
-  input  logic [CFG.addrW-7:0] conflictLineAddr
+  input  logic [ADDR_W-1:0] conflictLineAddr
 );
   logic valid [MONITORS];
-  logic [CFG.addrW-7:0] lineAddr [MONITORS];
+  logic [ADDR_W-1:0] lineAddr [MONITORS];
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] requester [MONITORS];
   logic [chi_pkg::clog2Min1(MONITORS)-1:0] reserveIndex;
   logic reserveFound;

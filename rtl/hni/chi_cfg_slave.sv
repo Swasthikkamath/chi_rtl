@@ -7,7 +7,7 @@ module chi_cfg_slave #(
     REGION_LIMIT [NUM_REGIONS-1:0] = '{default:'0},
   parameter logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0]
     REGION_TARGET [NUM_REGIONS-1:0] = '{default:'0},
-  parameter logic [3:0]
+  parameter logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0]
     REGION_ATTRIBUTES [NUM_REGIONS-1:0] = '{default:'0}
 ) (
   input  logic PCLK,
@@ -19,6 +19,8 @@ module chi_cfg_slave #(
   input  logic [31:0] PWDATA,
   input  logic [3:0] PSTRB,
   input  logic [2:0] PPROT,
+  // With RME, PNSE and PPROT[1] together name the Root PAS (AMBA APB5).
+  input  logic PNSE,
   output logic [31:0] PRDATA,
   output logic PREADY,
   output logic PSLVERR,
@@ -29,7 +31,7 @@ module chi_cfg_slave #(
   output logic [CFG.addrW-1:0] regionUpdateBase,
   output logic [CFG.addrW-1:0] regionUpdateLimit,
   output logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] regionUpdateTarget,
-  output logic [3:0] regionUpdateAttributes
+  output logic [chi_cfg_pkg::CHI_SAM_ATTR_W-1:0] regionUpdateAttributes
 );
   import chi_cfg_pkg::*;
   import chi_pkg::*;
@@ -47,7 +49,7 @@ module chi_cfg_slave #(
   logic [CFG.addrW-1:0] stagedBase [NUM_REGIONS-1:0];
   logic [CFG.addrW-1:0] stagedLimit [NUM_REGIONS-1:0];
   logic [chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] stagedTarget [NUM_REGIONS-1:0];
-  logic [3:0] stagedAttributes [NUM_REGIONS-1:0];
+  logic [CHI_SAM_ATTR_W-1:0] stagedAttributes [NUM_REGIONS-1:0];
   logic transfer;
   logic addressImplemented;
   logic [31:0] strobedData;
@@ -86,7 +88,7 @@ module chi_cfg_slave #(
         PRDATA = {{(32 - chi_cfg_pkg::CHI_NODEID_SLOT_W){1'b0}},
                   stagedTarget[selectedRegion]};
       ADDR_ATTRIBUTES:
-        PRDATA = {28'b0, stagedAttributes[selectedRegion]};
+        PRDATA = 32'(stagedAttributes[selectedRegion]);
       ADDR_COMMIT:
         PRDATA = '0;
       default:
@@ -100,8 +102,9 @@ module chi_cfg_slave #(
         PSLVERR = 1'b1;
       else if (PADDR[1:0] != 2'b00 || !addressImplemented)
         PSLVERR = 1'b1;
-      // This implementation defines all configuration writes as secure control.
-      else if (PWRITE && PPROT[1])
+      // Configuration writes are Root control with RME and Secure control
+      // without it, the same qualification the CHI MMIO window applies.
+      else if (PWRITE && (PPROT[1] || (CFG.rmeEn && !PNSE)))
         PSLVERR = 1'b1;
       else if (PWRITE && (PADDR == ADDR_SELECT)
                && (strobedData >= NUM_REGIONS))
@@ -146,7 +149,7 @@ module chi_cfg_slave #(
           ADDR_TARGET:
             stagedTarget[selectedRegion] <= strobedData[chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0];
           ADDR_ATTRIBUTES:
-            stagedAttributes[selectedRegion] <= strobedData[3:0];
+            stagedAttributes[selectedRegion] <= strobedData[CHI_SAM_ATTR_W-1:0];
           ADDR_COMMIT:
             if (PSTRB[0]) begin
               regionUpdate <= 1'b1;

@@ -14,6 +14,8 @@
 //       after its CompAck (IHI 0050H B2.7.5.3).
 //   HNI_RECEIPT_BEFORE_DATA  an ordered read's CompData never precedes its
 //       ReadReceipt.
+//   HNI_DOWNSTREAM_PAS_PRESERVED  a request to an SN-I carries the PAS of
+//       the request it serves (IHI 0050H B2.8.2).
 //
 // Covers: concurrent transactions, a same-line waiter, an Endpoint-ordered
 // request held back, a downstream RetryAck, an OWO write, a forwarded atomic,
@@ -22,7 +24,9 @@ module chi_hni_sva #(
   parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT,
   parameter logic [chi_cfg_pkg::CHI_MAX_NODEID_W-1:0] HN_NODE_ID = '0,
   parameter int unsigned DEPTH = 1,
-  parameter int unsigned IDX_W = 1
+  parameter int unsigned IDX_W = 1,
+  parameter int unsigned KEY_W = 1,
+  parameter int unsigned LINE_W = 1
 ) (
   input logic clk,
   input logic resetn,
@@ -33,6 +37,7 @@ module chi_hni_sva #(
   input logic [DEPTH-1:0] posActive,
   input logic [DEPTH-1:0] posStarted,
   input logic [DEPTH-1:0][DEPTH-1:0] posOlder,
+  input logic [DEPTH-1:0][KEY_W-1:0] posKey,
   input chi_pkg::chi_order_e [DEPTH-1:0] posOrder,
   input logic [DEPTH-1:0][chi_cfg_pkg::CHI_NODEID_SLOT_W-1:0] posRequester,
   input logic [DEPTH-1:0] eMayStart,
@@ -100,6 +105,13 @@ module chi_hni_sva #(
         |-> !eCompAckOwed[i]);
   end
 
+  HNI_DOWNSTREAM_PAS_PRESERVED: assert property (
+    @(posedge clk) disable iff (!resetn)
+    reqOutValid && (downstream.opcode != REQ_PCRD_RETURN)
+    && (int'(downstream.txnId) < DEPTH)
+      |-> (downstream.pas
+           == chi_pas_e'(posKey[downstream.txnId][KEY_W-1:LINE_W])));
+
   HNI_RECEIPT_BEFORE_DATA: assert property (
     @(posedge clk) disable iff (!resetn)
     datEntrySend |-> !eReceiptOwed[datEntry]);
@@ -145,7 +157,9 @@ bind chi_hni_top chi_hni_sva #(
   .CFG(CFG),
   .HN_NODE_ID(HN_NODE_ID),
   .DEPTH(DEPTH),
-  .IDX_W(IDX_W)
+  .IDX_W(IDX_W),
+  .KEY_W(KEY_W),
+  .LINE_W(LINE_W)
 ) chi_hni_assertions (
   .clk(clk),
   .resetn(resetn),
@@ -156,6 +170,7 @@ bind chi_hni_top chi_hni_sva #(
   .posActive(posActive),
   .posStarted(posStarted),
   .posOlder(posOlder),
+  .posKey(posKey),
   .posOrder(posOrder),
   .posRequester(posRequester),
   .eMayStart(eMayStart),
