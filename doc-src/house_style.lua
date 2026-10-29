@@ -1,19 +1,18 @@
 -- Pandoc filter that applies the house conventions of the document series
 -- this specification belongs to.
 --
--- Three things are done here rather than in the Markdown source, so that the
--- source stays readable and the numbering cannot drift:
+-- One thing is done here rather than in the Markdown source, so that the
+-- source stays readable and the numbering cannot drift: a level-one heading
+-- that starts with a number becomes a chapter opening. The number is lifted
+-- onto its own line as "Chapter N", set larger and unemphasised, and the title
+-- below it is centred and set in capitals. The chapter number is taken from
+-- the heading text, so the Markdown remains the single place where chapters
+-- are numbered.
 --
---   1. A level-one heading that starts with a number becomes a chapter
---      opening: the number is lifted onto its own line as "Chapter N", set
---      larger and unemphasised, and the title below it is centred and set in
---      capitals. The chapter number is taken from the heading text, so the
---      Markdown remains the single place where chapters are numbered.
---   2. Table captions are moved below the table. Pandoc's docx writer emits
---      them above, and this document series puts them underneath.
---   3. Both kinds of caption keep the paragraph styles the Word template
---      expects, which is what lets the List of Tables and List of Figures
---      fields find them.
+-- Captions need nothing here. Pandoc's docx writer puts a table's caption
+-- above the table and a figure's below the figure, which is where this
+-- document series puts them, in the paragraph styles the List of Tables and
+-- List of Figures fields look for (Table Caption, Image Caption).
 
 local CHAPTER_RUN = table.concat({
   '<w:r><w:rPr><w:rStyle w:val="ChapterLabel"/></w:rPr>',
@@ -55,16 +54,4 @@ function Header(el)
     el.content:insert(1, pandoc.RawInline("openxml", CHAPTER_RUN:format(number)))
   end
   return el
-end
-
-function Table(el)
-  local caption = el.caption.long
-  if #caption == 0 then
-    return nil
-  end
-  el.caption.long = pandoc.Blocks({})
-  local styled = pandoc.Div(caption, pandoc.Attr("", {}, {
-    { "custom-style", "Table Caption" },
-  }))
-  return pandoc.Blocks({ el, styled })
 end

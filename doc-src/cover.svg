@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Cover art of the design specification, placed behind the title page by
+     doc-src/finish_docx.py. A4 in points. It follows the cover of the mbits
+     AXI4 AVIP architecture document: a slate panel shaded top to bottom with a
+     curved foot, a lighter band under the curve, and a tab at the top right.
+     The title text is not part of the picture; it is the document's own
+     title block, set in white over the panel. Render with resvg at 150 dpi
+     into doc-src/cover.png. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="595pt" height="842pt" viewBox="0 0 595 842">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5B6B82"/>
+      <stop offset="0.45" stop-color="#485A74"/>
+      <stop offset="1" stop-color="#34445C"/>
+    </linearGradient>
+  </defs>
+  <rect width="595" height="842" fill="#FFFFFF"/>
+  <path d="M 280 585 C 380 600 520 588 590 560 L 590 541 L 575 515 L 280 515 Z" fill="#7C8798"/>
+  <path d="M 50 56 L 590 56 L 590 541 C 470 590 300 603 50 558 Z" fill="url(#panel)"/>
+  <rect x="475" y="18" width="48" height="74" fill="#4472C4"/>
+  <text x="499" y="84" font-family="Arial, Helvetica, sans-serif" font-size="7.5" fill="#FFFFFF" text-anchor="middle">Issue H</text>
+</svg>

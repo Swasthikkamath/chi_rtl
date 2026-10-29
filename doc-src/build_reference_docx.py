@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Build the pandoc reference document used to style the design specification.
 
-The house style being reproduced is the one used by the DMA-350 verification
-architecture document: A4, Times New Roman body text set justified, chapter
-openings that carry the chapter number on its own line above a centred
-upper-case title, Courier New code in a boxed and shaded block, thin blue-grey
-table rules with a shaded header row, 9pt centred captions below the object they
-describe, and a two-line footer holding the project name and the page number.
+The house style being reproduced is the one used by the mbits AXI4 AVIP
+architecture document:
+- A4 with one-inch margins.
+- A cover page with a shaded panel; finish_docx.py places it.
+- Contents, List of Tables and List of Figures under centred Georgia titles,
+  their entries in Georgia with dotted leaders, the first level bold.
+- Chapter openings with "Chapter N" on its own line above a centred, bold,
+  upper-case title. Every chapter, and each of the Contents and List pages,
+  starts a new page.
+- Times New Roman body text at 12pt, justified, with 1.15 line spacing, and
+  bold Times New Roman section headings.
+- Tables ruled with a black one-point grid and a bold, unshaded header row.
+- 10pt captions: above a table, at the left; below a figure, centred.
+- A centred two-line footer holding the project name and the page number, with
+  none on the cover.
 
 Only the layout is taken from that document. No text, table or figure from it
 appears here.
@@ -23,36 +32,57 @@ import sys
 import zipfile
 from pathlib import Path
 
-# Page geometry, in twentieths of a point. A4 with a 2cm left margin, a 1.65cm
-# right margin and room at the foot of the page for the two footer lines.
+# Page geometry, in twentieths of a point. A4 with one-inch margins; the
+# footer's two lines sit about 0.7 inch above the bottom edge.
 PAGE_W = 11906
 PAGE_H = 16838
-MARGIN_TOP = 1134
-MARGIN_BOTTOM = 1418
-MARGIN_LEFT = 1134
-MARGIN_RIGHT = 935
-FOOTER_DIST = 709
+MARGIN_TOP = 1440
+MARGIN_BOTTOM = 1440
+MARGIN_LEFT = 1440
+MARGIN_RIGHT = 1440
+FOOTER_DIST = 1000
 
 # Half the text column, used as the centring tab stop inside chapter headings.
 CENTRE_TAB = (PAGE_W - MARGIN_LEFT - MARGIN_RIGHT) // 2
 
 BODY_FONT = "Times New Roman"
 CODE_FONT = "Courier New"
+TOC_FONT = "Georgia"
+FOOTER_FONT = "Arial"
+COVER_FONT = "Calibri Light"
+COVER_SUB_FONT = "Arial"
 
 # Sizes in half-points.
-SZ_BODY = 22  # 11pt
-SZ_SMALL = 18  # 9pt, used by tables, captions and code
-SZ_H1 = 30  # 15pt, the upper-case chapter title
-SZ_CHAPTER_LABEL = 40  # 20pt, the "Chapter N" line above it
-SZ_H2 = 26  # 13pt
+SZ_BODY = 24  # 12pt
+SZ_SMALL = 18  # 9pt, used by tables and code
+SZ_CAPTION = 20  # 10pt
+SZ_H1 = 32  # 16pt, the upper-case chapter title
+SZ_CHAPTER_LABEL = 44  # 22pt, the "Chapter N" line above it
+SZ_H2 = 28  # 14pt
 SZ_H3 = 24  # 12pt
-SZ_TITLE = 44  # 22pt
-SZ_SUBTITLE = 28  # 14pt
+SZ_TOC_TITLE = 44  # 22pt
+SZ_TOC = 22  # 11pt
+SZ_FOOTER = 18  # 9pt
+SZ_TITLE = 64  # 32pt, white on the cover panel
+SZ_SUBTITLE = 36  # 18pt, below the panel
 
-RULE_COLOR = "8EAADB"
-HEADER_FILL = "D9E2F3"
-CODE_FILL = "F4F7FB"
-CODE_RULE = "C5D3E8"
+# Line spacing in 240ths of a line: 1.15 lines.
+LINE_BODY = 276
+
+RULE_COLOR = "000000"
+CODE_FILL = "F2F2F2"
+CODE_RULE = "000000"
+TOC_COLOR = "111111"
+FOOTER_COLOR = "4D4D4D"
+COVER_TEXT = "FFFFFF"
+COVER_ACCENT = "4472C4"
+COVER_NOTE = "404040"
+
+# Where the cover's text sits, measured from the top margin: the title over the
+# lower part of the panel, the rest below the panel's curved foot.
+COVER_INDENT = 680
+COVER_TITLE_BEFORE = 7160
+COVER_SUBTITLE_BEFORE = 2400
 
 FOOTER_NAME = "CHI_INTERCONNECT_RTL"
 
@@ -72,7 +102,7 @@ DOC_DEFAULTS = f"""<w:docDefaults>
     </w:rPrDefault>
     <w:pPrDefault>
       <w:pPr>
-        <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+        <w:spacing w:after="0" w:line="{LINE_BODY}" w:lineRule="auto"/>
       </w:pPr>
     </w:pPrDefault>
   </w:docDefaults>"""
@@ -85,7 +115,7 @@ STYLES = {
     <w:qFormat/>
     <w:pPr>
       <w:jc w:val="both"/>
-      <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+      <w:spacing w:after="0" w:line="{LINE_BODY}" w:lineRule="auto"/>
     </w:pPr>
   </w:style>""",
     "BodyText": f"""<w:style w:type="paragraph" w:styleId="BodyText">
@@ -94,7 +124,7 @@ STYLES = {
     <w:link w:val="BodyTextChar"/>
     <w:qFormat/>
     <w:pPr>
-      <w:spacing w:before="140" w:after="0"/>
+      <w:spacing w:before="120" w:after="0"/>
       <w:jc w:val="both"/>
     </w:pPr>
   </w:style>""",
@@ -135,7 +165,7 @@ STYLES = {
       <w:tabs>
         <w:tab w:val="center" w:pos="{CENTRE_TAB}"/>
       </w:tabs>
-      <w:spacing w:before="240" w:after="320" w:line="360" w:lineRule="auto"/>
+      <w:spacing w:before="0" w:after="360" w:line="360" w:lineRule="auto"/>
       <w:jc w:val="left"/>
       <w:outlineLvl w:val="0"/>
     </w:pPr>
@@ -223,16 +253,16 @@ STYLES = {
     <w:pPr>
       <w:pageBreakBefore/>
       <w:keepNext/>
-      <w:spacing w:before="0" w:after="240"/>
-      <w:jc w:val="left"/>
+      <w:spacing w:before="0" w:after="360"/>
+      <w:jc w:val="center"/>
       <w:outlineLvl w:val="9"/>
     </w:pPr>
     <w:rPr>
-      {FONTS}
+      <w:rFonts w:ascii="{TOC_FONT}" w:eastAsia="{TOC_FONT}" w:hAnsi="{TOC_FONT}" w:cs="{TOC_FONT}"/>
       <w:b/>
-      <w:color w:val="000000"/>
-      <w:sz w:val="{SZ_H1}"/>
-      <w:szCs w:val="{SZ_H1}"/>
+      <w:color w:val="{TOC_COLOR}"/>
+      <w:sz w:val="{SZ_TOC_TITLE}"/>
+      <w:szCs w:val="{SZ_TOC_TITLE}"/>
     </w:rPr>
   </w:style>""",
     "Title": f"""<w:style w:type="paragraph" w:styleId="Title">
@@ -242,14 +272,13 @@ STYLES = {
     <w:qFormat/>
     <w:pPr>
       <w:keepNext/>
-      <w:spacing w:before="3600" w:after="240"/>
-      <w:jc w:val="center"/>
+      <w:spacing w:before="{COVER_TITLE_BEFORE}" w:after="0" w:line="240" w:lineRule="auto"/>
+      <w:ind w:left="{COVER_INDENT}" w:right="{COVER_INDENT}"/>
+      <w:jc w:val="left"/>
     </w:pPr>
     <w:rPr>
-      {FONTS}
-      <w:b/>
-      <w:caps/>
-      <w:color w:val="000000"/>
+      <w:rFonts w:ascii="{COVER_FONT}" w:eastAsia="{COVER_FONT}" w:hAnsi="{COVER_FONT}" w:cs="{COVER_FONT}"/>
+      <w:color w:val="{COVER_TEXT}"/>
       <w:sz w:val="{SZ_TITLE}"/>
       <w:szCs w:val="{SZ_TITLE}"/>
     </w:rPr>
@@ -261,12 +290,14 @@ STYLES = {
     <w:qFormat/>
     <w:pPr>
       <w:keepNext/>
-      <w:spacing w:before="120" w:after="240"/>
-      <w:jc w:val="center"/>
+      <w:spacing w:before="{COVER_SUBTITLE_BEFORE}" w:after="200"/>
+      <w:ind w:left="{COVER_INDENT}"/>
+      <w:jc w:val="left"/>
     </w:pPr>
     <w:rPr>
-      {FONTS}
-      <w:color w:val="000000"/>
+      <w:rFonts w:ascii="{COVER_SUB_FONT}" w:eastAsia="{COVER_SUB_FONT}" w:hAnsi="{COVER_SUB_FONT}" w:cs="{COVER_SUB_FONT}"/>
+      <w:caps/>
+      <w:color w:val="{COVER_ACCENT}"/>
       <w:sz w:val="{SZ_SUBTITLE}"/>
       <w:szCs w:val="{SZ_SUBTITLE}"/>
     </w:rPr>
@@ -278,11 +309,13 @@ STYLES = {
     <w:qFormat/>
     <w:pPr>
       <w:keepNext/>
-      <w:spacing w:before="0" w:after="80"/>
-      <w:jc w:val="center"/>
+      <w:spacing w:before="0" w:after="60"/>
+      <w:ind w:left="{COVER_INDENT}"/>
+      <w:jc w:val="left"/>
     </w:pPr>
     <w:rPr>
       {FONTS}
+      <w:color w:val="{COVER_NOTE}"/>
       <w:sz w:val="{SZ_BODY}"/>
     </w:rPr>
   </w:style>""",
@@ -292,11 +325,13 @@ STYLES = {
     <w:next w:val="BodyText"/>
     <w:qFormat/>
     <w:pPr>
-      <w:spacing w:before="0" w:after="80"/>
-      <w:jc w:val="center"/>
+      <w:spacing w:before="0" w:after="60"/>
+      <w:ind w:left="{COVER_INDENT}"/>
+      <w:jc w:val="left"/>
     </w:pPr>
     <w:rPr>
       {FONTS}
+      <w:color w:val="{COVER_NOTE}"/>
       <w:sz w:val="{SZ_BODY}"/>
     </w:rPr>
   </w:style>""",
@@ -310,17 +345,21 @@ STYLES = {
     </w:pPr>
     <w:rPr>
       {FONTS}
-      <w:sz w:val="{SZ_SMALL}"/>
-      <w:szCs w:val="{SZ_SMALL}"/>
+      <w:sz w:val="{SZ_CAPTION}"/>
+      <w:szCs w:val="{SZ_CAPTION}"/>
     </w:rPr>
   </w:style>""",
-    # Captions sit below the object they name, so they must not be glued to the
-    # paragraph that follows them.
+    # A table's caption sits above it at the left and is kept with it.
     "TableCaption": """<w:style w:type="paragraph" w:customStyle="1" w:styleId="TableCaption">
     <w:name w:val="Table Caption"/>
     <w:basedOn w:val="Caption"/>
     <w:next w:val="BodyText"/>
     <w:qFormat/>
+    <w:pPr>
+      <w:keepNext/>
+      <w:spacing w:before="200" w:after="80"/>
+      <w:jc w:val="left"/>
+    </w:pPr>
   </w:style>""",
     "ImageCaption": """<w:style w:type="paragraph" w:customStyle="1" w:styleId="ImageCaption">
     <w:name w:val="Image Caption"/>
@@ -380,17 +419,17 @@ STYLES = {
     <w:tblPr>
       <w:tblInd w:w="0" w:type="dxa"/>
       <w:tblBorders>
-        <w:top w:val="single" w:sz="4" w:space="0" w:color="{RULE_COLOR}"/>
-        <w:left w:val="single" w:sz="4" w:space="0" w:color="{RULE_COLOR}"/>
-        <w:bottom w:val="single" w:sz="4" w:space="0" w:color="{RULE_COLOR}"/>
-        <w:right w:val="single" w:sz="4" w:space="0" w:color="{RULE_COLOR}"/>
-        <w:insideH w:val="single" w:sz="4" w:space="0" w:color="{RULE_COLOR}"/>
-        <w:insideV w:val="single" w:sz="4" w:space="0" w:color="{RULE_COLOR}"/>
+        <w:top w:val="single" w:sz="8" w:space="0" w:color="{RULE_COLOR}"/>
+        <w:left w:val="single" w:sz="8" w:space="0" w:color="{RULE_COLOR}"/>
+        <w:bottom w:val="single" w:sz="8" w:space="0" w:color="{RULE_COLOR}"/>
+        <w:right w:val="single" w:sz="8" w:space="0" w:color="{RULE_COLOR}"/>
+        <w:insideH w:val="single" w:sz="8" w:space="0" w:color="{RULE_COLOR}"/>
+        <w:insideV w:val="single" w:sz="8" w:space="0" w:color="{RULE_COLOR}"/>
       </w:tblBorders>
       <w:tblCellMar>
-        <w:top w:w="60" w:type="dxa"/>
+        <w:top w:w="80" w:type="dxa"/>
         <w:left w:w="108" w:type="dxa"/>
-        <w:bottom w:w="60" w:type="dxa"/>
+        <w:bottom w:w="80" w:type="dxa"/>
         <w:right w:w="108" w:type="dxa"/>
       </w:tblCellMar>
     </w:tblPr>
@@ -400,7 +439,6 @@ STYLES = {
         <w:bCs/>
       </w:rPr>
       <w:tcPr>
-        <w:shd w:val="clear" w:color="auto" w:fill="{HEADER_FILL}"/>
         <w:vAlign w:val="center"/>
       </w:tcPr>
     </w:tblStylePr>
@@ -425,12 +463,14 @@ EXTRA_STYLES = f"""<w:style w:type="character" w:customStyle="1" w:styleId="Chap
     <w:name w:val="footer"/>
     <w:basedOn w:val="Normal"/>
     <w:pPr>
-      <w:spacing w:before="0" w:after="0"/>
+      <w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>
       <w:jc w:val="center"/>
     </w:pPr>
     <w:rPr>
-      {FONTS}
-      <w:sz w:val="{SZ_BODY}"/>
+      <w:rFonts w:ascii="{FOOTER_FONT}" w:eastAsia="{FOOTER_FONT}" w:hAnsi="{FOOTER_FONT}" w:cs="{FOOTER_FONT}"/>
+      <w:color w:val="{FOOTER_COLOR}"/>
+      <w:sz w:val="{SZ_FOOTER}"/>
+      <w:szCs w:val="{SZ_FOOTER}"/>
     </w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Header">
@@ -441,6 +481,20 @@ EXTRA_STYLES = f"""<w:style w:type="character" w:customStyle="1" w:styleId="Chap
       <w:jc w:val="center"/>
     </w:pPr>
   </w:style>
+  <w:style w:type="paragraph" w:customStyle="1" w:styleId="TableText">
+    <w:name w:val="Table Text"/>
+    <w:basedOn w:val="Compact"/>
+    <w:qFormat/>
+    <w:pPr>
+      <w:spacing w:before="20" w:after="20" w:line="240" w:lineRule="auto"/>
+      <w:jc w:val="left"/>
+    </w:pPr>
+    <w:rPr>
+      {FONTS}
+      <w:sz w:val="{SZ_SMALL}"/>
+      <w:szCs w:val="{SZ_SMALL}"/>
+    </w:rPr>
+  </w:style>
   <w:style w:type="paragraph" w:customStyle="1" w:styleId="SourceCode">
     <w:name w:val="Source Code"/>
     <w:basedOn w:val="Normal"/>
@@ -448,10 +502,10 @@ EXTRA_STYLES = f"""<w:style w:type="character" w:customStyle="1" w:styleId="Chap
     <w:pPr>
       <w:keepLines/>
       <w:pBdr>
-        <w:top w:val="single" w:sz="4" w:space="6" w:color="{CODE_RULE}"/>
-        <w:left w:val="single" w:sz="4" w:space="6" w:color="{CODE_RULE}"/>
-        <w:bottom w:val="single" w:sz="4" w:space="6" w:color="{CODE_RULE}"/>
-        <w:right w:val="single" w:sz="4" w:space="6" w:color="{CODE_RULE}"/>
+        <w:top w:val="single" w:sz="6" w:space="6" w:color="{CODE_RULE}"/>
+        <w:left w:val="single" w:sz="6" w:space="6" w:color="{CODE_RULE}"/>
+        <w:bottom w:val="single" w:sz="6" w:space="6" w:color="{CODE_RULE}"/>
+        <w:right w:val="single" w:sz="6" w:space="6" w:color="{CODE_RULE}"/>
       </w:pBdr>
       <w:shd w:val="clear" w:color="auto" w:fill="{CODE_FILL}"/>
       <w:spacing w:before="160" w:after="160" w:line="240" w:lineRule="auto"/>
@@ -470,14 +524,18 @@ EXTRA_STYLES = f"""<w:style w:type="character" w:customStyle="1" w:styleId="Chap
     <w:next w:val="Normal"/>
     <w:pPr>
       <w:tabs>
-        <w:tab w:val="right" w:leader="underscore" w:pos="{PAGE_W - MARGIN_LEFT - MARGIN_RIGHT}"/>
+        <w:tab w:val="right" w:leader="dot" w:pos="{PAGE_W - MARGIN_LEFT - MARGIN_RIGHT}"/>
       </w:tabs>
-      <w:spacing w:before="60" w:after="0"/>
+      <w:spacing w:before="40" w:after="0" w:line="240" w:lineRule="auto"/>
       <w:jc w:val="left"/>
     </w:pPr>
     <w:rPr>
-      {FONTS}
-      <w:sz w:val="{SZ_BODY}"/>
+      <w:rFonts w:ascii="{TOC_FONT}" w:eastAsia="{TOC_FONT}" w:hAnsi="{TOC_FONT}" w:cs="{TOC_FONT}"/>
+      <w:b/>
+      <w:bCs/>
+      <w:color w:val="{TOC_COLOR}"/>
+      <w:sz w:val="{SZ_TOC}"/>
+      <w:szCs w:val="{SZ_TOC}"/>
     </w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="TOC2">
@@ -486,15 +544,17 @@ EXTRA_STYLES = f"""<w:style w:type="character" w:customStyle="1" w:styleId="Chap
     <w:next w:val="Normal"/>
     <w:pPr>
       <w:tabs>
-        <w:tab w:val="right" w:leader="underscore" w:pos="{PAGE_W - MARGIN_LEFT - MARGIN_RIGHT}"/>
+        <w:tab w:val="right" w:leader="dot" w:pos="{PAGE_W - MARGIN_LEFT - MARGIN_RIGHT}"/>
       </w:tabs>
-      <w:spacing w:before="20" w:after="0"/>
+      <w:spacing w:before="20" w:after="0" w:line="240" w:lineRule="auto"/>
       <w:ind w:left="283"/>
       <w:jc w:val="left"/>
     </w:pPr>
     <w:rPr>
-      {FONTS}
-      <w:sz w:val="{SZ_SMALL}"/>
+      <w:rFonts w:ascii="{TOC_FONT}" w:eastAsia="{TOC_FONT}" w:hAnsi="{TOC_FONT}" w:cs="{TOC_FONT}"/>
+      <w:color w:val="{TOC_COLOR}"/>
+      <w:sz w:val="{SZ_TOC}"/>
+      <w:szCs w:val="{SZ_TOC}"/>
     </w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="TOC3">
@@ -508,10 +568,12 @@ EXTRA_STYLES = f"""<w:style w:type="character" w:customStyle="1" w:styleId="Chap
 
 SECT_PR = f"""<w:sectPr>
       <w:footerReference w:type="default" r:id="rIdFooterChi"/>
+      <w:footerReference w:type="first" r:id="rIdFooterCover"/>
       <w:pgSz w:w="{PAGE_W}" w:h="{PAGE_H}"/>
       <w:pgMar w:top="{MARGIN_TOP}" w:right="{MARGIN_RIGHT}" w:bottom="{MARGIN_BOTTOM}"
                w:left="{MARGIN_LEFT}" w:header="709" w:footer="{FOOTER_DIST}" w:gutter="0"/>
       <w:cols w:space="708"/>
+      <w:titlePg/>
       <w:docGrid w:linePitch="360"/>
     </w:sectPr>"""
 
@@ -519,11 +581,11 @@ FOOTER_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:p>
-    <w:pPr><w:pStyle w:val="Footer"/></w:pPr>
+    <w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="center"/></w:pPr>
     <w:r><w:t>{FOOTER_NAME}</w:t></w:r>
   </w:p>
   <w:p>
-    <w:pPr><w:pStyle w:val="Footer"/></w:pPr>
+    <w:pPr><w:pStyle w:val="Footer"/><w:jc w:val="center"/></w:pPr>
     <w:r><w:fldChar w:fldCharType="begin"/></w:r>
     <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
     <w:r><w:fldChar w:fldCharType="separate"/></w:r>
@@ -534,6 +596,15 @@ FOOTER_XML = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 """
 
 FOOTER_REL_ID = "rIdFooterChi"
+
+COVER_FOOTER_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr></w:p>
+</w:ftr>
+"""
+
+COVER_FOOTER_REL_ID = "rIdFooterCover"
 
 
 def patch_styles(xml: str) -> str:
@@ -547,9 +618,12 @@ def patch_styles(xml: str) -> str:
 
 
 def patch_document(xml: str) -> str:
-    xml, count = re.subn(r"<w:sectPr\s*/>", SECT_PR, xml)
+    # Pandoc's default reference document ends its body with a sectPr: empty in
+    # older releases, carrying only a footnote setting in newer ones. Either is
+    # replaced whole.
+    xml, count = re.subn(r"<w:sectPr\s*/>|<w:sectPr>.*?</w:sectPr>", SECT_PR, xml, flags=re.S)
     if count != 1:
-        raise SystemExit(f"document: expected 1 empty sectPr, found {count}")
+        raise SystemExit(f"document: expected 1 sectPr, found {count}")
     return xml
 
 
@@ -558,6 +632,9 @@ def patch_rels(xml: str) -> str:
         f'<Relationship Id="{FOOTER_REL_ID}" '
         'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
         'relationships/footer" Target="footer1.xml"/>'
+        f'<Relationship Id="{COVER_FOOTER_REL_ID}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+        'relationships/footer" Target="footer2.xml"/>'
     )
     return xml.replace("</Relationships>", rel + "</Relationships>")
 
@@ -565,6 +642,8 @@ def patch_rels(xml: str) -> str:
 def patch_content_types(xml: str) -> str:
     override = (
         '<Override PartName="/word/footer1.xml" ContentType="application/'
+        'vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
+        '<Override PartName="/word/footer2.xml" ContentType="application/'
         'vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
     )
     return xml.replace("</Types>", override + "</Types>")
@@ -593,10 +672,13 @@ def main() -> int:
     scratch.write_bytes(base)
 
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Written beside the target and moved into place only when complete, so a
+    # failed run leaves the previous template untouched.
+    partial = out.with_suffix(".partial.docx")
     try:
         with zipfile.ZipFile(scratch) as src:
             names = src.namelist()
-            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+            with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as dst:
                 for name in names:
                     data = src.read(name)
                     patcher = PATCHERS.get(name)
@@ -604,12 +686,14 @@ def main() -> int:
                         data = patcher(data.decode("utf-8")).encode("utf-8")
                     dst.writestr(name, data)
                 dst.writestr("word/footer1.xml", FOOTER_XML)
+                dst.writestr("word/footer2.xml", COVER_FOOTER_XML)
+        missing = set(PATCHERS) - set(names)
+        if missing:
+            raise SystemExit(f"reference document is missing {sorted(missing)}")
+        partial.replace(out)
     finally:
         scratch.unlink(missing_ok=True)
-
-    missing = set(PATCHERS) - set(names)
-    if missing:
-        raise SystemExit(f"reference document is missing {sorted(missing)}")
+        partial.unlink(missing_ok=True)
     print(f"wrote {out} ({out.stat().st_size} bytes)")
     return 0
 

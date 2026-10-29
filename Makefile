@@ -27,6 +27,10 @@ DOC_SRC    = doc-src/chi_interconnect_design_spec.md
 DOC_OUT    = docs/chi_interconnect_design_spec.docx
 DOC_REF    = doc-src/reference.docx
 DOC_FILTER = doc-src/house_style.lua
+# Applied to the Word file after pandoc: the cover art behind the title page,
+# and the bullet glyphs, which a reference document cannot carry.
+DOC_FINISH = doc-src/finish_docx.py
+DOC_COVER  = doc-src/cover.png
 FIG_DIR    = doc-src/figures
 FIG_DOT    = $(wildcard $(FIG_DIR)/*.dot)
 FIG_PNG    = $(FIG_DOT:.dot=.png)
@@ -97,11 +101,12 @@ $(FIG_DIR)/%.png: $(FIG_DIR)/%.dot
 $(DOC_REF): doc-src/build_reference_docx.py
 	$(PYTHON) doc-src/build_reference_docx.py $@
 
-$(DOC_OUT): $(DOC_SRC) $(FIG_PNG) $(DOC_REF) $(DOC_FILTER)
+$(DOC_OUT): $(DOC_SRC) $(FIG_PNG) $(DOC_REF) $(DOC_FILTER) $(DOC_FINISH) $(DOC_COVER)
 	@mkdir -p docs
 	$(PANDOC) $(DOC_SRC) --toc --toc-depth=2 \
 	  --lua-filter=$(DOC_FILTER) --reference-doc=$(DOC_REF) \
 	  --resource-path=doc-src -o $@
+	$(PYTHON) $(DOC_FINISH) $@ $(DOC_COVER)
 
 clean:
 	rm -rf obj_dir xcelium.d xrun.history xrun.log

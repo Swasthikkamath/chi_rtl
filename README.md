@@ -66,14 +66,26 @@ the figures were rendered with Graphviz 16.1.0 compiled to WebAssembly (no
 native Graphviz was available), so a native `make figures` may route edges
 slightly differently. The `.docx` was rebuilt with pandoc 3.12.1.
 
-Word styling comes from `doc-src/reference.docx`, which
+Word styling follows the mbits AXI4 AVIP architecture document. It comes from
+`doc-src/reference.docx`, which
 [`doc-src/build_reference_docx.py`](doc-src/build_reference_docx.py) builds
-from pandoc's own template: A4, Times New Roman body text set justified,
-Courier New in boxed code blocks, thin table rules with a shaded header row,
-9pt captions below the table or figure they name, and a footer carrying the
-project name and page number. Chapter openings, capitalised chapter titles and
-caption placement are applied by
-[`doc-src/house_style.lua`](doc-src/house_style.lua). The Contents, List of
+from pandoc's own template:
+- A4 with one-inch margins.
+- Times New Roman body text at 12pt, justified, with 1.15 line spacing.
+- Contents and List titles in Georgia.
+- Tables ruled with a black one-point grid and a bold header row.
+- 10pt captions, above a table and below a figure.
+- Courier New in boxed code blocks.
+- A centred footer carrying the project name and page number.
+
+Chapter openings and capitalised chapter titles are applied by
+[`doc-src/house_style.lua`](doc-src/house_style.lua). After pandoc,
+[`doc-src/finish_docx.py`](doc-src/finish_docx.py) adds:
+- the cover, `doc-src/cover.png`, rendered at 150 dpi from
+  `doc-src/cover.svg` and committed;
+- the bullet glyphs;
+- the table rules, header weight and 9pt cell text as direct formatting, so
+  that viewers which ignore table styles still show them. The Contents, List of
 Tables and List of Figures are Word field codes, so they fill in the first
 time Word opens the file.
 
