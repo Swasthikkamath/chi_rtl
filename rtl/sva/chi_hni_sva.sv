@@ -153,6 +153,41 @@ module chi_hni_sva #(
     rspGrantSend);
 endmodule
 
+// The HN-I's own SAM maps every address to its SN-I and is never updated,
+// so a request outside the configuration window that the Requester-side SAM
+// did not refuse, in a legal PAS, always finds an SN-I.
+module chi_hni_decode_sva #(
+  parameter chi_cfg_pkg::chi_cfg_t CFG = chi_cfg_pkg::CHI_CFG_DEFAULT
+) (
+  input logic clk,
+  input logic resetn,
+  input logic reqInValid,
+  input logic dropRequest,
+  input logic configAccess,
+  input chi_pkg::chi_noc_err_e decodeErr,
+  input chi_pkg::chi_pas_e pas,
+  input logic sniKnown
+);
+  HNI_REQUEST_FINDS_SNI: assert property (
+    @(posedge clk) disable iff (!resetn)
+    (reqInValid && !dropRequest && !configAccess
+     && (decodeErr == chi_pkg::NOC_ERR_NONE) && chi_pkg::pasLegal(CFG, pas))
+      |-> sniKnown);
+endmodule
+
+bind chi_hni_top chi_hni_decode_sva #(
+  .CFG(CFG)
+) chi_hni_decode_assertions (
+  .clk(clk),
+  .resetn(resetn),
+  .reqInValid(reqInValid),
+  .dropRequest(dropRequest),
+  .configAccess(configAccess),
+  .decodeErr(reqInFlit.decodeErr),
+  .pas(incomingReq.pas),
+  .sniKnown(sniKnown)
+);
+
 bind chi_hni_top chi_hni_sva #(
   .CFG(CFG),
   .HN_NODE_ID(HN_NODE_ID),

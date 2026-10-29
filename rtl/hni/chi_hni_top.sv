@@ -219,6 +219,13 @@ module chi_hni_top #(
   logic [SUB_W-1:0] sniIndex;
   logic dropRequest;
 
+  // The HN-I's own SAM picks the SN-I behind an address. Its regions are
+  // elaborated by the top to send every address to this HN-I's SN-I, and they
+  // are never updated: the region table software edits belongs to the
+  // Requester-side SAMs, whose targets are Homes, not SN-Is, and whose
+  // refusals arrive here in decodeErr. Feeding those edits in would make the
+  // first rewritten region shadow the SN-I mapping.
+  //
   // The HN-I decode never hashes, but the SAM still takes a hash table. It is
   // passed as a typed one-entry array: an assignment pattern written against
   // the parameter would be sized by the SAM's default NUM_HNF before the
@@ -236,8 +243,8 @@ module chi_hni_top #(
     .pas(incomingReq.pas), .targetNodeId(samTarget),
     .matchedAttributes(samMatched), .unmappedError(samError),
     .pasError(samPasError),
-    .regionUpdate, .regionUpdateIndex, .regionUpdateBase,
-    .regionUpdateLimit, .regionUpdateTarget, .regionUpdateAttributes
+    .regionUpdate(1'b0), .regionUpdateIndex('0), .regionUpdateBase('0),
+    .regionUpdateLimit('0), .regionUpdateTarget('0), .regionUpdateAttributes('0)
   );
 
   always_comb begin

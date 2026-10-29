@@ -95,6 +95,9 @@ module chi_link_tx #(
     .state(linkState)
   );
 
+  // Byte parity is odd (IHI 0050H B9.3.1): each check bit makes the number
+  // of ones in its byte and itself odd, so it starts at 1 and takes the XOR
+  // of the byte. The last check bit covers only the bits the flit has.
   integer byteIndex;
   integer bitIndex;
   always_comb begin
@@ -104,6 +107,7 @@ module chi_link_tx #(
     FLITP = '0;
     if (PARITY_EN) begin
       for (byteIndex = 0; byteIndex < PARITY_W; byteIndex = byteIndex + 1) begin
+        FLITP[byteIndex] = 1'b1;
         for (bitIndex = 0; bitIndex < 8; bitIndex = bitIndex + 1) begin
           if (((byteIndex * 8) + bitIndex) < FLIT_W) begin
             FLITP[byteIndex] =

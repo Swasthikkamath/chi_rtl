@@ -98,7 +98,7 @@ packed flit field by itself is carriage, not implementation.
 | RAS: ECC, error records, interrupts | (implementation defined) | Implemented (`rasEn`) | SECDED on every directory way, every SLC way's tag and state, and every GPT cache entry, beside the SLC data SECDED of `slcEccEn`. Single-bit errors are corrected and written back; a double-bit error kills a directory way (its set is then snooped by broadcast), fences an SLC way, or drops a GPT cache entry. Each HN-F and the GPC keep an error record with counts, address and PAS, and raise an interrupt on an uncorrected error. Poisoned data stays poisoned. Section 9.16. |
 | Performance counters | (implementation defined) | Implemented (`pmuEn`) | Per HN-F: SLC hit, miss, eviction and fill; snoops sent; DCT, DMT and DWT eligible and taken; RetryAck; GPC faults; exclusive pass and fail; requests allocated. Per crosspoint and channel: flits injected and ejected. All 32-bit, readable over APB. Section 9.16. |
 | QoS regulator | (implementation defined) | Implemented (`qosRegEn`) | A token bucket per Request Node port on REQ injection: `qosRegRate` tokens per 256 cycles, up to `qosRegBurst`. Section 9.16. |
-| Flit parity | B9.3 | Implemented | `chi_link_tx` generates per-byte flit parity and `chi_link_rx` checks it. `parityEn` is accepted at the top and a mismatch raises `linkParityError` for that node. |
+| Flit parity | B9.3 | Implemented | `chi_link_tx` generates per-byte odd flit parity (B9.3.1) and `chi_link_rx` checks it. `parityEn` is accepted at the top and a mismatch raises `linkParityError` for that node. |
 | Control and credit signal checks | B9.3 | Not implemented | The `*CHK` scalars beside control, valid and credit signals are declared in the interface and driven to zero. Only the flit parity vectors are live. |
 | Link error reporting | B9 | Implemented | `linkUp`, `linkParityError` and `linkCreditError` are per-node-ordinal top-level outputs. Credit error covers receive-buffer overflow and L-Credit overflow or underflow. |
 | Four physically separated internal channels | B2.1, B13 | Implemented | REQ, RSP, SNP and DAT have separate ready/valid arrays, arbitration and topology storage throughout. |
@@ -1028,10 +1028,10 @@ Let `RW=reqFlitWidth(CFG)`, `SW=rspFlitWidth(CFG)`, `NW=snpFlitWidth(CFG)`,
 | `TXDATLCRDV` | 1 | IC | Node | All classes; DAT L-Credit pulse. |
 | `RXDATFLITPEND`, `RXDATFLITV`, `RXDATFLIT[DW-1:0]` | 1, 1, DW | IC | Node | All five classes. |
 | `RXDATLCRDV` | 1 | Node | IC | All classes; DAT L-Credit pulse. |
-| `TXREQFLITCHK`, `RXREQFLITCHK` | `PW(RW)` | Same side as the flit | Opposite side | Live per-byte flit parity when `parityEn` is set. |
-| `TXRSPFLITCHK`, `RXRSPFLITCHK` | `PW(SW)` | Same side as the flit | Opposite side | Live per-byte flit parity when `parityEn` is set. |
-| `TXSNPFLITCHK`, `RXSNPFLITCHK` | `PW(NW)` | Same side as the flit | Opposite side | Live per-byte flit parity when `parityEn` is set. |
-| `TXDATFLITCHK`, `RXDATFLITCHK` | `PW(DW)` | Same side as the flit | Opposite side | Live per-byte flit parity when `parityEn` is set. |
+| `TXREQFLITCHK`, `RXREQFLITCHK` | `PW(RW)` | Same side as the flit | Opposite side | Live per-byte odd flit parity when `parityEn` is set. |
+| `TXRSPFLITCHK`, `RXRSPFLITCHK` | `PW(SW)` | Same side as the flit | Opposite side | Live per-byte odd flit parity when `parityEn` is set. |
+| `TXSNPFLITCHK`, `RXSNPFLITCHK` | `PW(NW)` | Same side as the flit | Opposite side | Live per-byte odd flit parity when `parityEn` is set. |
+| `TXDATFLITCHK`, `RXDATFLITCHK` | `PW(DW)` | Same side as the flit | Opposite side | Live per-byte odd flit parity when `parityEn` is set. |
 | scalar `*CHK` beside control, valid and credit signals | 1 each | Same side as the checked base signal | Opposite side | Declared for all classes. Node-driven checks are ignored and IC-driven checks are zero. |
 
 : Table 4.1 `chi_if` signal groups, widths, drivers and applicability
@@ -2516,13 +2516,13 @@ or performance guarantees are supplied.
 
 | File | Assertions | Covers |
 |------------------------------------------------------------|--------------------|--------------------|
-| `chi_link_sva.sv` | `NO_SEND_WITHOUT_RUN_OR_CREDIT`, `NO_CREDIT_OVERFLOW`, `NO_CREDIT_UNDERFLOW`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_CREDITS_DRAINED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
-| `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_OUTSIDE_ACTIVE`, `LCRD_RETURN_NOT_DELIVERED`, `PEER_CREDITS_IN_RANGE`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
+| `chi_link_sva.sv` | `NO_SEND_WITHOUT_RUN_OR_CREDIT`, `NO_CREDIT_OVERFLOW`, `NO_CREDIT_UNDERFLOW`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_CREDITS_DRAINED`, `TX_PARITY_ODD` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
+| `chi_link_rx_sva.sv` | `BUFFER_COUNT_IN_RANGE`, `NO_BUFFER_OVERFLOW`, `NO_RECEIVE_OUTSIDE_ACTIVE`, `LCRD_RETURN_NOT_DELIVERED`, `PEER_CREDITS_IN_RANGE`, `STOP_TRANSITION_VALID`, `ACTIVATE_TRANSITION_VALID`, `RUN_TRANSITION_VALID`, `DEACTIVATE_TRANSITION_VALID`, `DEACTIVATION_BUFFER_DRAINED`, `PARITY_ERROR_OBSERVED`, `PARITY_ERROR_ONLY_WHEN_ENABLED`, `RX_PARITY_CHECK_ODD` | `LINK_ACTIVATION`, `LINK_DEACTIVATION` |
 | `chi_proto_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `REQ_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `DAT_STABLE_UNDER_BACKPRESSURE`, `DOWNSTREAM_OPCODE_LEGAL`, `DOWNSTREAM_FIELDS_LEGAL`, `COMPDATA_RESP_LEGAL`, `WRITE_COMPLETION_RESP_ZERO`, `PCRD_GRANT_FIELDS_UNUSED`, `RETRY_ACK_GRANT_MUTUALLY_EXCLUSIVE`, `NO_COMPLETION_WHILE_SNOOPING`, `RECEIPT_BEFORE_DATA` | `CONCURRENT_TRANSACTIONS`, `SAME_LOCATION_WAITER`, `RETRY_ACK_SENT`, `PCRD_GRANT_SENT`, `DIRECTORY_EVICTION`, `ATOMIC_EXECUTED`, `SNOOP_ISSUED`, `EXCLUSIVE_OKAY` |
 | `chi_mn_sva.sv` | `REQ_INPUT_STABLE_UNDER_BACKPRESSURE`, `SNP_STABLE_UNDER_BACKPRESSURE`, `RSP_STABLE_UNDER_BACKPRESSURE`, `MN_INPUTS_ALWAYS_READY`, `MN_SYNC_AFTER_OLDER_OPERATIONS`, `MN_ONE_SNOOP_OF_EACH_KIND_PER_TARGET`, `MN_NONSYNC_ENTRY_KEPT` | `MN_CONCURRENT_DVM`, `MN_SYNC_WAITS`, `MN_GPT_INVALIDATE`, `MN_RETRY_ACK_SENT` |
 | `chi_ordering_sva.sv` | pairwise `ONE_RUNNING_ENTRY_PER_LOCATION`, per-entry `START_ONLY_AFTER_OLDER_SAME_LOCATION`, `STARTED_IMPLIES_ACTIVE` | none |
 | `chi_hnf_ordering_sva.sv` | `ENDPOINT_ORDER_RESPECTED`, `ORDERED_REQUEST_STARTS_IN_ARRIVAL_ORDER` | none |
-| `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA`, `HNI_DOWNSTREAM_PAS_PRESERVED` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
+| `chi_hni_sva.sv` | `HNI_INPUTS_ALWAYS_READY`, `HNI_DOWNSTREAM_OWN_IDS`, `HNI_DOWNSTREAM_FIELDS_LEGAL`, `HNI_ENDPOINT_ORDER_RESPECTED`, `HNI_OWO_WRITE_AFTER_COMPACK`, `HNI_RECEIPT_BEFORE_DATA`, `HNI_DOWNSTREAM_PAS_PRESERVED`, `HNI_REQUEST_FINDS_SNI` | `HNI_CONCURRENT_TRANSACTIONS`, `HNI_SAME_LINE_WAITER`, `HNI_ENDPOINT_ORDER_WAIT`, `HNI_DOWNSTREAM_RETRY`, `HNI_OWO_WRITE`, `HNI_ATOMIC_FORWARDED`, `HNI_CONFIG_WRITE`, `HNI_RETRY_ACK_SENT`, `HNI_PCRD_GRANT_SENT` |
 | `chi_pas_sva.sv` | `SAM_PAS_REFUSAL_KEEPS_REGION`, `SAM_ACCEPTED_PAS_ALLOWED`, `SNOOP_PAS_PRESERVED`, `DOWNSTREAM_PAS_PRESERVED`, `SF_ONE_WAY_PER_LOCATION` | `SAM_PAS_REFUSED`, `PAS_ALIAS_EVICTED`, `POPA_FORWARDED`, `REFUSED_REQUEST_ALLOCATED` |
 | `chi_slc_sva.sv` | `SLC_ONE_WAY_PER_LOCATION`, `SLC_DIRTY_NEVER_DROPPED`, `SLC_NO_DEVICE_ALLOCATION`, `SLC_DISCARD_ONLY_AFTER_WRITEBACK` | `SLC_HIT`, `SLC_MISS_FILL`, `SLC_DIRTY_EVICTION`, `SLC_EVICTION_HOLDS_REQUEST`, `SLC_CMO_HITS_DIRTY`, `SLC_MAINTENANCE` |
 | `chi_gpc_sva.sv` | `GPC_FAILED_SENDS_NOTHING_DOWNSTREAM`, `GPC_FAILED_SNOOPS_NOTHING`, `GPC_FAILED_TOUCHES_NO_SLC`, `GPC_START_AFTER_CHECK`, `HNI_ERROR_SENDS_NOTHING_DOWNSTREAM`, `HNI_GPC_START_AFTER_CHECK` | `GPC_FAULT_AT_HNF`, `GPC_WAITING_FOR_WALK`, `HNI_GPC_WAITING_FOR_WALK` |
@@ -3130,9 +3130,9 @@ L-Credits for the buffer space (B14.2).
   with every accepted flit. The state machine may return to STOP only when
   the buffer is empty and `peerCredits` is zero (B14.6).
 - **Parity.** With `parityEn`, every byte of `FLIT` is checked against its
-  bit of the check field. A mismatch is registered as `parityError` for the
-  flit that carried it. The polarity used is even; Section 16.1 records that
-  B9.3.1 requires odd.
+  bit of the check field: the byte and its check bit must hold an odd number
+  of ones (B9.3.1). A mismatch is registered as `parityError` for the flit
+  that carried it.
 - **Overflow.** A flit that arrives while the buffer is full is a credit
   protocol violation by the peer. It is not stored and raises
   `bufferOverflow`.
@@ -3168,7 +3168,8 @@ saturating counter of `LCRD_DEPTH + 1` values:
 - **Holding off deactivation.** A requested deactivation waits until no
   flit is pending, so the protocol side drains first.
 - **Parity.** With `parityEn`, each bit of the check field is generated as
-  the XOR of its byte.
+  the inverse of the XOR of its byte, so the byte and its check bit hold an
+  odd number of ones (B9.3.1).
 - **Lanes.** The `REPL_CHANNELS` lane selection exists, but only one channel
   replica is supported (Section 16.1, item 1).
 
@@ -4023,10 +4024,13 @@ machinery:
 : Table 13.19 HN-I sub-blocks
 
 **Address decode.** The HN-I's own SAM is elaborated with every region
-covering the whole address space and targeting SN-I `i mod numSni`. It also
-re-checks the request's PAS. The target must be a known SN-I; otherwise the
-request completes with NDERR. Section 16.1 records a defect: this SAM also
-receives the global region updates.
+covering the whole address space and targeting SN-I `i mod numSni`. It is
+never updated. The region table that software edits belongs to the
+Requester-side SAMs, whose targets are Homes. Their refusals reach the HN-I
+in `decodeErr`, and the HN-I completes such a request with NDERR, as it does
+a request in a PAS the configuration does not support.
+`HNI_REQUEST_FINDS_SNI` checks that every other request outside the
+configuration window finds its SN-I.
 
 **Ordering.** Two rules decide when an entry may send its downstream
 request. Both use the age matrix of `chi_pos`:
@@ -4214,8 +4218,9 @@ the window is allowed to be busy with the commit itself
   `selectedRegionUpdate`. The code gives a CHI MMIO commit precedence, but
   the two cannot coincide: an APB commit needs every HN-I idle, and a CHI
   MMIO commit keeps its HN-I busy.
-- **Distribution.** Every Requester-side SAM and every HN-I's SAM receives
-  that update.
+- **Distribution.** Every Requester-side SAM receives that update. Every
+  HN-I also copies it into the staged registers its CHI MMIO window shows.
+  The HN-I's own SAM is not updated (Section 13.8).
 - **Assertion.** `REGION_UPDATE_WHEN_QUIESCENT` checks that an APB update
   lands only after a quiescent cycle.
 
@@ -4366,7 +4371,7 @@ entry.
 | 1 | software | It writes SELECT, then BASE, LIMIT, TARGET and ATTRIBUTES of the staged region, with the write rule of Section 7.1. |
 | 2 | `chi_cfg_slave` | A write to COMMIT with `PSTRB[0]` set is checked in its access phase. It needs quiescent traffic, a legal staged region and an existing target Home. Otherwise `PSLVERR` is returned and nothing changes. |
 | 3 | `chi_cfg_slave` | On success `regionUpdate` pulses for one cycle, registered, carrying the staged values. |
-| 4 | every SAM | Every Requester-side SAM, and every HN-I's SAM, writes the region at the next clock edge. Requests that arrive afterwards use the new map. |
+| 4 | every Requester-side SAM | Each writes the region at the next clock edge, and every HN-I copies it into its CHI MMIO staged registers. Requests that arrive afterwards use the new map. |
 
 : Table 14.8 Region commit over APB
 
@@ -4615,20 +4620,6 @@ them. A field read only by `chi_cfg_check` and by the packing functions of
     until something drives the design. The changes on
     `feature/chi-fabric-upgrade` have not even been linted or elaborated yet
     (Section 12.6).
-17. Flit parity is generated and checked as even parity: each check bit is
-    the XOR of its byte. B9.3.1 requires odd parity. The interconnect's own
-    links agree with themselves, but with `parityEn` a compliant node would
-    see a parity error on every flit the interconnect sends, and would cause
-    one on every flit it sends.
-18. Each HN-I's own SAM, whose regions are elaborated to send every address
-    to its SN-I, also receives the global region updates (Section 13.8). A
-    commit to region `k` overwrites the HN-I's region `k` with a
-    Requester-side region whose target is a Home, not an SN-I. The HN-I's
-    lookup is first match and its other regions cover the whole space, so
-    this matters when the overwritten region is the first one: after a
-    commit to region 0, HN-I accesses in region 0's new range find no SN-I
-    and complete with NDERR. On `main` the same wiring sent them to the
-    wrong node.
 
 ## 16.2 Implementation-defined decision log
 
@@ -4656,6 +4647,8 @@ them. A field read only by `chi_cfg_check` and by the packing functions of
 | Endpoint Order across Homes | A ticket per {Requester, SN-F}; one request of a stream runs at a time | Order holds across interleaved HN-Fs at the cost of pipelining. |
 | GPT walker and the SLC | Bypass by default; with `gpcSlcAlloc`, look up, and fill clean only when nothing touched or held the line from the lookup to the fill | The walker can be served from the SLC without ever leaving a stale line there. |
 | Configuration write rule | Root with RME by default, Secure as well with `apbRootWrites` 0; GPC always Root | RME-compliant by default, with a path for software that does not drive `PNSE`. |
+| Flit parity | Odd per byte, generated in `chi_link_tx` and checked in `chi_link_rx` (B9.3.1) | A compliant node's flits pass the check, and the interconnect's flits pass the node's. |
+| HN-I SN-I selection | Fixed per HN-I by its elaborated SAM, never updated; region refusals arrive in `decodeErr` | Editing the region table cannot change the SN-I an HN-I uses. |
 | Coherency exit | Snoops stop and unsent ones drop when `SYSCOREQ` falls; `SYSCOACK` waits for outstanding snoops and the directory walk | A node is never snooped outside coherency and leaves no directory state behind. |
 | Uncorrectable directory way | The way dies and its set is snooped by broadcast | Coherence is kept at the cost of snoop traffic for that set. |
 | RAS reporting | One record per HN-F and one for the GPC, in APB block 3, with a level interrupt | Software sees the first uncorrected error and the counts. |

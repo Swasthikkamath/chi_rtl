@@ -78,6 +78,8 @@ module chi_link_rx #(
     popFlit = internalValid && internalReady;
   end
 
+  // Byte parity is odd (IHI 0050H B9.3.1): a byte and its check bit must
+  // hold an odd number of ones between them, so their XOR must be 1.
   integer byteIndex;
   integer bitIndex;
   logic byteParity;
@@ -86,14 +88,13 @@ module chi_link_rx #(
     byteParity = 1'b0;
     if (PARITY_EN) begin
       for (byteIndex = 0; byteIndex < PARITY_W; byteIndex = byteIndex + 1) begin
-        byteParity = 1'b0;
+        byteParity = FLITP[byteIndex];
         for (bitIndex = 0; bitIndex < 8; bitIndex = bitIndex + 1) begin
           if (((byteIndex * 8) + bitIndex) < FLIT_W) begin
             byteParity = byteParity ^ FLIT[(byteIndex * 8) + bitIndex];
           end
         end
-        parityMismatch = parityMismatch
-                       || (byteParity != FLITP[byteIndex]);
+        parityMismatch = parityMismatch || !byteParity;
       end
     end
   end
