@@ -7,14 +7,14 @@ package chiSubordinateNodePkg;
   import uvm_pkg ::*;
   import chiGlobalsPkg::*;
 
-  `include"chiSubordinateNodeTx.sv"
-  `include"chiSubordinateNodeAgentConfig.sv"
-  `include"chiSubordinateNodeLocalProcessor.sv"
-  `include"chiSubordinateNodeSeqItemConverter.sv"
-  `include"chiSubordinateNodeCfgConverter.sv"
-  `include"chiSubordinateNodeSequencer.sv"
-  `include"chiSubordinateNodeDriverProxy.sv"
-  `include"chiSubordinateNodeMonitorProxy.sv"
-  `include"chiSubordinateNodeAgent.sv"    
+  `include "chiSubordinateNodeTx.sv"
+  `include "chiSubordinateNodeAgentConfig.sv"
+  `include "chiSubordinateNodeLocalProcessor.sv"
+  `include "chiSubordinateNodeSeqItemConverter.sv"
+  `include "chiSubordinateNodeCfgConverter.sv"
+  `include "chiSubordinateNodeSequencer.sv"
+  `include "chiSubordinateNodeDriverProxy.sv"
+  `include "chiSubordinateNodeMonitorProxy.sv"
+  `include "chiSubordinateNodeAgent.sv"    
 endpackage 
 `endif

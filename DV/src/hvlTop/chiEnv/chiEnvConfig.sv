@@ -7,6 +7,7 @@ class chiEnvConfig extends uvm_object;
   extern function new(string name="chiEnvConfig");
 
   int numOfRequestNode,numOfSubordinateNode;
+  bit hasScoreboard=1;
   chiRequestNodeAgentConfig chiRequestNodeAgentConfigHandle[];
   chiSubordinateNodeAgentConfig chiSubordinateNodeAgentConfigHandle[];
 endclass

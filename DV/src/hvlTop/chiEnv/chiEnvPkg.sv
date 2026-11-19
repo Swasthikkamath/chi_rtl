@@ -3,14 +3,15 @@
 
 
 package chiEnvPkg;
-  `include"uvm_macros.svh"
+  `include "uvm_macros.svh"
   import uvm_pkg::*;
   
   import chiRequestNodePkg::*;
   import chiSubordinateNodePkg::*;
-
-  `include"chiEnvConfig.sv"
-  `include"chiEnv.sv"
+  import chiGlobalsPkg::*;
+  `include "chiEnvConfig.sv"
+  `include "chiScoreboard.sv"
+  `include "chiEnv.sv"
 
 
 endpackage

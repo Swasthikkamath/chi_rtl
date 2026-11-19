@@ -2,7 +2,7 @@
 `define SUBORDINATENODESEQUENCEPKG
 
 package subordinateNodeSequencePkg;
-  `include"uvm_macros.svh"
+  `include "uvm_macros.svh"
   import uvm_pkg ::*;
   
   import chiSubordinateNodePkg::*;

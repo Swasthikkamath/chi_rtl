@@ -3,7 +3,7 @@
 
 class chiRequestNodeMonitorProxy extends uvm_monitor;
    `uvm_component_utils(chiRequestNodeMonitorProxy)
-  
+    uvm_analysis_port#(chiRequestNodeTx) chiRequestNodeAnalysisPort;   
    extern function new(string name="chiRequestNodeMonitorProxy",uvm_component parent=null);
    extern virtual function void build_phase(uvm_phase phase);
    extern virtual task run_phase(uvm_phase phase);
@@ -16,6 +16,7 @@ endfunction
 
 function void chiRequestNodeMonitorProxy::build_phase(uvm_phase phase);
   super.build_phase(phase);
+  chiRequestNodeAnalysisPort = new("chiRequestNodeAnalysisPort",this);
 endfunction 
 
 task chiRequestNodeMonitorProxy::run_phase(uvm_phase phase);

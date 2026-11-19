@@ -7,7 +7,7 @@ class chiEnv extends uvm_env;
   chiRequestNodeAgent chiRequestNodeAgentHandle[];
   chiSubordinateNodeAgent chiSubordinateNodeAgentHandle[];
   chiEnvConfig chiEnvConfigHandle;
-
+  chiScoreboard chiScoreboardHandle;
   extern function new(string name="chiEnv",uvm_component parent=null);
   extern virtual function void build_phase(uvm_phase phase);
   extern virtual function void connect_phase(uvm_phase phase);
@@ -18,9 +18,15 @@ endfunction
 
 function void chiEnv::build_phase(uvm_phase phase);
   super.build_phase(phase);
+  if(!(uvm_config_db#(chiEnvConfig)::get(this,"","chiEnvConfigHandle",chiEnvConfigHandle)  )) begin
+    `uvm_fatal("chiEnv","failed to get env config")
+  end 
   chiRequestNodeAgentHandle = new[chiEnvConfigHandle.numOfRequestNode];
   chiSubordinateNodeAgentHandle = new[chiEnvConfigHandle.numOfSubordinateNode];
-  
+ 
+  if(chiEnvConfigHandle.hasScoreboard==1) begin 
+    chiScoreboardHandle = chiScoreboard :: type_id :: create("chiScoreboardHandle",this);
+  end 
   foreach(chiRequestNodeAgentHandle[i]) begin 
      chiRequestNodeAgentHandle[i] = chiRequestNodeAgent :: type_id ::create($sformatf("chiRequestNodeAgentHandle[%d]",i),this);
      chiRequestNodeAgentHandle[i].requestNodeId = i;
@@ -33,6 +39,15 @@ function void chiEnv::build_phase(uvm_phase phase);
   end
 endfunction
 function void chiEnv::connect_phase(uvm_phase phase);
+  if(chiEnvConfigHandle.hasScoreboard==1) begin
+    for(int i=0;i<NUMOFREQUESTNODE;i++) begin
+      chiRequestNodeAgentHandle[i].chiRequestNodeAnalysisPort.connect(chiScoreboardHandle.chiRequestNodeAnalysisFifo[i].analysis_export);
+    end 
+
+    for(int i=0;i<NUMOFSUBORDINATENODE;i++) begin
+      chiSubordinateNodeAgentHandle[i].chiSubordinateNodeAnalysisPort.connect(chiScoreboardHandle.chiSubordinateNodeAnalysisFifo[i].analysis_export);
+    end 
+  end 
 endfunction 
 
 `endif 
