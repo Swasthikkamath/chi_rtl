@@ -1,16 +1,17 @@
-// CHI environment package.
+`ifndef CHIENVPKG_INCLUDED
+`define CHIENVPKG_INCLUDED
+
+
 package chiEnvPkg;
+  `include"uvm_macros.svh"
   import uvm_pkg::*;
-  import chi_cfg_pkg::*;
-  import chi_pkg::*;
-  import chiGlobalsPkg::*;
-  import chiRequesterPkg::*;
-  import chiSubordinatePkg::*;
+  
+  import chiRequestNodePkg::*;
+  import chiSubordinateNodePkg::*;
 
-  `include "uvm_macros.svh"
+  `include"chiEnvConfig.sv"
+  `include"chiEnv.sv"
 
-  `include "chiEnvConfig.sv"
-  `include "chiVirtualSequencer.sv"
-  `include "chiEnv.sv"
-  `include "chiVirtualSequences.sv"
+
 endpackage
+`endif
