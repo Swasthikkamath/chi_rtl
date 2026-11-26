@@ -6,6 +6,7 @@ class chiRequestNodeTx extends uvm_sequence_item;
  //define all the properties if needed use field macros for automation   
   extern function new(string name="chiRequestNodeTx");
 
+  bit[15:0]selectedAsid;
 endclass
 
 function chiRequestNodeTx :: new(string name="chiRequestNodeTx");

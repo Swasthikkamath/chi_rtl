@@ -31,7 +31,36 @@ function void chiBaseTest::setUpRequestNodeConfig();
   chiEnvConfigHandle.chiRequestNodeAgentConfigHandle = new[chiEnvConfigHandle.numOfRequestNode];
   foreach(chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i]) begin 
     chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i] = chiRequestNodeAgentConfig :: type_id :: create($sformatf("chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[%d]",i));
+  
+    if(!(uvm_config_db#(virtual chiRequestNodeDriverBfm) :: get(this,"",$sformatf("chiRequestNodeDriverBfmHandle[%d]",i),chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].chiRequestNodeDriverBfmHandle)))begin 
+      `uvm_fatal("uvm_test_top","failed to get driver bfm")
+    end 
+   
+    if(!(uvm_config_db#(virtual chiRequestNodeMonitorBfm) :: get(this,"",$sformatf("chiRequestNodeMonitorBfmHandle[%d]",i),chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].chiRequestNodeMonitorBfmHandle)))begin 
+      `uvm_fatal("uvm_test_top","failed to get Monitor bfm")
+    end 
     chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].is_active = uvm_active_passive_enum'(UVM_ACTIVE);
+  
+    chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle = new[chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].localProcessorCount];
+
+    foreach(chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j]) begin
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j] = requestNodeLocalProcessorConfig :: type_id :: create($sformatf("chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[%d].chiRequestNodeLocalProcessorConfigHandle[%d]",i,j));  
+      
+      std::randomize(chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].securityLevelHandle)with{chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].securityLevelHandle inside {[0:4]}};
+
+      //upate the base address for tlb based on asid 
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].gptCacheGranuleSize = 6; //64 byte (2^6)
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].gptNumOfWays=4;
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].gptCacheSize = FOUREKILOBYTES;
+
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].tlbCacheGranuleSize = 3;
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].tlbNumOfWays=4;
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].tlbCacheSize = FOUREKILOBYTES;
+
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].dataCacheGranuleSize = 6;
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].dataNumOfWays=4;
+      chiEnvConfigHandle.chiRequestNodeAgentConfigHandle[i].requestNodeLocalProcessorConfigHandle[j].gptCacheSize = FOUREKILOBYTES;
+    end 
   end 
  // here test engineer can set the required type and local processor count for
  // each agent config 
@@ -45,7 +74,11 @@ function void chiBaseTest::setUpSubordinateNodeConfig();
     chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[i] = chiSubordinateNodeAgentConfig :: type_id :: create($sformatf("chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[%d]",i));
     chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[i].is_active = uvm_active_passive_enum'(UVM_ACTIVE);
   end
- // here test engineer can set the required type and local processor count for
+  //update the tlb base address based on asid 
+  chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[0].mainMemory = 1;
+  chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[0].numOfTlbInfo = 2;
+  chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[0].addressRangeTlbInfoStructHandle = new[chiEnvConfigHandle.chiSubordinateNodeAgentConfigHandle[0].numOfTlbInfo]; //now user can specify the shareability(which address rannge is snoopable and which is not using this config property )
+ //below is basic level address map done if needed user can override this config before sequence is called or override in build phase 
  // each agent config
 endfunction
 

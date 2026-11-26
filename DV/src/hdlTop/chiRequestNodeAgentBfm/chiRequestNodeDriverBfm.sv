@@ -8,7 +8,14 @@ import chiGlobalsPkg::*;
 
 clocking chiRequestNodeCb@(posedge chiInterfaceHandle.clk);
   default input #1step output #1step;
+  //here heirarchicak mapping of signals must be done to clocking block variables 
 endclocking 
+
+task chiRequesterNodeWaitForReset();
+  do begin 
+    @(chiRequestNodeCb);
+  end while(chiRequestNodeCb.reset==1);
+endtask 
 
 task chiRequestNodeReqGetLcrd(output int resourcePlane);
   //drive activating signals + wait for lcrd 
