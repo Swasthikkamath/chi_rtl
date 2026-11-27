@@ -13,6 +13,9 @@ class chiRequestNodeAgentConfig extends uvm_object;
   virtual chiRequestNodeMonitorBfm chiRequestNodeMonitorBfmHandle;
   requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle[];
   
+  samConfigureStruct chiRequestNodeSamConfigHandle[];
+  int hnfNodeIdConfig[homeNodeTypeEnum][$] ='{HNF:'{8,1289,266,1035},HNI:'{140},MN:'{525}};
+  int rnNodeId;
   //below is cache config info we are keeping it same for all lps but if required this info can be passed on to lp config and have different cache size for each lps 
   //
 /*  bit[2:0] gptCacheGranuleSize;

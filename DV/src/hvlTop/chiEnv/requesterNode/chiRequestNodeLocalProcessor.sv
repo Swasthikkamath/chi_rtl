@@ -1,7 +1,7 @@
 `ifndef CHIREQUESTNODELOCALPROCESSOR_INCLUDED 
 `define CHIREQUESTNODELOCALPROCESSOR_INCLUDED 
 
-class chiRequestNodeLocalProcessor; //not a subclass as its just used to replicate a local processor in core 
+class chiRequestNodeLocalProcessor extends uvm_object; //not a subclass as its just used to replicate a local processor in core 
   `uvm_object_utils(chiRequestNodeLocalProcessor) 
 
   logic[MAXGRANULESIZE-1:0]dataCache[][];
@@ -25,16 +25,16 @@ class chiRequestNodeLocalProcessor; //not a subclass as its just used to replica
 
   extern function new(string name="chiRequestNodeLocalProcessor");
 
-  extern function void createCache(requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle);
+  extern function void createCache(requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit[1:0]cacheType);
 
-  extern function bit checkForBlock(longint physicalAddress,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle); //THIS ADDRESS SHOULD BE PHYSICAL ADDRESS REMEM THAT
-  extern function void writeToBlock(longint physicalAddress,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,output bit writeThrough,output bit[MAXGRANULESIZE]data,output bit evict,output bit[ADDRESSWIDTH-1:0]evictionAddress,bit allocate);
+  extern function bit checkForBlock(longint physicalAddress,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,chiRequestNodeTx requestNodeTxHandle); //THIS ADDRESS SHOULD BE PHYSICAL ADDRESS REMEM THAT
+  extern function void writeToBlock(longint physicalAddress,bit[MAXGRANULESIZE] data,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit writeThrough,bit[MAXGRANULESIZE-1:0] evictionData,bit evict,bit[ADDRESSWIDTH-1:0] evictionAddress,bit allocate);
   extern function void applyBootSetting(requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle);
-  extern function longint  translateVirtualAddress(requestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss);
-  extern function void checkForSecurityWorld(requestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss,bit securityWorldMatch);
+  extern function longint  translateVirtualAddress(chiRequestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss);
+  extern function void checkForSecurityWorld(longint physicalAddress,chiRequestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss,bit securityWorldMatch);
 endclass
 
-function void chiRequestNodeLocalProcessor :: checkForSecurityWorld(longint physicalAddress,requestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss,bit securityWorldMatch);
+function void chiRequestNodeLocalProcessor :: checkForSecurityWorld(longint physicalAddress,chiRequestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss,bit securityWorldMatch);
   int minIndex = requestNodeLocalProcessorConfigHandle.dataCacheGranuleSize;
   int setStartingIndex = minIndex;
   int setEndingIndex = setStartingIndex + ($size(gptCache[0],1))-1;
@@ -69,7 +69,7 @@ function void chiRequestNodeLocalProcessor :: checkForSecurityWorld(longint phys
   end 
 
 endfunction
-function longint  chiRequestNodeLocalProcessor :: translateVirtualAddress(requestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss);
+function longint  chiRequestNodeLocalProcessor :: translateVirtualAddress(chiRequestNodeTx requestNodeTxHandle,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit hitOrMiss);
   int minIndex = requestNodeLocalProcessorConfigHandle.dataCacheGranuleSize;
   int setStartingIndex = minIndex;
   int setEndingIndex = setStartingIndex + ($size(tlbCache[0],1))-1;
@@ -107,7 +107,7 @@ function void chiRequestNodeLocalProcessor::applyBootSetting(requestNodeLocalPro
   scrEL3[62] = requestNodeLocalProcessorConfigHandle.securityLevelHandle[1];
   scrEL3[0] = requestNodeLocalProcessorConfigHandle.securityLevelHandle[0];
   spsrEL3 = requestNodeLocalProcessorConfigHandle.exceptionLevelHandle; 
-  mair = 64'h 0000_0000_4F44_FF04;
+  mair = MAIR;;
   tlbCache.delete();
   dataCache.delete();
   gptCache.delete();
@@ -153,7 +153,7 @@ function void chiRequestNodeLocalProcessor :: createCache(requestNodeLocalProces
   end 
   else begin //creation of data cache 
     setSize = ( requestNodeLocalProcessorConfigHandle.dataCacheSize/(requestNodeLocalProcessorConfigHandle.dataNumOfWays *(2**( requestNodeLocalProcessorConfigHandle.dataCacheGranuleSize))));
-    dataCachegptCache = new[setSize];
+    dataCache = new[setSize];
     dataTagCache = new[setSize];
     dataValid = new[setSize];
     dirtyValid = new[setSize];
@@ -167,7 +167,7 @@ function void chiRequestNodeLocalProcessor :: createCache(requestNodeLocalProces
   end 
 endfunction 
 
-function bit chiRequestNodeLocalProcessor :: checkForBlock(longint physicalAddress,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,requestNodeTx requestNodeTxHandle); //keep write read sep as eviction and all should be taken care of so preferably sep function is better 
+function bit chiRequestNodeLocalProcessor :: checkForBlock(longint physicalAddress,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,chiRequestNodeTx requestNodeTxHandle); //keep write read sep as eviction and all should be taken care of so preferably sep function is better 
   int minIndex = requestNodeLocalProcessorConfigHandle.dataCacheGranuleSize;
   int setStartingIndex = minIndex;
   int setEndingIndex = setStartingIndex + ($size(dataCache[0],1))-1;
@@ -198,7 +198,7 @@ function bit chiRequestNodeLocalProcessor :: checkForBlock(longint physicalAddre
   return 0;
 endfunction 
 
-function void  chiRequestNodeLocalProcessor :: writeToBlock (longint physicalAddress,bit[MAXGRANULESIZE]data,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit writeThrough,bit[MAXGRANULESIZE]data,bit evict,bit[ADDRESSWIDTH]evictionAddress,bit allocate);
+function void  chiRequestNodeLocalProcessor :: writeToBlock (longint physicalAddress,bit[MAXGRANULESIZE-1:0]data,requestNodeLocalProcessorConfig requestNodeLocalProcessorConfigHandle,bit writeThrough,bit[MAXGRANULESIZE-1:0] evictionData,bit evict,bit[ADDRESSWIDTH-1:0] evictionAddress,bit allocate);
   int minIndex = requestNodeLocalProcessorConfigHandle.dataCacheGranuleSize;
   int setStartingIndex = minIndex;
   int setEndingIndex = setStartingIndex + ($size(dataCache[0],1))-1;
@@ -236,7 +236,7 @@ function void  chiRequestNodeLocalProcessor :: writeToBlock (longint physicalAdd
       if(dirtyValid[set][way] == 1)begin 
         //writ to this and evict the data 
         int dataOffset;
-        for(int i=0 ; i < (requestNodeLocalProcessorConfigHandle.dataNumOfWays) i ++ )begin 
+        for(int i=0 ; i < (requestNodeLocalProcessorConfigHandle.dataNumOfWays) ;i++ )begin 
           dataOffset[i] = physicalAddress[i];
         end  
         //befpre write we have to see the policy followed too 

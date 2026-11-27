@@ -8,6 +8,7 @@ import chiGlobalsPkg::*;
 
 clocking chiRequestNodeCb@(posedge chiInterfaceHandle.clk);
   default input #1step output #1step;
+  input reset = chiInterfaceHandle.reset;
   //here heirarchicak mapping of signals must be done to clocking block variables 
 endclocking 
 

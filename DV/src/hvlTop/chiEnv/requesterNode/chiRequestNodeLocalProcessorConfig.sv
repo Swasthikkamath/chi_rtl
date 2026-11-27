@@ -20,7 +20,7 @@ class requestNodeLocalProcessorConfig extends uvm_object;
  
   rand securityLevelEnum securityLevelHandle;
   
-  exceptionLevelEnum exceptionLevelEnumHandle = guestOs;
+  exceptionLevelEnum exceptionLevelHandle = guestOs;
 
   longint programBasedBaseAddress[bit[15:0]];
 
